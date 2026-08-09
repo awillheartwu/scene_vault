@@ -11,6 +11,8 @@ const { api } = vi.hoisted(() => ({
     readThumbnail: vi.fn(),
     readImage: vi.fn(),
     retry: vi.fn(),
+    listDebugLogs: vi.fn(),
+    getLogStatus: vi.fn(),
   },
 }));
 
@@ -85,6 +87,37 @@ beforeEach(() => {
   api.readThumbnail.mockResolvedValue(new ArrayBuffer(4));
   api.readImage.mockResolvedValue(new ArrayBuffer(4));
   api.listHistory.mockResolvedValue({ entries: [entry("1", "2026-08-01T00:00:00Z")], total: 1 });
+  api.listDebugLogs.mockResolvedValue({ records: [], matchedCount: 0, truncated: false });
+  api.getLogStatus.mockResolvedValue({
+    directory: "C:\\Logs\\Scene Vault",
+    fileCount: 1,
+    totalBytes: 512,
+    retentionDays: 14,
+    maxFileBytes: 5 * 1024 * 1024,
+    maxArchivedFiles: 20,
+  });
+});
+
+describe("History content tabs", () => {
+  it("switches from screenshot history to the inline debug log panel", async () => {
+    const wrapper = mount(History, { attachTo: document.body });
+    try {
+      await flushPromises();
+      expect(wrapper.find(".history-workspace").exists()).toBe(true);
+
+      const logTab = wrapper.findAll('[data-slot="tabs-trigger"]')
+        .find((tab) => tab.text().includes("调试日志"));
+      expect(logTab).toBeDefined();
+      await logTab?.trigger("mousedown", { button: 0, ctrlKey: false });
+      await flushPromises();
+
+      expect(wrapper.find(".debug-log-panel").exists()).toBe(true);
+      expect(wrapper.find(".history-workspace").exists()).toBe(false);
+      expect(api.listDebugLogs).toHaveBeenCalledOnce();
+    } finally {
+      wrapper.unmount();
+    }
+  });
 });
 
 describe("History pagination", () => {

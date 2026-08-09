@@ -21,7 +21,7 @@ vi.mock("@/lib/toast", () => ({
   toast: { success: toastSuccess },
 }));
 
-import DebugLogDialog from "./DebugLogDialog.vue";
+import DebugLogPanel from "./DebugLogPanel.vue";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -60,9 +60,9 @@ beforeEach(() => {
   });
 });
 
-describe("DebugLogDialog", () => {
+describe("DebugLogPanel", () => {
   it("loads records and applies time, level, and module filters", async () => {
-    const wrapper = mount(DebugLogDialog);
+    const wrapper = mount(DebugLogPanel, { attachTo: document.body });
     try {
       await flushPromises();
       expect(document.body.textContent).toContain("processing failed");
@@ -91,7 +91,7 @@ describe("DebugLogDialog", () => {
   });
 
   it("copies a bounded diagnostic summary and runs policy cleanup", async () => {
-    const wrapper = mount(DebugLogDialog);
+    const wrapper = mount(DebugLogPanel, { attachTo: document.body });
     try {
       await flushPromises();
       document.body.querySelector<HTMLButtonElement>(".copy-diagnostics")?.click();
@@ -99,7 +99,7 @@ describe("DebugLogDialog", () => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith("diagnostic summary");
       expect(toastSuccess).toHaveBeenCalledWith("诊断信息已复制，可直接粘贴给 Agent");
 
-      const cleanupButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>(".log-dialog-footer button"))
+      const cleanupButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>(".log-panel-footer button"))
         .find((button) => button.textContent?.includes("按策略清理"));
       cleanupButton?.click();
       await flushPromises();
@@ -114,7 +114,7 @@ describe("DebugLogDialog", () => {
     vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error("denied"));
     const execCommand = vi.fn().mockReturnValue(true);
     Object.assign(document, { execCommand });
-    const wrapper = mount(DebugLogDialog);
+    const wrapper = mount(DebugLogPanel, { attachTo: document.body });
     try {
       await flushPromises();
       expect(document.body.textContent).toContain("可能包含本地路径");
