@@ -1,0 +1,24 @@
+# Normalize every text file to LF in the repository and keep UTF-8.
+# Batch scripts stay CRLF on Windows checkouts because cmd.exe requires it.
+* text=auto
+*.md text eol=lf
+*.rs text eol=lf
+*.py text eol=lf
+*.vue text eol=lf
+*.ts text eol=lf
+*.sql text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=crlf
+*.sh text eol=lf
+
+# Binary assets stay untouched.
+*.png binary
+*.ico binary
+*.icns binary
+*.onnx binary
+*.ttf binary
+*.otf binary

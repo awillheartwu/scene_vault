@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scene-vault-ai"
+version = "0.4.0"
+description = "Optional local AI engine for Scene Vault"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Scene Vault contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.14",
+    "ruff>=0.9",
+]
+packaging = [
+    "pyinstaller>=6.11",
+]
+vision = [
+    "numpy>=1.26",
+    # OpenCV 5.0's new graph engine returns non-deterministic SFace
+    # features (sometimes a zeroed-input "black face" vector, which made
+    # unrelated captures share an identical feature). Pin to the 4.x line
+    # until the 5.x FaceRecognizerSF is stable.
+    "opencv-contrib-python-headless>=4.10,<5",
+    "pillow>=11.0",
+]
+
+[project.scripts]
+scene-vault-ai = "scene_vault_ai.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["cv2", "numpy", "PIL", "PIL.*"]
+ignore_missing_imports = true
