@@ -30,6 +30,7 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 import {
   Dialog,
   DialogContent,
@@ -55,6 +56,8 @@ import {
   type VerificationResult,
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
+
+const { isWideLayout } = useAdaptiveLayout();
 
 const projects = ref<Project[]>([]);
 const characters = ref<Character[]>([]);
@@ -795,6 +798,7 @@ onBeforeUnmount(() => {
               <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
             </div>
             <button
+              v-if="!isWideLayout"
               type="button"
               class="secondary-action label-panel-trigger"
               :aria-expanded="labelPanelOpen"
@@ -810,7 +814,7 @@ onBeforeUnmount(() => {
           <div v-else class="preview-empty">
             <ImageOff :size="44" />
             <strong>{{ activeSession ? "等待游戏产生新截图" : "开始会话后自动发现截图" }}</strong>
-            <span>继续在游戏中使用 H 隐藏界面、S 截图</span>
+            <span>继续使用你习惯的截图方式，新截图会自动出现</span>
           </div>
           <div v-if="selectedItem?.status === 'failed'" class="failure-overlay">
             <AlertCircle :size="20" />

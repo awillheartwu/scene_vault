@@ -567,7 +567,7 @@ onBeforeUnmount(() => {
       <CheckCircle2 :size="30" />
       <strong>当前没有待分类截图</strong>
       <span>
-        游戏内截图后会自动出现
+        新截图会自动出现
         <template v-if="autoCloseEmpty">· 3 秒后自动关闭</template>
       </span>
     </div>

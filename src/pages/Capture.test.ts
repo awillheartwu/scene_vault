@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { eventHandlers, api } = vi.hoisted(() => ({
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
@@ -158,8 +158,59 @@ beforeEach(() => {
   api.retry.mockResolvedValue(item("archive_pending"));
 });
 
+function setWideLayout(matches: boolean) {
+  window.matchMedia = vi.fn(
+    (query: string): MediaQueryList =>
+      ({
+        matches,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as MediaQueryList,
+  ) as unknown as typeof window.matchMedia;
+}
+
+describe("Capture adaptive label panel trigger", () => {
+  afterEach(() => {
+    delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
+  });
+
+  it("uses the static classification panel without a redundant trigger on wide layouts", async () => {
+    setWideLayout(true);
+    const wrapper = mount(Capture);
+    try {
+      await flushPromises();
+      expect(wrapper.find(".responsive-detail-panel.is-static").exists()).toBe(true);
+      expect(wrapper.find(".label-panel-trigger").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("shows a working classification trigger and drawer on narrow layouts", async () => {
+    setWideLayout(false);
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const trigger = wrapper.get(".label-panel-trigger");
+      expect(trigger.attributes("aria-expanded")).toBe("false");
+      await trigger.trigger("click");
+      await flushPromises();
+      expect(document.body.querySelector(".responsive-detail-panel.is-drawer")).not.toBeNull();
+      expect(trigger.attributes("aria-expanded")).toBe("true");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+});
+
 describe("Capture quick-label flow", () => {
   it("renders the three-stage session rail and collapses its conditional tools", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([]);
     api.listSourceDirectories.mockResolvedValue([
       { id: "dir-1", projectId: project.id, directory: "D:\\Game", enabled: true, createdAt: "" },
     ]);
@@ -178,6 +229,7 @@ describe("Capture quick-label flow", () => {
     expect(wrapper.get(".session-tools-toggle").attributes("aria-expanded")).toBe("false");
     expect(wrapper.get(".session-tools-actions").attributes("style")).toContain("display: none");
     expect(wrapper.text()).toContain("展开会话工具");
+    expect(wrapper.text()).toContain("继续使用你习惯的截图方式，新截图会自动出现");
     wrapper.unmount();
   });
 

@@ -629,6 +629,87 @@ async fn popup_context_returns_all_unclassified_items_oldest_first() {
 }
 
 #[tokio::test]
+async fn popup_context_only_returns_items_from_the_active_project() {
+    let pool = db::test_pool().await;
+    let old_project = project(&pool).await;
+    let (_old_workspace, old_session, old_source) =
+        session_with_source(&pool, &old_project.id).await;
+    let old_path = old_source.join("old-project.png");
+    tokio::fs::write(&old_path, b"old project")
+        .await
+        .expect("old project image");
+    let old_item = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: old_session.id,
+            source_path: path_to_string(&old_path),
+        },
+    )
+    .await
+    .expect("old project capture");
+
+    let active_project = project(&pool).await;
+    let (_active_workspace, active_session, active_source) =
+        session_with_source(&pool, &active_project.id).await;
+    let active_path = active_source.join("active-project.png");
+    tokio::fs::write(&active_path, b"active project")
+        .await
+        .expect("active project image");
+    let active_item = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: active_session.id,
+            source_path: path_to_string(&active_path),
+        },
+    )
+    .await
+    .expect("active project capture");
+
+    let context = classify_popup_context(&pool).await.expect("popup context");
+    assert_eq!(
+        context.project_id.as_deref(),
+        Some(active_project.id.as_str())
+    );
+    assert_eq!(context.items.len(), 1);
+    assert_eq!(context.items[0].id, active_item.id);
+    assert_ne!(context.items[0].id, old_item.id);
+}
+
+#[tokio::test]
+async fn popup_context_is_empty_without_an_active_session() {
+    let pool = db::test_pool().await;
+    let project = project(&pool).await;
+    let (_workspace, session, source) = session_with_source(&pool, &project.id).await;
+    let path = source.join("waiting.png");
+    tokio::fs::write(&path, b"waiting")
+        .await
+        .expect("waiting image");
+    register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id.clone(),
+            source_path: path_to_string(&path),
+        },
+    )
+    .await
+    .expect("waiting capture");
+    end_session(
+        &pool,
+        EndCaptureSessionInput {
+            session_id: session.id,
+            status: Some("completed".to_owned()),
+        },
+    )
+    .await
+    .expect("end session");
+
+    let context = classify_popup_context(&pool).await.expect("popup context");
+    assert!(context.items.is_empty());
+    assert!(context.project_id.is_none());
+    assert!(context.characters.is_empty());
+}
+
+#[tokio::test]
 async fn registration_enforces_session_directory_type_stability_and_lifecycle() {
     let pool = db::test_pool().await;
     let project = project(&pool).await;

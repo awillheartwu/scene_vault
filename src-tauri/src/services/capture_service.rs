@@ -396,6 +396,30 @@ pub async fn list_items(pool: &SqlitePool, session_id: &str) -> Result<Vec<Captu
 }
 
 pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupContext, AppError> {
+    // A shortcut popup belongs to the project currently being monitored.
+    // Starting another project ends the previous active session, so this is
+    // the single authoritative project context for the global shortcut.
+    let project: Option<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT project.id, project.name
+        FROM capture_sessions session
+        JOIN projects project ON project.id = session.project_id
+        WHERE session.status = 'active'
+        ORDER BY session.started_at DESC, session.created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some((project_id, project_name)) = project else {
+        return Ok(ClassifyPopupContext {
+            items: Vec::new(),
+            project_id: None,
+            project_name: None,
+            characters: Vec::new(),
+        });
+    };
+
     let items = sqlx::query_as::<_, CaptureItem>(
         r#"
         SELECT
@@ -411,58 +435,31 @@ pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupCo
             item.created_at, item.updated_at
         FROM capture_items item
         WHERE item.status = 'awaiting_label'
+          AND item.project_id = ?
         ORDER BY item.captured_at ASC, item.created_at ASC
         LIMIT 50
         "#,
     )
+    .bind(&project_id)
     .fetch_all(pool)
     .await?;
 
-    let Some(item) = items.first() else {
-        return Ok(ClassifyPopupContext {
-            items: Vec::new(),
-            project_id: None,
-            project_name: None,
-            characters: Vec::new(),
-        });
-    };
-
-    let project: Option<(String, String)> = sqlx::query_as(
+    let characters: Vec<Character> = sqlx::query_as::<_, Character>(
         r#"
-        SELECT project.id, project.name
-        FROM capture_sessions session
-        JOIN projects project ON project.id = session.project_id
-        WHERE session.id = ?
-        "#,
-    )
-    .bind(&item.session_id)
-    .fetch_optional(pool)
-    .await?;
-    let (project_id, project_name) = match project {
-        Some((id, name)) => (Some(id), Some(name)),
-        None => (None, None),
-    };
-
-    let characters: Vec<Character> = if let Some(project_id) = project_id.as_deref() {
-        sqlx::query_as::<_, Character>(
-            r#"
             SELECT id, project_id, name, aliases_json, avatar_asset_id, created_at, updated_at
             FROM characters
             WHERE project_id = ?
             ORDER BY name COLLATE NOCASE ASC
             "#,
-        )
-        .bind(project_id)
-        .fetch_all(pool)
-        .await?
-    } else {
-        Vec::new()
-    };
+    )
+    .bind(&project_id)
+    .fetch_all(pool)
+    .await?;
 
     Ok(ClassifyPopupContext {
         items,
-        project_id,
-        project_name,
+        project_id: Some(project_id),
+        project_name: Some(project_name),
         characters,
     })
 }

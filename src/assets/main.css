@@ -309,7 +309,7 @@
   .capture-stage { display: grid; min-width: 0; min-height: 0; grid-template-rows: 48px minmax(240px, 1fr) auto; padding: 0 20px; border-right: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); }
   .stage-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .stage-heading-actions { display: flex; min-width: 0; align-items: center; gap: 8px; }
-  .label-panel-trigger { display: none; flex: none; }
+  .label-panel-trigger { flex: none; }
   .stage-heading h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
   .status-pill { padding: 4px 10px; border-radius: 99px; background: var(--muted); color: var(--muted-foreground); font-size: 11px; font-weight: 500; }
   .status-pill[data-status="awaiting_label"] { background: color-mix(in srgb, var(--warn) 22%, var(--card)); color: var(--warn); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--warn) 18%, transparent); }
@@ -449,7 +449,6 @@
   @media (max-width: 1439px) {
     .capture-workspace { grid-template-columns: minmax(0, 1fr); }
     .capture-stage { border-right: 0; }
-    .label-panel-trigger { display: inline-flex; }
     .stage-heading .file-meta { max-width: 360px; }
   }
   @media (prefers-reduced-motion: reduce) {
