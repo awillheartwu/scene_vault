@@ -5,8 +5,10 @@ import {
   AlertCircle,
   Archive,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   CircleStop,
   FolderOpen,
   FolderPlus,
@@ -76,6 +78,7 @@ const deferredImportCount = ref(0);
 const showProjectForm = ref(false);
 const renameTarget = ref<Project | null>(null);
 const labelPanelOpen = ref(false);
+const sessionToolsOpen = ref(true);
 const showCharacterForm = ref(false);
 const newProjectName = ref("");
 const newCharacterName = ref("");
@@ -645,104 +648,123 @@ onBeforeUnmount(() => {
 <template>
   <section class="capture-page" aria-labelledby="capture-title">
     <header class="capture-toolbar">
-      <div class="project-switcher">
-        <span class="eyebrow">当前项目</span>
-        <div class="flex items-center gap-2">
-          <select v-model="projectId" aria-label="当前项目" class="capture-select">
-            <option value="" disabled>选择项目</option>
-            <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
-          </select>
-          <button class="icon-button" type="button" aria-label="新建项目" @click="showProjectForm = !showProjectForm">
-            <Plus :size="18" />
-          </button>
-          <button
-            class="icon-button"
-            type="button"
-            :disabled="!projectId"
-            aria-label="重命名项目"
-            title="重命名项目"
-            @click="renameTarget = projects.find((project) => project.id === projectId) ?? null"
-          >
-            <Pencil :size="18" />
-          </button>
-        </div>
-        <form v-if="showProjectForm" class="inline-create" @submit.prevent="createProject">
-          <input v-model="newProjectName" autofocus aria-label="项目名称" placeholder="项目名称" />
-          <button type="submit">创建</button>
-        </form>
-      </div>
+      <div class="session-rail">
+        <section class="session-stage project-stage" aria-labelledby="session-project-title">
+          <div class="session-stage-heading">
+            <span class="session-step" aria-hidden="true">1</span>
+            <h2 id="session-project-title">选择项目</h2>
+            <Check v-if="projectId" class="session-stage-check" :size="16" aria-label="已选择项目" />
+          </div>
+          <div class="project-controls">
+            <select v-model="projectId" aria-label="当前项目" class="capture-select">
+              <option value="" disabled>选择项目</option>
+              <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
+            </select>
+            <button class="icon-button" type="button" aria-label="新建项目" @click="showProjectForm = !showProjectForm">
+              <Plus :size="18" />
+            </button>
+            <button
+              class="icon-button"
+              type="button"
+              :disabled="!projectId"
+              aria-label="重命名项目"
+              title="重命名项目"
+              @click="renameTarget = projects.find((project) => project.id === projectId) ?? null"
+            >
+              <Pencil :size="18" />
+            </button>
+          </div>
+          <form v-if="showProjectForm" class="inline-create" @submit.prevent="createProject">
+            <input v-model="newProjectName" autofocus aria-label="项目名称" placeholder="项目名称" />
+            <button type="submit">创建</button>
+          </form>
+        </section>
 
-      <div class="path-summary source-summary">
-        <div>
-          <span class="eyebrow">来源文件夹（多目录）</span>
-          <ul class="source-dir-list">
+        <section class="session-stage sources-stage" aria-labelledby="session-sources-title">
+          <div class="session-stage-heading">
+            <span class="session-step" aria-hidden="true">2</span>
+            <h2 id="session-sources-title">截图来源</h2>
+            <Check v-if="sourceDirs.some((dir) => dir.enabled)" class="session-stage-check" :size="16" aria-label="已配置截图来源" />
+          </div>
+          <ul class="source-dir-list session-source-list">
             <li v-for="dir in sourceDirs" :key="dir.id" :class="{ muted: !dir.enabled }">
               <FolderOpen :size="15" class="source-dir-icon" />
-              <span class="source-dir-name">{{ dir.directory }}</span>
-              <span v-if="!dir.enabled" class="source-dir-paused">已暂停</span>
-              <button
-                v-if="!activeSession"
-                type="button"
-                class="path-button"
-                :disabled="busy"
-                @click="toggleSourceDir(dir)"
-              >
-                {{ dir.enabled ? "暂停" : "启用" }}
-              </button>
-              <button
-                v-if="!activeSession"
-                type="button"
-                class="path-button danger"
-                :disabled="busy"
-                :title="'移除 ' + dir.directory"
-                @click="removeSourceDir(dir)"
-              >
-                <Trash2 :size="15" />
-              </button>
+              <span class="source-dir-name" :title="dir.directory">{{ dir.directory }}</span>
+              <span class="source-dir-state" :class="{ online: activeSession && dir.enabled }">
+                {{ !dir.enabled ? "已暂停" : activeSession ? "监听中" : "已启用" }}
+              </span>
+              <div v-if="!activeSession" class="source-dir-actions">
+                <button type="button" :disabled="busy" @click="toggleSourceDir(dir)">
+                  {{ dir.enabled ? "暂停" : "启用" }}
+                </button>
+                <button type="button" class="danger" :disabled="busy" :aria-label="`移除 ${dir.directory}`" @click="removeSourceDir(dir)">
+                  <Trash2 :size="14" />移除
+                </button>
+              </div>
             </li>
-            <li v-if="!sourceDirs.length" class="source-dir-empty">还没有来源目录，点击下方添加</li>
+            <li v-if="!sourceDirs.length" class="source-dir-empty">还没有来源目录</li>
           </ul>
-          <button type="button" class="path-button" :disabled="busy" @click="addSourceDir">
-            <FolderPlus :size="17" />添加截图目录
-          </button>
-          <small class="source-dir-hint">目录增删在下次开始会话时生效；同一项目可挂多个游戏版本目录，内容重复的截图只登记一次。</small>
-        </div>
-        <span class="health-dot" :class="activeSession ? 'online' : ''"><Wifi :size="15" />{{ activeSession ? "监听中" : "未监听" }}</span>
-      </div>
+        </section>
 
-      <div class="path-summary archive-summary">
-        <div>
-          <span class="eyebrow">NAS / 归档目录</span>
-          <button type="button" class="path-button" :disabled="Boolean(activeSession)" @click="chooseDestination">
-            <Archive :size="17" />
-            <span>{{ projectDestination || "选择归档目录" }}</span>
+        <section class="session-stage archive-stage" aria-labelledby="session-archive-title">
+          <div class="session-stage-heading">
+            <span class="session-step" aria-hidden="true">3</span>
+            <h2 id="session-archive-title">归档位置</h2>
+            <Check v-if="projectDestination" class="session-stage-check" :size="16" aria-label="已配置归档位置" />
+          </div>
+          <button type="button" class="archive-path-button" :disabled="Boolean(activeSession)" @click="chooseDestination">
+            <Archive :size="16" />
+            <span :title="projectDestination">{{ projectDestination || "选择归档目录" }}</span>
+            <ChevronRight :size="15" />
           </button>
-        </div>
-      </div>
+        </section>
 
-      <div class="toolbar-end">
-        <span class="health-dot" :class="runtime?.engineStatus === 'configured' ? 'online' : ''">
-          <Sparkles :size="15" />{{ runtime?.engineStatus === "configured" ? "AI 已配置" : "AI 未配置" }}
-        </span>
-        <div v-if="activeSession" class="session-actions">
-          <button type="button" class="path-button" :disabled="busy" @click="openImportDialog">
-            <FolderInput :size="17" />导入截图
-          </button>
-          <button
-            v-if="deferredImportCount"
-            type="button"
-            class="path-button"
-            :disabled="importBusy"
-            @click="startImportedRecognition"
-          >
-            <Sparkles :size="17" />开始识别导入截图（{{ deferredImportCount }}）
-          </button>
-          <button type="button" class="stop-button" :disabled="busy" @click="stopSession">
+        <section class="session-control" aria-label="会话控制">
+          <div class="session-health">
+            <span :class="{ online: activeSession }"><Wifi :size="15" />{{ activeSession ? "监听中" : "未监听" }}</span>
+            <span :class="{ online: runtime?.engineStatus === 'configured' }">
+              <Sparkles :size="15" />{{ runtime?.engineStatus === "configured" ? "AI 已配置" : "AI 未配置" }}
+            </span>
+          </div>
+          <button v-if="activeSession" type="button" class="stop-button" :disabled="busy" @click="stopSession">
             <CircleStop :size="17" />停止会话
           </button>
+          <button v-else type="button" class="start-button" :disabled="busy || !projectId" @click="startSession">
+            <Play :size="17" />开始会话
+          </button>
+        </section>
+      </div>
+
+      <div class="session-tools-shelf" :class="{ collapsed: !sessionToolsOpen }">
+        <div v-show="sessionToolsOpen" class="session-tools-actions">
+          <button type="button" :disabled="busy" @click="addSourceDir">
+            <FolderPlus :size="16" />添加截图目录
+          </button>
+          <template v-if="activeSession">
+            <button type="button" :disabled="busy" @click="openImportDialog">
+              <FolderInput :size="16" />导入截图
+            </button>
+            <button
+              v-if="deferredImportCount"
+              type="button"
+              class="recognition-action"
+              :disabled="importBusy"
+              @click="startImportedRecognition"
+            >
+              <Sparkles :size="16" />开始识别导入截图（{{ deferredImportCount }}）
+            </button>
+          </template>
+          <span class="session-tools-hint">目录调整在下次开始会话时生效</span>
         </div>
-        <button v-else type="button" class="start-button" :disabled="busy || !projectId" @click="startSession">
-          <Play :size="17" />开始会话
+        <button
+          type="button"
+          class="session-tools-toggle"
+          :aria-expanded="sessionToolsOpen"
+          @click="sessionToolsOpen = !sessionToolsOpen"
+        >
+          {{ sessionToolsOpen ? "收起会话工具" : "展开会话工具" }}
+          <ChevronUp v-if="sessionToolsOpen" :size="15" />
+          <ChevronDown v-else :size="15" />
         </button>
       </div>
     </header>

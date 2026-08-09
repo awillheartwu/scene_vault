@@ -159,6 +159,28 @@ beforeEach(() => {
 });
 
 describe("Capture quick-label flow", () => {
+  it("renders the three-stage session rail and collapses its conditional tools", async () => {
+    api.listSourceDirectories.mockResolvedValue([
+      { id: "dir-1", projectId: project.id, directory: "D:\\Game", enabled: true, createdAt: "" },
+    ]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    expect(wrapper.findAll(".session-stage-heading h2").map((heading) => heading.text())).toEqual([
+      "选择项目",
+      "截图来源",
+      "归档位置",
+    ]);
+    expect(wrapper.get(".session-tools-actions").isVisible()).toBe(true);
+
+    await wrapper.get(".session-tools-toggle").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get(".session-tools-toggle").attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get(".session-tools-actions").attributes("style")).toContain("display: none");
+    expect(wrapper.text()).toContain("展开会话工具");
+    wrapper.unmount();
+  });
+
   it("opens the project creation form when requested from the home page", async () => {
     localStorage.setItem("scene-vault.capture.create-project", "1");
 
