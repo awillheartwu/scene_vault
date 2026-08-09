@@ -591,11 +591,11 @@ onBeforeUnmount(() => {
 
 .popup-header {
   display: flex;
-  height: 46px;
+  height: 48px;
   flex: none;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px 0 16px;
+  padding: 0 10px 0 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   background: color-mix(in srgb, var(--sidebar) 72%, transparent);
   backdrop-filter: var(--panel-blur);
@@ -606,12 +606,14 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 9px;
+  font-size: 12.5px;
 }
 
 .popup-title strong {
   overflow: hidden;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -627,24 +629,30 @@ onBeforeUnmount(() => {
 
 .popup-sub {
   flex: none;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 99px;
   background: color-mix(in srgb, var(--warn) 20%, var(--card));
   color: var(--warn);
-  font-size: 10px;
+  font-size: 11px;
+  font-weight: 600;
 }
 
-.popup-close {
+.popup-close,
+.popup-pin {
   display: grid;
-  width: 28px;
-  height: 28px;
-  margin-left: auto;
+  width: 40px;
+  height: 40px;
+  margin-left: 4px;
   place-items: center;
-  border: 0;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast),
+    border-color var(--motion-fast),
+    color var(--motion-fast);
 }
 
 .popup-close:hover {
@@ -652,17 +660,10 @@ onBeforeUnmount(() => {
   color: var(--destructive);
 }
 
-.popup-pin {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  margin-left: 4px;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
+.popup-close:focus-visible,
+.popup-pin:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-pin:hover {
@@ -671,18 +672,20 @@ onBeforeUnmount(() => {
 }
 
 .popup-pin.pinned {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }
 
 .popup-error {
   margin: 10px 14px 0;
-  padding: 8px 10px;
+  padding: 8px 11px;
   border: 1px solid color-mix(in srgb, var(--destructive) 45%, var(--border));
-  border-radius: 9px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--destructive) 12%, var(--card));
   color: var(--destructive);
-  font-size: 11px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .popup-loading,
@@ -714,7 +717,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   place-items: center;
   border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: 14px;
+  border-radius: 12px;
   background: #0d1114;
   box-shadow: var(--card-shadow), var(--inner-highlight);
 }
@@ -737,31 +740,36 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .popup-nav {
   display: flex;
-  height: 34px;
+  height: 44px;
   flex: none;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   margin: 8px 14px 0;
 }
 
 .popup-nav-button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 40px;
+  height: 40px;
   place-items: center;
   border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-  border-radius: 9px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--card) 78%, transparent);
   color: var(--foreground);
   box-shadow: var(--inner-highlight);
   cursor: pointer;
   transition: border-color 0.18s, color 0.18s;
+}
+
+.popup-nav-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-nav-button:hover:not(:disabled) {
@@ -775,17 +783,17 @@ onBeforeUnmount(() => {
 }
 
 .popup-nav-count {
-  min-width: 44px;
+  min-width: 46px;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
 .popup-nav-hint {
-  margin-left: 4px;
+  margin-left: 2px;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .popup-body {
@@ -794,7 +802,7 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   flex-direction: column;
   gap: 10px;
-  padding: 13px 14px;
+  padding: 12px 14px;
 }
 
 .popup-body--fill {
@@ -812,23 +820,29 @@ onBeforeUnmount(() => {
   margin: 0 0 10px;
   color: var(--muted-foreground);
   font-size: 12px;
+  line-height: 1.5;
 }
 
 .popup-suggestion {
   display: flex;
   width: 100%;
-  height: 50px;
+  min-height: 50px;
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
   padding: 0 14px;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: 12px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 13%, var(--card));
   color: var(--foreground);
   box-shadow: var(--card-shadow), var(--inner-highlight);
   cursor: pointer;
   transition: border-color 0.18s, transform 0.15s, box-shadow 0.18s;
+}
+
+.popup-suggestion:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-suggestion:hover:not(:disabled) {
@@ -861,7 +875,7 @@ onBeforeUnmount(() => {
 
 .popup-suggestion small {
   color: var(--muted-foreground);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .popup-verification {
@@ -869,7 +883,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 9px;
   margin-bottom: 10px;
-  padding: 10px 12px;
+  padding: 11px 12px;
   border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
   border-radius: 10px;
   background: color-mix(in srgb, var(--warn) 14%, var(--card));
@@ -878,7 +892,7 @@ onBeforeUnmount(() => {
 .popup-verification p {
   margin: 0;
   color: var(--foreground);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -888,13 +902,19 @@ onBeforeUnmount(() => {
 }
 
 .popup-verification-actions button {
-  height: 30px;
-  padding: 0 12px;
+  height: 40px;
+  padding: 0 14px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--secondary);
   color: var(--foreground);
-  font-size: 11px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.popup-verification-actions button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-verification-actions .popup-verification-confirm {
@@ -912,17 +932,22 @@ onBeforeUnmount(() => {
 
 .popup-action {
   display: flex;
-  height: 54px;
+  min-height: 52px;
   align-items: center;
   gap: 12px;
   padding: 0 14px;
   border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--card);
   color: var(--foreground);
   box-shadow: var(--card-shadow), var(--inner-highlight);
   cursor: pointer;
   transition: border-color 0.18s, transform 0.15s, box-shadow 0.18s;
+}
+
+.popup-action:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-action:hover:not(:disabled) {
@@ -957,40 +982,62 @@ onBeforeUnmount(() => {
 
 .popup-action small {
   color: var(--muted-foreground);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .popup-cancel {
+  min-height: 40px;
   margin-top: auto;
-  padding: 8px;
-  border: 0;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 11.5px;
   cursor: pointer;
 }
 
 .popup-cancel:hover {
+  background: color-mix(in srgb, var(--secondary) 55%, transparent);
   color: var(--foreground);
+}
+
+.popup-cancel:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-person-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
 }
 
 .popup-back {
-  border: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: transparent;
   color: var(--accent);
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+}
+
+.popup-back:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.popup-back:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-search {
   display: flex;
-  height: 38px;
+  height: 40px;
   flex: none;
   align-items: center;
   gap: 8px;
@@ -999,6 +1046,12 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   background: color-mix(in srgb, var(--background) 78%, transparent);
   color: var(--muted-foreground);
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+}
+
+.popup-search:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 22%, transparent);
 }
 
 .popup-search input {
@@ -1016,18 +1069,18 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
 .popup-character {
   display: grid;
-  min-height: 42px;
+  min-height: 44px;
   grid-template-columns: 30px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 9px;
-  padding: 5px 9px;
+  padding: 5px 10px;
   border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
   border-radius: 10px;
   background: var(--secondary);
@@ -1035,6 +1088,11 @@ onBeforeUnmount(() => {
   text-align: left;
   cursor: pointer;
   transition: border-color 0.18s, transform 0.15s;
+}
+
+.popup-character:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-character:hover:not(:disabled) {
@@ -1066,12 +1124,13 @@ onBeforeUnmount(() => {
 }
 
 .popup-character kbd {
-  padding: 2px 5px;
+  padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--background);
   color: var(--muted-foreground);
-  font-size: 9px;
+  font-size: 11px;
+  font-family: inherit;
 }
 
 .popup-character svg {
@@ -1081,46 +1140,59 @@ onBeforeUnmount(() => {
 .popup-empty {
   margin: 6px 0;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 11.5px;
   text-align: center;
 }
 
 .popup-create {
   display: flex;
   flex: none;
-  gap: 7px;
+  gap: 8px;
 }
 
 .popup-create input {
   min-width: 0;
   flex: 1;
-  height: 38px;
-  padding: 0 10px;
+  height: 40px;
+  padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
   color: var(--foreground);
   font-size: 12px;
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+}
+
+.popup-create input:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 22%, transparent);
+  outline: none;
 }
 
 .popup-create button {
   display: inline-flex;
+  height: 40px;
   align-items: center;
   gap: 5px;
-  padding: 0 12px;
+  padding: 0 14px;
   border: 1px solid transparent;
   border-radius: 10px;
   background: var(--accent-gradient);
   color: var(--accent-foreground);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   cursor: pointer;
+}
+
+.popup-create button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .popup-tip {
   margin: 0;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 11px;
   text-align: center;
 }
 </style>

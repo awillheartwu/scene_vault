@@ -254,9 +254,10 @@ describe("Capture quick-label flow", () => {
     expect(openImport).toBeTruthy();
     await openImport!.trigger("click");
     await flushPromises();
-    const confirmImport = wrapper.findAll("button").find((button) => button.text().includes("全部导入"));
+    const importDialog = document.body.querySelector('[role="dialog"][aria-label="导入已有截图"]');
+    const confirmImport = Array.from(importDialog!.querySelectorAll("button")).find((button) => button.textContent?.includes("全部导入"));
     expect(confirmImport).toBeTruthy();
-    await confirmImport!.trigger("click");
+    confirmImport!.click();
     await flushPromises();
 
     expect(api.importDirectoryCaptures).toHaveBeenCalledWith(session.id, [candidate.path]);

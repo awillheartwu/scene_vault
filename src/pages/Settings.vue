@@ -1,13 +1,27 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
 import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+  type Component,
+} from "vue";
+import { onBeforeRouteLeave } from "vue-router";
+import {
+  Cpu,
   FileSearch,
+  FileText,
   FolderOpen,
   Keyboard,
   LoaderCircle,
   RotateCcw,
   Save,
+  ScanFace,
+  Settings2,
   Sparkles,
+  Wand2,
 } from "@lucide/vue";
 import {
   captureApi,
@@ -31,6 +45,7 @@ import { openPathExternal } from "@/lib/capture-api";
 import ColorField from "@/components/common/ColorField.vue";
 import CornerFallbackPicker from "@/components/common/CornerFallbackPicker.vue";
 import FaceTextPositionPicker from "@/components/common/FaceTextPositionPicker.vue";
+import PageHeader from "@/components/layout/PageHeader.vue";
 import { toast } from "@/lib/toast";
 
 const NAMING_PLACEHOLDERS: [string, string][] = [
@@ -45,6 +60,18 @@ const NAMING_PLACEHOLDERS: [string, string][] = [
 ];
 
 const DEFAULT_NAMING_TEMPLATE = "{source} - {character} - {id}";
+
+type SettingsCategoryKey = "general" | "naming" | "recognition" | "processing" | "vision";
+
+const CATEGORIES: { key: SettingsCategoryKey; label: string; icon: Component }[] = [
+  { key: "general", label: "通用设置", icon: Settings2 },
+  { key: "naming", label: "归档命名规则", icon: FileText },
+  { key: "recognition", label: "自动角色建议", icon: ScanFace },
+  { key: "processing", label: "视觉处理参数", icon: Wand2 },
+  { key: "vision", label: "视觉引擎", icon: Cpu },
+];
+
+const activeCategory = ref<SettingsCategoryKey>("general");
 
 const settings = ref<VisionSettings>({
   pythonExecutablePath: null,
@@ -151,6 +178,78 @@ const recognitionBusy = ref(false);
 const processingBusy = ref(false);
 const bundledFonts = ref<BundledFont[]>([]);
 
+interface SettingsBaseline {
+  general: AppSettings;
+  naming: ArchiveNamingSettings;
+  recognition: RecognitionSettings;
+  processing: {
+    detection: DetectionSettings;
+    annotation: AnnotationSettings;
+    crop: CropSettings;
+    textColorHex: string;
+    strokeColorHex: string;
+  };
+  vision: VisionSettings;
+}
+
+/** Deep snapshot of the loaded server state per category. */
+const baseline = ref<SettingsBaseline | null>(null);
+/** Server truth for the profile currently shown per model id. */
+const profileBaselines = ref<Record<string, ModelRecognitionProfile>>({});
+/** Unsaved profile drafts kept per model id while switching recognizers. */
+const profileDrafts = ref<Record<string, ModelRecognitionProfile>>({});
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keysA = Object.keys(a as Record<string, unknown>);
+  const keysB = Object.keys(b as Record<string, unknown>);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((key) =>
+    deepEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
+  );
+}
+
+const generalDirty = computed(() =>
+  baseline.value ? !deepEqual(appSettings.value, baseline.value.general) : false,
+);
+const namingDirty = computed(() =>
+  baseline.value ? !deepEqual(namingSettings.value, baseline.value.naming) : false,
+);
+const recognitionDirty = computed(() => {
+  if (!baseline.value) return false;
+  if (!deepEqual(recognitionSettings.value, baseline.value.recognition)) return true;
+  const server = profileBaselines.value[activeModelId.value];
+  return server ? !deepEqual(profileInput.value, server) : false;
+});
+const processingDirty = computed(() => {
+  if (!baseline.value) return false;
+  const saved = baseline.value.processing;
+  return (
+    !deepEqual(processingUi.value.detection, saved.detection) ||
+    !deepEqual(processingUi.value.annotation, saved.annotation) ||
+    !deepEqual(processingUi.value.crop, saved.crop) ||
+    textColorHex.value !== saved.textColorHex ||
+    strokeColorHex.value !== saved.strokeColorHex
+  );
+});
+const visionDirty = computed(() =>
+  baseline.value ? !deepEqual(settings.value, baseline.value.vision) : false,
+);
+const dirtyByCategory = computed<Record<SettingsCategoryKey, boolean>>(() => ({
+  general: generalDirty.value,
+  naming: namingDirty.value,
+  recognition: recognitionDirty.value,
+  processing: processingDirty.value,
+  vision: visionDirty.value,
+}));
+const hasDirtySettings = computed(() => Object.values(dirtyByCategory.value).some(Boolean));
+
 async function initialize() {
   try {
     settings.value = await captureApi.getVisionSettings();
@@ -168,43 +267,56 @@ async function initialize() {
     textColorHex.value = rgbToHex(processingUi.value.annotation.textColor);
     strokeColorHex.value = rgbToHex(processingUi.value.annotation.strokeColor);
     bundledFonts.value = await captureApi.listBundledFonts().catch(() => []);
+    baseline.value = {
+      general: clone(appSettings.value),
+      naming: clone(namingSettings.value),
+      recognition: clone(recognitionSettings.value),
+      processing: {
+        detection: clone(processingUi.value.detection),
+        annotation: clone(processingUi.value.annotation),
+        crop: clone(processingUi.value.crop),
+        textColorHex: textColorHex.value,
+        strokeColorHex: strokeColorHex.value,
+      },
+      vision: clone(settings.value),
+    };
   } catch (error) {
     toast.error(normalizeError(error));
   }
 }
 
-async function loadRecognitionProfile() {
-  const profile = recognitionSettings.value.profiles[activeModelId.value] ?? {};
+async function loadRecognitionProfile(modelId = activeModelId.value) {
+  const profile = recognitionSettings.value.profiles[modelId] ?? {};
   const hasValues =
     profile.confidenceThreshold != null ||
     profile.margin != null ||
     profile.verificationHighThreshold != null ||
     profile.verificationLowThreshold != null ||
     profile.crossCheckDelta != null;
-  if (hasValues) {
-    profileInput.value = {
-      confidenceThreshold: profile.confidenceThreshold ?? null,
-      margin: profile.margin ?? null,
-      verificationHighThreshold: profile.verificationHighThreshold ?? null,
-      verificationLowThreshold: profile.verificationLowThreshold ?? null,
-      crossCheckDelta: profile.crossCheckDelta ?? null,
-    };
-    return;
-  }
-  // Empty stored profile: show the benchmark-calibrated defaults so the
-  // fields are never blank (they are already active in the backend).
-  const defaults = await getDefaultsFor(activeModelId.value);
-  profileInput.value = {
-    confidenceThreshold: defaults.confidenceThreshold,
-    margin: defaults.margin,
-    verificationHighThreshold: defaults.verificationHighThreshold,
-    verificationLowThreshold: defaults.verificationLowThreshold,
-    crossCheckDelta: defaults.crossCheckDelta,
-  };
+  const shown: ModelRecognitionProfile = hasValues
+    ? {
+        confidenceThreshold: profile.confidenceThreshold ?? null,
+        margin: profile.margin ?? null,
+        verificationHighThreshold: profile.verificationHighThreshold ?? null,
+        verificationLowThreshold: profile.verificationLowThreshold ?? null,
+        crossCheckDelta: profile.crossCheckDelta ?? null,
+      }
+    : await getDefaultsFor(modelId).then((defaults) => ({
+        confidenceThreshold: defaults.confidenceThreshold,
+        margin: defaults.margin,
+        verificationHighThreshold: defaults.verificationHighThreshold,
+        verificationLowThreshold: defaults.verificationLowThreshold,
+        crossCheckDelta: defaults.crossCheckDelta,
+      }));
+  // Server truth for this model; drafts are kept separately so switching
+  // recognizers does not silently drop unsaved threshold edits.
+  profileBaselines.value[modelId] = clone(shown);
+  profileInput.value = clone(profileDrafts.value[modelId] ?? shown);
 }
 
-watch(activeModelId, () => {
-  void loadRecognitionProfile();
+watch(activeModelId, (newModel, oldModel) => {
+  if (oldModel) profileDrafts.value[oldModel] = clone(profileInput.value);
+  void loadRecognitionProfile(newModel);
 });
 
 async function refreshCacheStatus() {
@@ -264,6 +376,7 @@ async function save() {
   health.value = null;
   try {
     settings.value = await captureApi.updateVisionSettings(settings.value);
+    if (baseline.value) baseline.value.vision = clone(settings.value);
     toast.success("视觉引擎配置已保存。");
   } catch (error) {
     toast.error(normalizeError(error));
@@ -276,6 +389,7 @@ async function saveAppSettings() {
   appBusy.value = true;
   try {
     appSettings.value = await captureApi.updateAppSettings(appSettings.value);
+    if (baseline.value) baseline.value.general = clone(appSettings.value);
     await refreshCacheStatus();
     toast.success("通用设置已保存。");
   } catch (error) {
@@ -291,6 +405,7 @@ async function saveNaming() {
     namingSettings.value = await captureApi.updateArchiveNamingSettings(
       namingSettings.value,
     );
+    if (baseline.value) baseline.value.naming = clone(namingSettings.value);
     toast.success("归档命名规则已保存，只影响新的归档。");
   } catch (error) {
     toast.error(normalizeError(error));
@@ -308,6 +423,9 @@ async function saveRecognition() {
     recognitionSettings.value = await captureApi.updateRecognitionSettings(
       recognitionSettings.value,
     );
+    profileDrafts.value[activeModelId.value] = clone(profileInput.value);
+    profileBaselines.value[activeModelId.value] = clone(profileInput.value);
+    if (baseline.value) baseline.value.recognition = clone(recognitionSettings.value);
     toast.success("识别建议设置已保存。");
   } catch (error) {
     toast.error(normalizeError(error));
@@ -469,6 +587,15 @@ async function saveProcessing() {
   processingBusy.value = true;
   try {
     await captureApi.updateProcessingSettings(buildProcessingPayload());
+    if (baseline.value) {
+      baseline.value.processing = {
+        detection: clone(processingUi.value.detection),
+        annotation: clone(processingUi.value.annotation),
+        crop: clone(processingUi.value.crop),
+        textColorHex: textColorHex.value,
+        strokeColorHex: strokeColorHex.value,
+      };
+    }
     toast.success("视觉处理参数已保存，下次处理生效。");
   } catch (error) {
     toast.error(normalizeError(error));
@@ -590,23 +717,96 @@ function normalizeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-onMounted(initialize);
+function onBeforeUnload(event: BeforeUnloadEvent) {
+  if (hasDirtySettings.value) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+}
+
+onBeforeRouteLeave(() => {
+  if (!hasDirtySettings.value) return true;
+  return window.confirm("有未保存的设置更改，离开将丢失这些更改。确定要离开吗？");
+});
+
+function setActiveCategory(key: SettingsCategoryKey) {
+  activeCategory.value = key;
+}
+
+function onNavKeydown(event: KeyboardEvent) {
+  const index = CATEGORIES.findIndex((category) => category.key === activeCategory.value);
+  if (index < 0) return;
+  let next = -1;
+  if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+    next = (index + 1) % CATEGORIES.length;
+  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+    next = (index - 1 + CATEGORIES.length) % CATEGORIES.length;
+  } else if (event.key === "Home") {
+    next = 0;
+  } else if (event.key === "End") {
+    next = CATEGORIES.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const target = CATEGORIES[next];
+  activeCategory.value = target.key;
+  void nextTick(() => document.getElementById(`settings-tab-${target.key}`)?.focus());
+}
+
+onMounted(() => {
+  window.addEventListener("beforeunload", onBeforeUnload);
+  void initialize();
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("beforeunload", onBeforeUnload);
+});
 </script>
 
 <template>
   <section class="settings-page">
-    <header class="settings-header">
-      <div>
-        <span class="eyebrow">Scene Vault</span>
-        <h1>设置</h1>
-        <p>通用交互与可选 AI 引擎配置；未配置 AI 时截图发现、分类标记和历史仍然可用。</p>
-      </div>
-      <Keyboard :size="30" />
-    </header>
+    <PageHeader
+      eyebrow="Scene Vault"
+      title="设置"
+      description="通用交互与可选 AI 引擎配置；未配置 AI 时截图发现、分类标记和历史仍然可用。"
+    >
+      <template #actions>
+        <Keyboard :size="30" />
+      </template>
+    </PageHeader>
 
-    <form class="settings-card" @submit.prevent="saveAppSettings">
+    <div class="settings-layout">
+      <nav class="settings-nav" role="tablist" aria-label="设置分类" @keydown="onNavKeydown">
+        <button
+          v-for="category in CATEGORIES"
+          :id="`settings-tab-${category.key}`"
+          :key="category.key"
+          type="button"
+          role="tab"
+          :aria-selected="activeCategory === category.key"
+          :aria-controls="`settings-pane-${category.key}`"
+          :tabindex="activeCategory === category.key ? 0 : -1"
+          :class="{ active: activeCategory === category.key }"
+          @click="setActiveCategory(category.key)"
+        >
+          <component :is="category.icon" :size="16" />
+          <span>{{ category.label }}</span>
+          <span v-if="dirtyByCategory[category.key]" class="settings-nav-dirty">未保存</span>
+        </button>
+      </nav>
+
+      <div class="settings-panels">
+        <div
+          id="settings-pane-general"
+          class="settings-pane"
+          role="tabpanel"
+          aria-labelledby="settings-tab-general"
+          v-show="activeCategory === 'general'"
+        >
+          <form class="settings-card" @submit.prevent="saveAppSettings">
       <div class="settings-card-title">
-        <span class="eyebrow">General</span>
+        <span class="eyebrow">通用</span>
         <h2>通用设置</h2>
       </div>
       <div class="settings-field">
@@ -710,11 +910,19 @@ onMounted(initialize);
           <LoaderCircle v-if="appBusy" class="animate-spin" :size="17" /><Save :size="17" />保存通用设置
         </button>
       </div>
-    </form>
+          </form>
+        </div>
 
-    <form class="settings-card" @submit.prevent="saveNaming">
+        <div
+          id="settings-pane-naming"
+          class="settings-pane"
+          role="tabpanel"
+          aria-labelledby="settings-tab-naming"
+          v-show="activeCategory === 'naming'"
+        >
+          <form class="settings-card" @submit.prevent="saveNaming">
       <div class="settings-card-title">
-        <span class="eyebrow">Capture</span>
+        <span class="eyebrow">捕获与归档</span>
         <h2>归档命名规则</h2>
       </div>
       <div class="settings-field">
@@ -746,11 +954,19 @@ onMounted(initialize);
           <LoaderCircle v-if="namingBusy" class="animate-spin" :size="17" /><Save :size="17" />保存命名规则
         </button>
       </div>
-    </form>
+          </form>
+        </div>
 
-    <form class="settings-card" @submit.prevent="saveRecognition">
+        <div
+          id="settings-pane-recognition"
+          class="settings-pane"
+          role="tabpanel"
+          aria-labelledby="settings-tab-recognition"
+          v-show="activeCategory === 'recognition'"
+        >
+          <form class="settings-card" @submit.prevent="saveRecognition">
       <div class="settings-card-title">
-        <span class="eyebrow">Capture · 可选</span>
+        <span class="eyebrow">人物识别 · 可选</span>
         <h2>自动角色建议</h2>
       </div>
       <div class="settings-field toggle-row">
@@ -832,11 +1048,19 @@ onMounted(initialize);
           <LoaderCircle v-if="recognitionBusy" class="animate-spin" :size="17" /><Save :size="17" />保存建议设置
         </button>
       </div>
-    </form>
+          </form>
+        </div>
 
-    <form class="settings-card" @submit.prevent="saveProcessing">
+        <div
+          id="settings-pane-processing"
+          class="settings-pane"
+          role="tabpanel"
+          aria-labelledby="settings-tab-processing"
+          v-show="activeCategory === 'processing'"
+        >
+          <form class="settings-card" @submit.prevent="saveProcessing">
       <div class="settings-card-title">
-        <span class="eyebrow">Capture · Python</span>
+        <span class="eyebrow">图像处理 · 可选</span>
         <h2>视觉处理参数</h2>
       </div>
       <div class="processing-group">
@@ -936,11 +1160,19 @@ onMounted(initialize);
           <LoaderCircle v-if="processingBusy" class="animate-spin" :size="17" /><Save :size="17" />保存处理参数
         </button>
       </div>
-    </form>
+          </form>
+        </div>
 
-    <form class="settings-card" @submit.prevent="save">
+        <div
+          id="settings-pane-vision"
+          class="settings-pane"
+          role="tabpanel"
+          aria-labelledby="settings-tab-vision"
+          v-show="activeCategory === 'vision'"
+        >
+          <form class="settings-card" @submit.prevent="save">
       <div class="settings-card-title">
-        <span class="eyebrow">Local AI · 可选</span>
+        <span class="eyebrow">本地视觉 · 可选</span>
         <h2>视觉引擎</h2>
       </div>
       <div class="settings-field">
@@ -1005,12 +1237,130 @@ onMounted(initialize);
           <Save :size="17" />保存配置
         </button>
       </div>
-    </form>
+          </form>
 
-    <section v-if="health" class="health-card" :class="health.processScreenshotAvailable ? 'healthy' : 'degraded'" aria-live="polite">
-      <div><strong>{{ health.processScreenshotAvailable ? "视觉引擎可用" : "视觉引擎不可用" }}</strong><span>{{ health.status }}</span></div>
-      <dl><div><dt>引擎版本</dt><dd>{{ health.engineVersion || "—" }}</dd></div><div><dt>Python</dt><dd>{{ health.pythonVersion || "—" }}</dd></div><div><dt>单图处理</dt><dd>{{ health.processScreenshotAvailable ? "支持" : "不支持" }}</dd></div></dl>
-      <p v-if="health.errorMessage">{{ health.errorMessage }}</p>
-    </section>
+          <section
+            v-if="health"
+            class="health-card"
+            :class="health.processScreenshotAvailable ? 'healthy' : 'degraded'"
+            aria-live="polite"
+          >
+            <div><strong>{{ health.processScreenshotAvailable ? "视觉引擎可用" : "视觉引擎不可用" }}</strong><span>{{ health.status }}</span></div>
+            <dl><div><dt>引擎版本</dt><dd>{{ health.engineVersion || "—" }}</dd></div><div><dt>Python</dt><dd>{{ health.pythonVersion || "—" }}</dd></div><div><dt>单图处理</dt><dd>{{ health.processScreenshotAvailable ? "支持" : "不支持" }}</dd></div></dl>
+            <p v-if="health.errorMessage">{{ health.errorMessage }}</p>
+          </section>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
+
+<style scoped>
+.settings-page > :deep(.page-header) {
+  width: 100%;
+  max-width: 1080px;
+}
+
+.settings-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  width: 100%;
+  max-width: 1080px;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 4px;
+  width: 220px;
+  padding: 6px;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--card-shadow), var(--inner-highlight);
+}
+
+.settings-nav button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav button:hover {
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+  color: var(--foreground);
+}
+
+.settings-nav button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.settings-nav button.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--foreground);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.settings-nav-dirty {
+  margin-left: auto;
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 55%, transparent);
+  border-radius: 999px;
+  color: var(--destructive);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.settings-panels {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.settings-pane .settings-card,
+.settings-pane .health-card {
+  width: 100%;
+  max-width: none;
+}
+
+.settings-pane .health-card {
+  margin-top: 14px;
+}
+
+@media (max-width: 860px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .settings-nav button {
+    flex: 1 1 150px;
+    width: auto;
+  }
+}
+</style>

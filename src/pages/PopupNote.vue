@@ -370,10 +370,15 @@ defineExpose({
   flex: none;
   align-items: center;
   justify-content: space-between;
-  padding: 0 10px 0 14px;
+  padding: 0 8px 0 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   background: color-mix(in srgb, var(--sidebar) 72%, transparent);
   backdrop-filter: var(--panel-blur);
+}
+
+.note-page:not(.embedded) .note-header {
+  height: 48px;
+  padding: 0 10px 0 14px;
 }
 
 .note-title {
@@ -381,17 +386,19 @@ defineExpose({
   min-width: 0;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 12.5px;
 }
 
 .note-title strong {
   flex: none;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
 .note-project {
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -419,19 +426,34 @@ defineExpose({
 
 .note-icon {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   place-items: center;
-  border: 0;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast),
+    border-color var(--motion-fast),
+    color var(--motion-fast);
+}
+
+.note-page:not(.embedded) .note-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
 }
 
 .note-icon:hover {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--foreground);
+}
+
+.note-icon:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .note-error {
@@ -440,12 +462,13 @@ defineExpose({
   align-items: center;
   gap: 8px;
   margin: 10px 12px 0;
-  padding: 8px 10px;
+  padding: 8px 11px;
   border: 1px solid color-mix(in srgb, var(--destructive) 45%, var(--border));
-  border-radius: 9px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--destructive) 12%, var(--card));
   color: var(--destructive);
-  font-size: 11px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .note-loading {
@@ -470,14 +493,17 @@ defineExpose({
   background: color-mix(in srgb, var(--card) 84%, transparent);
   color: var(--foreground);
   font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
   box-shadow: var(--inner-highlight);
   user-select: text;
 }
 
-.note-editor:focus {
+.note-editor:focus,
+.note-editor:focus-visible {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 22%, transparent);
+  outline: none;
 }
 
 .note-preview {
@@ -516,7 +542,7 @@ defineExpose({
   align-items: center;
   gap: 5px;
   color: var(--warn);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .note-sync.ok {
@@ -531,26 +557,31 @@ defineExpose({
   gap: 5px;
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .note-save {
   display: inline-flex;
-  height: 32px;
+  height: 40px;
   flex: none;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 14px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--accent-gradient);
   color: var(--accent-foreground);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   box-shadow: var(--glow);
   cursor: pointer;
+}
+
+.note-save:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .note-save:disabled {

@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { nextTick, watch } from "vue";
 import { X } from "@lucide/vue";
 import {
   DialogContent,
+  DialogDescription,
   DialogOverlay,
   DialogPortal,
   DialogRoot,
@@ -29,6 +31,20 @@ const emit = defineEmits<{
 }>();
 
 const { isWideLayout } = useAdaptiveLayout();
+let restoreTarget: HTMLElement | null = null;
+
+watch(
+  () => props.open,
+  (open, wasOpen) => {
+    if (open && !wasOpen) {
+      restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    } else if (!open && wasOpen && restoreTarget) {
+      const target = restoreTarget;
+      restoreTarget = null;
+      void nextTick(() => target.isConnected && target.focus({ preventScroll: true }));
+    }
+  },
+);
 </script>
 
 <template>
@@ -45,12 +61,11 @@ const { isWideLayout } = useAdaptiveLayout();
       <DialogOverlay class="responsive-detail-scrim" />
       <DialogContent
         :class="['responsive-detail-panel', 'is-drawer', panelClass]"
-        :aria-describedby="description ? 'responsive-detail-description' : undefined"
       >
         <div class="responsive-detail-heading">
           <div>
             <DialogTitle>{{ title }}</DialogTitle>
-            <p v-if="description" id="responsive-detail-description">{{ description }}</p>
+            <DialogDescription v-if="description">{{ description }}</DialogDescription>
           </div>
           <button
             type="button"

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { api } = vi.hoisted(() => ({
   api: {
@@ -10,6 +10,7 @@ const { api } = vi.hoisted(() => ({
     getAppSettings: vi.fn(),
     readThumbnail: vi.fn(),
     readImage: vi.fn(),
+    retry: vi.fn(),
   },
 }));
 
@@ -18,6 +19,7 @@ vi.mock("@/lib/capture-api", () => ({
   captureStatusLabel: (status: string) => status,
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
+  revealPath: vi.fn(),
 }));
 
 import History from "./History.vue";
@@ -104,5 +106,96 @@ describe("History pagination", () => {
     expect(api.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 }));
 
     wrapper.unmount();
+  });
+});
+
+describe("History responsive detail", () => {
+  afterEach(() => {
+    if (typeof window.matchMedia === "function") {
+      delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
+    }
+  });
+
+  it("auto-opens a focus-trapped detail drawer on row selection and closes it without losing selection", async () => {
+    window.matchMedia = vi.fn(
+      (query: string): MediaQueryList =>
+        ({
+          matches: false,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList,
+    ) as unknown as typeof window.matchMedia;
+
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z"), entry("2", "2026-08-02T00:00:00Z")],
+      total: 2,
+    });
+    const wrapper = mount(History);
+    try {
+      await flushPromises();
+
+      expect(document.body.querySelector(".responsive-detail-panel.is-drawer")).toBeNull();
+
+      const rows = wrapper.findAll(".history-row");
+      expect(rows).toHaveLength(2);
+      await rows[1].trigger("click");
+      await flushPromises();
+
+      const drawer = document.body.querySelector(".responsive-detail-panel.is-drawer");
+      expect(drawer).not.toBeNull();
+      expect(drawer?.getAttribute("role")).toBe("dialog");
+      expect(drawer?.getAttribute("aria-labelledby")).not.toBeNull();
+      const labelledBy = drawer?.getAttribute("aria-labelledby");
+      expect(labelledBy && document.getElementById(labelledBy)?.textContent).toContain("2.png");
+      expect(drawer?.textContent).toContain("2.png");
+      expect(rows[1].classes()).toContain("selected");
+
+      const close = document.body.querySelector<HTMLButtonElement>('[aria-label="关闭详情"]');
+      expect(close).not.toBeNull();
+      close?.click();
+      await flushPromises();
+
+      expect(document.body.querySelector(".responsive-detail-panel.is-drawer")).toBeNull();
+      expect(rows[1].classes()).toContain("selected");
+
+      await rows[1].trigger("click");
+      await flushPromises();
+      expect(document.body.querySelector(".responsive-detail-panel.is-drawer")).not.toBeNull();
+
+      await rows[0].trigger("click");
+      await flushPromises();
+      expect(document.body.querySelector(".responsive-detail-panel.is-drawer")?.textContent).toContain("1.png");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("shows the detail as a static panel at wide layout and switches it on row selection", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z"), entry("2", "2026-08-02T00:00:00Z")],
+      total: 2,
+    });
+    const wrapper = mount(History);
+    try {
+      await flushPromises();
+
+      const panel = wrapper.find(".responsive-detail-panel.is-static");
+      expect(panel.exists()).toBe(true);
+      expect(panel.text()).toContain("1.png");
+      expect(document.body.querySelector('[aria-label="关闭详情"]')).toBeNull();
+
+      await wrapper.findAll(".history-row")[1].trigger("click");
+      await flushPromises();
+
+      expect(panel.text()).toContain("2.png");
+      expect(document.body.querySelector(".responsive-detail-panel.is-drawer")).toBeNull();
+    } finally {
+      wrapper.unmount();
+    }
   });
 });

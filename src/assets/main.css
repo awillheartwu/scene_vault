@@ -219,6 +219,8 @@
     .brand-copy, .sidebar-label, .sidebar-footer-label { display: none; }
     .app-sidebar nav { gap: 8px; }
     .sidebar-link { width: 48px; height: 48px; justify-content: center; gap: 0; padding: 0; }
+    .sidebar-link::after { position: absolute; z-index: 40; left: calc(100% + 10px); padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--popover); color: var(--popover-foreground); box-shadow: var(--card-shadow); content: attr(data-label); font-size: 12px; opacity: 0; pointer-events: none; transform: translateX(-4px); transition: opacity var(--motion-fast), transform var(--motion-fast); white-space: nowrap; }
+    .sidebar-link:hover::after, .sidebar-link:focus-visible::after { opacity: 1; transform: translateX(0); }
     .sidebar-footer { justify-content: center; padding: 12px 0 0; }
     .sidebar-footer > .status-dot { display: none; }
     .sidebar-footer .theme-toggle { width: 40px; height: 40px; margin-left: 0; }
@@ -391,7 +393,7 @@
   .stop-button, .start-button { flex: none; white-space: nowrap; }
   .import-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: color-mix(in srgb, #000 45%, transparent); backdrop-filter: blur(2px); }
   .import-dialog { display: flex; width: min(440px, calc(100vw - 48px)); max-height: 70vh; flex-direction: column; gap: 10px; padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: var(--card-shadow), var(--inner-highlight); }
-  .import-dialog h3 { margin: 0; font-size: 16px; }
+  .import-dialog h2, .import-dialog h3 { margin: 0; font-size: 16px; }
   .import-dialog p { margin: 0; color: var(--muted-foreground); font-size: 11.5px; line-height: 1.6; }
   .import-list { margin: 0; padding: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 9px; background: var(--background); list-style: none; }
   .import-list li { padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--foreground); font-size: 11.5px; }
@@ -416,7 +418,13 @@
   .footer-nav button:hover:not(:disabled) { color: var(--foreground); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
   @media (max-width: 1240px) {
-    .capture-toolbar { grid-template-columns: 190px 1fr 1fr auto; gap: 12px; }
+    .capture-toolbar { grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px 18px; padding-block: 16px; }
+    .project-switcher { min-width: 0; grid-column: 1; grid-row: 1; }
+    .source-summary { grid-column: 1 / -1; grid-row: 2; padding-left: 0; border-left: 0; }
+    .archive-summary { grid-column: 1 / -1; grid-row: 3; padding-left: 0; border-left: 0; }
+    .archive-summary .path-button { width: fit-content; }
+    .toolbar-end { grid-column: 2; grid-row: 1; align-self: center; align-items: center; justify-content: flex-end; flex-direction: row; }
+    .session-actions { flex-wrap: wrap; justify-content: flex-end; }
     .health-dot { display: none; }
     .capture-workspace { grid-template-columns: minmax(580px, 1fr) 282px; }
   }
@@ -593,8 +601,9 @@
   .rename-button:focus-visible { border-color: var(--ring); outline: 2px solid color-mix(in srgb, var(--ring) 35%, transparent); outline-offset: 1px; }
   .rename-overlay { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: color-mix(in srgb, #000 45%, transparent); backdrop-filter: blur(2px); }
   .rename-dialog { display: flex; width: min(420px, calc(100vw - 48px)); flex-direction: column; gap: 12px; padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: var(--card-shadow), var(--inner-highlight); }
-  .rename-dialog h3 { margin: 0; font-size: 16px; }
+  .rename-dialog h2 { margin: 0; font-size: 16px; }
   .rename-dialog p { margin: 0; color: var(--muted-foreground); font-size: 11.5px; line-height: 1.6; }
+  .rename-dialog form { display: flex; flex-direction: column; gap: 12px; }
   .rename-dialog input { height: 38px; padding: 0 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--background); color: var(--foreground); font-size: 13px; }
   .rename-dialog input:focus { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 20%, transparent); outline: 0; }
   .rename-actions { display: flex; justify-content: flex-end; gap: 9px; }

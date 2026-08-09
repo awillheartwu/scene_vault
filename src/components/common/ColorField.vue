@@ -99,8 +99,8 @@ function applyColor(value: unknown) {
 }
 
 .swatch {
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   cursor: pointer;

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { CircleAlert, LoaderCircle, Trash2, X } from "@lucide/vue";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { captureApi, type ProjectDeletionPreview } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
 
@@ -41,19 +47,21 @@ async function confirmDelete() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div class="import-overlay" @click.self="emit('close')">
-    <div class="import-dialog" role="dialog" aria-modal="true" aria-label="删除项目">
+  <Dialog :open="true" @update:open="!$event && !busy && emit('close')">
+    <DialogContent class="project-dialog" :show-close-button="false" aria-label="删除项目">
       <div class="project-dialog-title">
-        <h3>
+        <DialogTitle>
           <span class="danger-icon"><Trash2 :size="15" /></span>
           删除「{{ projectName }}」？
-        </h3>
-        <button type="button" class="dialog-close" aria-label="关闭" @click="emit('close')">
+        </DialogTitle>
+        <button type="button" class="dialog-close" aria-label="关闭" :disabled="busy" @click="emit('close')">
           <X :size="16" />
         </button>
       </div>
-      <p v-if="error" class="project-dialog-error">{{ error }}</p>
+      <DialogDescription class="sr-only">
+        确认是否删除项目及其应用内关联记录；磁盘文件会保留。
+      </DialogDescription>
+      <p v-if="error" class="project-dialog-error" role="alert">{{ error }}</p>
       <template v-else-if="preview">
         <p class="project-dialog-desc">此操作不可撤销，将从应用中移除：</p>
         <ul class="delete-list">
@@ -86,10 +94,9 @@ async function confirmDelete() {
         >
           <LoaderCircle v-if="busy" class="animate-spin" :size="16" />确认删除
         </button>
-    </div>
-    </div>
-    </div>
-  </Teleport>
+      </div>
+    </DialogContent>
+  </Dialog>
 </template>
 
 <style scoped>
@@ -100,7 +107,7 @@ async function confirmDelete() {
   gap: 12px;
 }
 
-.project-dialog-title h3 {
+.project-dialog-title h2 {
   display: flex;
   align-items: center;
   gap: 9px;

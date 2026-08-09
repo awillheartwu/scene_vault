@@ -3,6 +3,9 @@ import { computed, onMounted, ref, watch } from "vue";
 import { Archive, ExternalLink, Eye, EyeOff, Filter, Image, RefreshCw, Sparkles, UserRound } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
+import PageHeader from "@/components/layout/PageHeader.vue";
+import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 import {
   captureApi,
   captureStatusLabel,
@@ -13,6 +16,8 @@ import {
   type CaptureHistoryEntry,
   type Project,
 } from "@/lib/capture-api";
+
+const { isWideLayout } = useAdaptiveLayout();
 
 const projects = ref<Project[]>([]);
 const sessions = ref<CaptureSession[]>([]);
@@ -26,6 +31,7 @@ const page = ref(1);
 const pageSize = ref(100);
 const total = ref(0);
 const selectedId = ref<string | null>(null);
+const detailOpen = ref(false);
 const loading = ref(false);
 const errorMessage = ref("");
 const showPrivate = ref(false);
@@ -79,6 +85,11 @@ async function load() {
   } finally {
     loading.value = false;
   }
+}
+
+function selectEntry(entry: CaptureHistoryEntry) {
+  selectedId.value = entry.id;
+  detailOpen.value = true;
 }
 
 async function togglePrivate() {
@@ -148,16 +159,17 @@ onMounted(async () => {
 
 <template>
   <section class="history-page">
-    <header class="history-header">
-      <div>
-        <span class="eyebrow">Capture Archive</span>
-        <h1>截图历史</h1>
-        <p>按项目、角色和处理状态查看原图与归档结果。</p>
-      </div>
-      <button type="button" class="secondary-action" :disabled="loading" @click="load">
-        <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
-      </button>
-    </header>
+    <PageHeader
+      eyebrow="归档记录"
+      title="截图历史"
+      description="按项目、角色和处理状态查看原图与归档结果。"
+    >
+      <template #actions>
+        <button type="button" class="secondary-action" :disabled="loading" @click="load">
+          <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
+        </button>
+      </template>
+    </PageHeader>
 
     <div v-if="errorMessage" class="capture-alert" role="alert">{{ errorMessage }}</div>
 
@@ -192,7 +204,7 @@ onMounted(async () => {
           role="listitem"
           class="history-row"
           :class="{ selected: selected?.id === entry.id }"
-          @click="selectedId = entry.id"
+          @click="selectEntry(entry)"
         >
           <div class="history-thumb"><CaptureThumbnail :item="entry" /></div>
           <div class="history-main">
@@ -205,34 +217,98 @@ onMounted(async () => {
         <div v-if="!filtered.length && !loading" class="history-empty">没有符合筛选条件的截图。</div>
       </div>
 
-      <aside v-if="selected" class="history-detail">
-        <span class="eyebrow">记录详情</span>
-        <h2>{{ pathFileName(selected.sourcePath) }}</h2>
-        <div class="detail-preview">
-          <CaptureThumbnail
-            :item="selected"
-            :variant="selected.destinationPath ? 'destination' : 'source'"
-            size="full"
-          />
-        </div>
+      <ResponsiveDetailPanel
+        v-if="selected"
+        :open="detailOpen"
+        :title="pathFileName(selected.sourcePath)"
+        description="记录详情"
+        @update:open="detailOpen = $event"
+      >
+        <div class="history-detail">
+          <span v-if="isWideLayout" class="eyebrow">记录详情</span>
+          <h2 v-if="isWideLayout">{{ pathFileName(selected.sourcePath) }}</h2>
+          <div class="detail-preview">
+            <CaptureThumbnail
+              :item="selected"
+              :variant="selected.destinationPath ? 'destination' : 'source'"
+              size="full"
+            />
+          </div>
 
-        <dl>
-          <div><dt>状态</dt><dd>{{ captureStatusLabel(selected.status, selected.failureStage) }}</dd></div>
-          <div><dt>角色</dt><dd>{{ selected.characterName || "未标记" }}</dd></div>
-          <div><dt>会话</dt><dd>{{ selected.sessionStatus }}</dd></div>
-          <div><dt>捕获时间</dt><dd>{{ new Date(selected.capturedAt).toLocaleString() }}</dd></div>
-          <div v-if="selected.processingWarningsJson !== '[]'"><dt>处理提示</dt><dd>{{ selected.processingWarningsJson }}</dd></div>
-          <div v-if="selected.errorMessage" class="detail-error"><dt>错误</dt><dd>{{ selected.errorMessage }}</dd></div>
-        </dl>
+          <dl>
+            <div><dt>状态</dt><dd>{{ captureStatusLabel(selected.status, selected.failureStage) }}</dd></div>
+            <div><dt>角色</dt><dd>{{ selected.characterName || "未标记" }}</dd></div>
+            <div><dt>会话</dt><dd>{{ selected.sessionStatus }}</dd></div>
+            <div><dt>捕获时间</dt><dd>{{ new Date(selected.capturedAt).toLocaleString() }}</dd></div>
+            <div v-if="selected.processingWarningsJson !== '[]'"><dt>处理提示</dt><dd>{{ selected.processingWarningsJson }}</dd></div>
+            <div v-if="selected.errorMessage" class="detail-error"><dt>错误</dt><dd>{{ selected.errorMessage }}</dd></div>
+          </dl>
 
-        <div class="detail-paths">
-          <button type="button" @click="reveal(selected.sourcePath)"><Image :size="16" />显示原图<ExternalLink :size="13" /></button>
-          <button v-if="selected.destinationPath" type="button" @click="reveal(selected.destinationPath)"><Archive :size="16" />显示归档图<ExternalLink :size="13" /></button>
-          <button v-if="selected.destinationAvatarPath" type="button" @click="reveal(selected.destinationAvatarPath)"><UserRound :size="16" />显示头像<ExternalLink :size="13" /></button>
-          <button v-if="canReprocess(selected)" type="button" :disabled="loading" @click="reprocess(selected)"><Sparkles :size="16" />重新识别<ExternalLink :size="13" /></button>
+          <div class="detail-paths">
+            <button type="button" @click="reveal(selected.sourcePath)"><Image :size="16" />显示原图<ExternalLink :size="13" /></button>
+            <button v-if="selected.destinationPath" type="button" @click="reveal(selected.destinationPath)"><Archive :size="16" />显示归档图<ExternalLink :size="13" /></button>
+            <button v-if="selected.destinationAvatarPath" type="button" @click="reveal(selected.destinationAvatarPath)"><UserRound :size="16" />显示头像<ExternalLink :size="13" /></button>
+            <button v-if="canReprocess(selected)" type="button" :disabled="loading" @click="reprocess(selected)"><Sparkles :size="16" />重新识别<ExternalLink :size="13" /></button>
+          </div>
         </div>
-      </aside>
-      <aside v-else class="history-detail empty">选择一条历史记录查看详情。</aside>
+      </ResponsiveDetailPanel>
+
+      <ResponsiveDetailPanel v-else :open="false" title="记录详情">
+        <div class="history-detail empty">选择一条历史记录查看详情。</div>
+      </ResponsiveDetailPanel>
     </div>
   </section>
 </template>
+
+<style scoped>
+.history-page > :deep(.page-header) {
+  flex: none;
+}
+
+.history-list {
+  border-right: 0;
+}
+
+.history-detail {
+  min-height: 0;
+  padding: 20px;
+  overflow: visible;
+  background: transparent;
+}
+
+.history-detail.empty {
+  display: grid;
+  height: 100%;
+  min-height: 220px;
+  place-items: center;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.history-workspace :deep(.responsive-detail-panel.is-static) {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+}
+
+@media (max-width: 1439px) {
+  .history-page {
+    padding: 22px 24px;
+  }
+
+  .history-filters {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .history-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .history-workspace :deep(.responsive-detail-panel.is-static) {
+    border-left: 0;
+  }
+}
+</style>

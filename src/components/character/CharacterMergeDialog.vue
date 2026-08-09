@@ -2,6 +2,14 @@
 import { computed, nextTick, onMounted, ref } from "vue";
 import { ArrowRight, LoaderCircle, Merge, X } from "@lucide/vue";
 import {
+  DialogContent,
+  DialogDescription,
+  DialogOverlay,
+  DialogPortal,
+  DialogRoot,
+  DialogTitle,
+} from "reka-ui";
+import {
   captureApi,
   type Character,
   type CharacterSummary,
@@ -57,21 +65,21 @@ async function submit() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div class="import-overlay" @click.self="close">
-      <form
+  <DialogRoot :open="true" @update:open="!$event && close()">
+    <DialogPortal>
+      <DialogOverlay class="import-overlay" />
+      <DialogContent
         class="import-dialog merge-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="merge-character-title"
+      >
+      <form
+        class="merge-form"
         @submit.prevent="submit"
-        @keydown.esc.prevent="close"
       >
         <div class="merge-title">
-          <h3 id="merge-character-title">
+          <DialogTitle>
             <span class="merge-icon"><Merge :size="16" /></span>
             合并角色
-          </h3>
+          </DialogTitle>
           <button
             type="button"
             class="dialog-close"
@@ -83,9 +91,9 @@ async function submit() {
           </button>
         </div>
 
-        <p class="merge-description">
+        <DialogDescription class="merge-description">
           选择要保留的角色。来源角色会被删除，此操作不可撤销。
-        </p>
+        </DialogDescription>
 
         <label class="merge-target-field">
           保留角色
@@ -133,14 +141,24 @@ async function submit() {
           </button>
         </div>
       </form>
-    </div>
-  </Teleport>
+      </DialogContent>
+    </DialogPortal>
+  </DialogRoot>
 </template>
 
 <style scoped>
 .merge-dialog {
+  position: fixed;
+  z-index: calc(var(--layer-overlay) + 1);
+  top: 50%;
+  left: 50%;
   width: min(560px, calc(100vw - 48px));
   gap: 14px;
+  transform: translate(-50%, -50%);
+}
+
+.merge-form {
+  display: contents;
 }
 
 .merge-title {
@@ -150,7 +168,7 @@ async function submit() {
   gap: 12px;
 }
 
-.merge-title h3 {
+.merge-title h2 {
   display: flex;
   align-items: center;
   gap: 9px;

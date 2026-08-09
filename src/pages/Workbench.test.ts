@@ -291,12 +291,16 @@ describe("Workbench", () => {
     expect(renameButton).toBeDefined();
     await renameButton!.trigger("click");
 
-    expect(wrapper.text()).toContain("重命名角色");
-    expect(wrapper.text()).toContain("已归档文件与历史记录保持原名");
-    const input = wrapper.find<HTMLInputElement>(".rename-dialog input");
-    expect(input.element.value).toBe("Ava");
-    await input.setValue("Ava 2");
-    await wrapper.find("form.rename-dialog").trigger("submit");
+    await flushPromises();
+    const renameDialog = document.body.querySelector('[role="dialog"][aria-label="重命名角色"]');
+    expect(renameDialog?.textContent).toContain("已归档文件与历史记录保持原名");
+    const input = renameDialog!.querySelector("input") as HTMLInputElement;
+    expect(input.value).toBe("Ava");
+    input.value = "Ava 2";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    (renameDialog!.querySelector("form") as HTMLFormElement).dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
     await flushPromises();
 
     expect(api.renameCharacter).toHaveBeenCalledWith({
@@ -305,7 +309,7 @@ describe("Workbench", () => {
     });
     // The overview reloads after a successful rename.
     expect(api.listProjectCharacterSummaries.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(wrapper.find(".rename-dialog").exists()).toBe(false);
+    expect(document.body.querySelector('[role="dialog"][aria-label="重命名角色"]')).toBeNull();
   });
 
   it("merges the selected character into an explicitly chosen target", async () => {
@@ -448,7 +452,7 @@ describe("Workbench", () => {
     const wrapper = mount(Workbench);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Face Bank");
+    expect(wrapper.text()).toContain("人脸样本库");
     expect(wrapper.text()).toContain("1 条样本");
     expect(api.listCharacterFaceSamples).toHaveBeenCalledWith("character-1");
 

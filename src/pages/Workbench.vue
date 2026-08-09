@@ -32,6 +32,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   captureApi,
   captureStatusLabel,
   pathFileName,
@@ -124,7 +130,7 @@ function reviewStatusLabel(value: string): string {
 }
 
 function recognitionSourceLabel(value: string | null): string {
-  if (value === "face_bank") return "Face Bank";
+  if (value === "face_bank") return "人脸样本库";
   if (value === "vision") return "视觉引擎";
   if (value === "manual") return "手动";
   return "—";
@@ -783,10 +789,10 @@ onBeforeUnmount(() => {
         :description="pathFileName(selectedItem.sourcePath)"
         panel-class="workbench-detail"
       >
-        <section v-if="view === 'characters'" class="sample-strip" aria-label="Face Bank 样本库">
+        <section v-if="view === 'characters'" class="sample-strip" aria-label="人脸样本库">
           <div class="sample-strip-header">
             <button type="button" class="sample-strip-toggle" :aria-expanded="sampleStripOpen" @click="sampleStripOpen = !sampleStripOpen">
-              <span class="eyebrow">Face Bank</span>
+              <span class="eyebrow">人脸样本库</span>
               <span class="sample-strip-count">{{ samples.length }} 条样本</span>
               <ChevronDown :size="14" :class="{ rotated: sampleStripOpen }" />
             </button>
@@ -1036,17 +1042,25 @@ onBeforeUnmount(() => {
       @merged="onCharacterMerged"
     />
 
-    <div v-if="renameOpen && selectedCharacter" class="rename-overlay" @click.self="renameOpen = false">
-      <form class="rename-dialog" @submit.prevent="submitRename" @keydown.esc="renameOpen = false">
-        <span class="eyebrow">Character</span>
-        <h3>重命名角色</h3>
-        <p>只影响之后归档的截图文件名；已归档文件与历史记录保持原名。角色与截图始终按 ID 关联，不受改名影响。</p>
-        <input v-model="renameName" :disabled="renameBusy" placeholder="角色名称" autofocus />
-        <div class="rename-actions">
-          <button type="button" class="secondary-action" :disabled="renameBusy" @click="renameOpen = false">取消</button>
-          <button type="submit" class="primary-action" :disabled="renameBusy || !renameName.trim()">保存</button>
-        </div>
-      </form>
-    </div>
+    <Dialog
+      v-if="selectedCharacter"
+      :open="renameOpen"
+      @update:open="!$event && !renameBusy && (renameOpen = false)"
+    >
+      <DialogContent class="rename-dialog" :show-close-button="false" aria-label="重命名角色">
+        <span class="eyebrow">角色管理</span>
+        <DialogTitle>重命名角色</DialogTitle>
+        <DialogDescription>
+          只影响之后归档的截图文件名；已归档文件与历史记录保持原名。角色与截图始终按 ID 关联，不受改名影响。
+        </DialogDescription>
+        <form @submit.prevent="submitRename">
+          <input v-model="renameName" :disabled="renameBusy" placeholder="角色名称" autofocus />
+          <div class="rename-actions">
+            <button type="button" class="secondary-action" :disabled="renameBusy" @click="renameOpen = false">取消</button>
+            <button type="submit" class="primary-action" :disabled="renameBusy || !renameName.trim()">保存</button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
   </section>
 </template>

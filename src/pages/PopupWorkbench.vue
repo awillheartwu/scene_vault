@@ -203,11 +203,11 @@ onBeforeUnmount(() => {
 
 .workbench-header {
   display: flex;
-  height: 46px;
+  height: 48px;
   flex: none;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px 0 16px;
+  padding: 0 10px 0 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   background: color-mix(in srgb, var(--sidebar) 72%, transparent);
   backdrop-filter: var(--panel-blur);
@@ -219,18 +219,20 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 9px;
+  font-size: 12.5px;
 }
 
 .workbench-title strong {
   flex: none;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
 .workbench-sub {
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -244,17 +246,22 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);
 }
 
-.workbench-close {
+.workbench-close,
+.workbench-pin {
   display: grid;
-  width: 28px;
-  height: 28px;
-  margin-left: auto;
+  width: 40px;
+  height: 40px;
+  margin-left: 4px;
   place-items: center;
-  border: 0;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast),
+    border-color var(--motion-fast),
+    color var(--motion-fast);
 }
 
 .workbench-close:hover {
@@ -262,17 +269,10 @@ onBeforeUnmount(() => {
   color: var(--destructive);
 }
 
-.workbench-pin {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  margin-left: 4px;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
+.workbench-close:focus-visible,
+.workbench-pin:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .workbench-pin:hover {
@@ -281,6 +281,7 @@ onBeforeUnmount(() => {
 }
 
 .workbench-pin.pinned {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }
@@ -326,12 +327,12 @@ onBeforeUnmount(() => {
 
 .splitter {
   display: flex;
-  width: 32px;
+  width: 44px;
   flex: none;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 12px;
   border-left: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
   border-right: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
   background: color-mix(in srgb, var(--sidebar) 70%, transparent);
@@ -341,15 +342,20 @@ onBeforeUnmount(() => {
 
 .splitter-btn {
   display: grid;
-  width: 26px;
-  height: 30px;
+  width: 40px;
+  height: 40px;
   place-items: center;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
   transition: background-color 0.18s, color 0.18s, border-color 0.18s;
+}
+
+.splitter-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .splitter-btn:hover:not(:disabled) {
@@ -364,6 +370,8 @@ onBeforeUnmount(() => {
 }
 
 .splitter-btn.on {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
 }
 </style>

@@ -1,0 +1,320 @@
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { api, pickFile, pickDirectory, openPathExternal, leaveGuard } = vi.hoisted(() => ({
+  api: {
+    getVisionSettings: vi.fn(),
+    getAppSettings: vi.fn(),
+    getThumbnailCacheStatus: vi.fn(),
+    getArchiveNamingSettings: vi.fn(),
+    getRecognitionSettings: vi.fn(),
+    getRecognitionDefaults: vi.fn(),
+    getProcessingSettings: vi.fn(),
+    listBundledFonts: vi.fn(),
+    updateVisionSettings: vi.fn(),
+    updateAppSettings: vi.fn(),
+    updateArchiveNamingSettings: vi.fn(),
+    updateRecognitionSettings: vi.fn(),
+    updateProcessingSettings: vi.fn(),
+    checkVision: vi.fn(),
+  },
+  pickFile: vi.fn(),
+  pickDirectory: vi.fn(),
+  openPathExternal: vi.fn(),
+  leaveGuard: { current: null as null | ((...args: unknown[]) => unknown) },
+}));
+
+vi.mock("@/lib/capture-api", () => ({
+  captureApi: api,
+  pickFile,
+  pickDirectory,
+  openPathExternal,
+}));
+
+vi.mock("vue-router", () => ({
+  onBeforeRouteLeave: (guard: (...args: unknown[]) => unknown) => {
+    leaveGuard.current = guard;
+  },
+}));
+
+vi.mock("@/lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+}));
+
+import Settings from "./Settings.vue";
+
+const visionSettings = {
+  pythonExecutablePath: "C:\\Python311\\python.exe",
+  pythonModuleRoot: "C:\\sv\\python\\src",
+  yunetModelPath: "C:\\models\\yunet.onnx",
+  sfaceModelPath: "C:\\models\\sface.onnx",
+  recognizer: "sface" as const,
+  arcfaceModelPath: null,
+  fontPath: null,
+};
+
+const appSettings = {
+  classifyShortcut: "Ctrl+Shift+S",
+  noteShortcut: "Ctrl+Shift+N",
+  showPrivateByDefault: false,
+  autoSaveNotes: true,
+  splitPopupWindows: false,
+  autoCloseEmptyPopup: false,
+  thumbnailCacheSizeMb: 256,
+  thumbnailGenerationConcurrency: 1,
+};
+
+const namingSettings = {
+  template: "{source} - {character} - {id}",
+  separator: " - ",
+};
+
+const recognitionSettings = {
+  extractAtRegistration: true,
+  verificationEnabled: true,
+  profiles: {
+    "opencv-sface": {
+      confidenceThreshold: 0.5,
+      margin: 0.05,
+      verificationHighThreshold: 0.65,
+      verificationLowThreshold: 0.4,
+      crossCheckDelta: 0.1,
+    },
+    "arcface-r50": {
+      confidenceThreshold: 0.5,
+      margin: 0.1,
+      verificationHighThreshold: 0.55,
+      verificationLowThreshold: 0.35,
+      crossCheckDelta: 0.1,
+    },
+  },
+  minSampleSharpness: 3,
+  minFaceAreaRatio: 0.005,
+  minFaceConfidence: 0.6,
+};
+
+const processingSettings = {
+  detection: {
+    scoreThreshold: null,
+    nmsThreshold: null,
+    topK: null,
+    areaWeight: null,
+    confidenceWeight: null,
+    centerWeight: null,
+    sharpnessWeight: null,
+    edgePenaltyWeight: null,
+    edgeMarginRatio: null,
+    minSharpness: null,
+    blurPenaltyWeight: null,
+  },
+  annotation: {
+    textColor: [80, 220, 255],
+    strokeColor: [0, 0, 0],
+    strokeWidth: null,
+    padding: null,
+    faceTextPosition: null,
+    fallbackPosition: null,
+    textOffsetX: null,
+    textOffsetY: null,
+    fontSize: null,
+  },
+  crop: {
+    aspectRatio: null,
+    scaleX: null,
+    scaleTop: null,
+    scaleBottom: null,
+    minSize: null,
+  },
+};
+
+const cacheStatus = {
+  dir: "C:\\cache",
+  totalBytes: 1024 * 1024,
+  limitBytes: 256 * 1024 * 1024,
+};
+
+let wrapper: ReturnType<typeof mount> | null = null;
+
+function mountSettings() {
+  wrapper = mount(Settings, {
+    attachTo: document.body,
+    global: {
+      stubs: {
+        ColorField: true,
+        CornerFallbackPicker: true,
+        FaceTextPositionPicker: true,
+      },
+    },
+  });
+  return wrapper;
+}
+
+beforeEach(() => {
+  api.getVisionSettings.mockResolvedValue({ ...visionSettings });
+  api.getAppSettings.mockResolvedValue({ ...appSettings });
+  api.getThumbnailCacheStatus.mockResolvedValue({ ...cacheStatus });
+  api.getArchiveNamingSettings.mockResolvedValue({ ...namingSettings });
+  api.getRecognitionSettings.mockResolvedValue(JSON.parse(JSON.stringify(recognitionSettings)));
+  api.getProcessingSettings.mockResolvedValue(JSON.parse(JSON.stringify(processingSettings)));
+  api.listBundledFonts.mockResolvedValue([]);
+  api.getRecognitionDefaults.mockResolvedValue({
+    confidenceThreshold: 0.5,
+    margin: 0.05,
+    verificationHighThreshold: 0.65,
+    verificationLowThreshold: 0.4,
+    crossCheckDelta: 0.1,
+  });
+  api.updateVisionSettings.mockImplementation(async (settings: unknown) => ({ ...(settings as object) }));
+  api.updateAppSettings.mockImplementation(async (settings: unknown) => ({ ...(settings as object) }));
+  api.updateArchiveNamingSettings.mockImplementation(async (settings: unknown) => ({
+    ...(settings as object),
+  }));
+  api.updateRecognitionSettings.mockImplementation(async (settings: unknown) => ({
+    ...(settings as object),
+  }));
+  api.updateProcessingSettings.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  wrapper?.unmount();
+  wrapper = null;
+});
+
+describe("Settings category navigation", () => {
+  it("renders Chinese categories with every form mounted and only the active pane visible", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    const tabs = page.findAll('[role="tab"]');
+    expect(tabs.map((tab) => tab.text())).toEqual([
+      "通用设置",
+      "归档命名规则",
+      "自动角色建议",
+      "视觉处理参数",
+      "视觉引擎",
+    ]);
+    expect(tabs[0].attributes("aria-selected")).toBe("true");
+    expect(page.findAll('[role="tabpanel"]')).toHaveLength(5);
+    expect(page.findAll("form")).toHaveLength(5);
+
+    expect(page.get("#classify-shortcut").isVisible()).toBe(true);
+    expect(page.get("#naming-template").isVisible()).toBe(false);
+    expect(page.find("#naming-template").exists()).toBe(true);
+    expect(page.find(".settings-nav-dirty").exists()).toBe(false);
+  });
+
+  it("preserves input drafts across category switches and supports keyboard navigation", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#classify-shortcut").setValue("Ctrl+Shift+X");
+    expect(api.updateAppSettings).not.toHaveBeenCalled();
+    expect(page.get("#settings-tab-general").text()).toContain("未保存");
+
+    (page.get("#settings-tab-general").element as HTMLElement).focus();
+    await page.get('[role="tablist"]').trigger("keydown", { key: "ArrowDown" });
+    await flushPromises();
+
+    expect(page.get("#settings-tab-naming").attributes("aria-selected")).toBe("true");
+    expect(document.activeElement?.id).toBe("settings-tab-naming");
+    expect(page.get("#classify-shortcut").isVisible()).toBe(false);
+    expect((page.get("#classify-shortcut").element as HTMLInputElement).value).toBe(
+      "Ctrl+Shift+X",
+    );
+
+    await page.get('[role="tablist"]').trigger("keydown", { key: "ArrowUp" });
+    await flushPromises();
+
+    expect(page.get("#settings-tab-general").attributes("aria-selected")).toBe("true");
+    expect(page.get("#classify-shortcut").isVisible()).toBe(true);
+    expect((page.get("#classify-shortcut").element as HTMLInputElement).value).toBe(
+      "Ctrl+Shift+X",
+    );
+  });
+
+  it("keeps unsaved recognition threshold drafts when switching categories", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#settings-tab-recognition").trigger("click");
+    await page.get("#recognition-threshold").setValue("0.55");
+    expect(page.get("#settings-tab-recognition").text()).toContain("未保存");
+
+    await page.get("#settings-tab-general").trigger("click");
+    expect(page.get("#recognition-threshold").isVisible()).toBe(false);
+    await page.get("#settings-tab-recognition").trigger("click");
+
+    expect((page.get("#recognition-threshold").element as HTMLInputElement).value).toBe(
+      "0.55",
+    );
+  });
+
+  it("keeps per-model recognition drafts across recognizer switches", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#settings-tab-recognition").trigger("click");
+    await page.get("#recognition-threshold").setValue("0.55");
+
+    await page.get("#settings-tab-vision").trigger("click");
+    await page.get("#recognizer").setValue("arcface");
+    await flushPromises();
+    await page.get("#settings-tab-recognition").trigger("click");
+    expect((page.get("#recognition-threshold").element as HTMLInputElement).value).toBe(
+      "0.5",
+    );
+
+    await page.get("#settings-tab-vision").trigger("click");
+    await page.get("#recognizer").setValue("sface");
+    await flushPromises();
+    await page.get("#settings-tab-recognition").trigger("click");
+    expect((page.get("#recognition-threshold").element as HTMLInputElement).value).toBe(
+      "0.55",
+    );
+  });
+});
+
+describe("Settings dirty leave protection", () => {
+  it("blocks route leave with a confirm while dirty and proceeds without one after saving", async () => {
+    const page = mountSettings();
+    await flushPromises();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const next = vi.fn();
+
+    await page.get("#classify-shortcut").setValue("Ctrl+Shift+X");
+    const blocked = await leaveGuard.current?.({}, {}, next);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(blocked).toBe(false);
+    expect(next).not.toHaveBeenCalled();
+
+    confirmSpy.mockClear();
+    await page.get("form").trigger("submit");
+    await flushPromises();
+    expect(api.updateAppSettings).toHaveBeenCalledTimes(1);
+
+    const allowed = await leaveGuard.current?.({}, {}, next);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(allowed).toBe(true);
+  });
+
+  it("prevents window close while dirty and stops once the category is saved", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    const cleanEvent = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(cleanEvent);
+    expect(cleanEvent.defaultPrevented).toBe(false);
+
+    await page.get("#classify-shortcut").setValue("Ctrl+Shift+X");
+    const dirtyEvent = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirtyEvent);
+    expect(dirtyEvent.defaultPrevented).toBe(true);
+
+    await page.get("form").trigger("submit");
+    await flushPromises();
+    const savedEvent = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(savedEvent);
+    expect(savedEvent.defaultPrevented).toBe(false);
+  });
+});

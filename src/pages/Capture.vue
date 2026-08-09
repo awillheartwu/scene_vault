@@ -28,6 +28,12 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
 import {
   captureApi,
@@ -666,7 +672,7 @@ onBeforeUnmount(() => {
         </form>
       </div>
 
-      <div class="path-summary">
+      <div class="path-summary source-summary">
         <div>
           <span class="eyebrow">来源文件夹（多目录）</span>
           <ul class="source-dir-list">
@@ -704,7 +710,7 @@ onBeforeUnmount(() => {
         <span class="health-dot" :class="activeSession ? 'online' : ''"><Wifi :size="15" />{{ activeSession ? "监听中" : "未监听" }}</span>
       </div>
 
-      <div class="path-summary">
+      <div class="path-summary archive-summary">
         <div>
           <span class="eyebrow">NAS / 归档目录</span>
           <button type="button" class="path-button" :disabled="Boolean(activeSession)" @click="chooseDestination">
@@ -742,7 +748,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div v-if="loading" class="capture-loading" aria-live="polite">
-      <LoaderCircle class="animate-spin" :size="24" />正在加载 Capture Session…
+      <LoaderCircle class="animate-spin" :size="24" />正在加载捕获会话…
     </div>
 
     <div v-else class="capture-workspace">
@@ -985,11 +991,17 @@ onBeforeUnmount(() => {
       <div>{{ runtime?.queuedCount ?? 0 }} 排队 · {{ runtime?.archivePendingCount ?? 0 }} 待归档</div>
     </footer>
 
-    <div v-if="importCandidates" class="import-overlay" @click.self="importCandidates = null">
-      <div class="import-dialog" role="dialog" aria-label="导入已有截图">
+    <Dialog
+      v-if="importCandidates"
+      :open="true"
+      @update:open="!$event && !importBusy && (importCandidates = null)"
+    >
+      <DialogContent class="import-dialog" :show-close-button="false" aria-label="导入已有截图">
         <span class="eyebrow">导入已有截图</span>
-        <h3>发现 {{ importCandidates.length }} 张未入库图片</h3>
-        <p>来源目录中已存在、但还没有登记记录的图片，导入后会进入待分类队列。</p>
+        <DialogTitle>发现 {{ importCandidates.length }} 张未入库图片</DialogTitle>
+        <DialogDescription>
+          来源目录中已存在、但还没有登记记录的图片；导入只登记记录，不会立即识别或批量加载缩略图。
+        </DialogDescription>
         <ul class="import-list">
           <li v-for="candidate in importCandidates.slice(0, 10)" :key="candidate.path">
             {{ pathFileName(candidate.path) }}
@@ -1003,8 +1015,8 @@ onBeforeUnmount(() => {
             <LoaderCircle v-if="importBusy" class="animate-spin" :size="17" />全部导入（{{ importCandidates.length }}）
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
 
     <ProjectRenameDialog
       v-if="renameTarget"

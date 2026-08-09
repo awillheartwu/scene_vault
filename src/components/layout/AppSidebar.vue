@@ -48,6 +48,7 @@ const menus = [
         class="sidebar-link"
         active-class="active"
         :aria-label="item.name"
+        :data-label="item.name"
         :title="item.name"
       >
         <component :is="item.icon" :size="20" aria-hidden="true" />
