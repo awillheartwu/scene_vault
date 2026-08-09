@@ -27,6 +27,7 @@ import {
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
+import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
 import {
   captureApi,
@@ -68,6 +69,7 @@ const importBusy = ref(false);
 const deferredImportCount = ref(0);
 const showProjectForm = ref(false);
 const renameTarget = ref<Project | null>(null);
+const labelPanelOpen = ref(false);
 const showCharacterForm = ref(false);
 const newProjectName = ref("");
 const newCharacterName = ref("");
@@ -396,12 +398,14 @@ async function doLabel(itemId: string, characterId: string) {
   upsertItem(updated);
   selectedCharacterId.value = null;
   pendingClassification.value = null;
+  labelPanelOpen.value = false;
   selectNextWaiting(itemId);
 }
 
 async function submitClassification(classification: CaptureClassification) {
   if (!selectedItem.value || classification === "person") {
     pendingClassification.value = "person";
+    labelPanelOpen.value = true;
     void refreshSuggestion();
     return;
   }
@@ -757,9 +761,19 @@ onBeforeUnmount(() => {
               {{ selectedItem ? captureStatusLabel(selectedItem.status, selectedItem.failureStage) : "等待截图" }}
             </span>
           </div>
-          <div v-if="selectedItem" class="file-meta">
-            <span>{{ pathFileName(selectedItem.sourcePath) }}</span>
-            <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
+          <div class="stage-heading-actions">
+            <div v-if="selectedItem" class="file-meta">
+              <span>{{ pathFileName(selectedItem.sourcePath) }}</span>
+              <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
+            </div>
+            <button
+              type="button"
+              class="secondary-action label-panel-trigger"
+              :aria-expanded="labelPanelOpen"
+              @click="labelPanelOpen = true"
+            >
+              <UserRound :size="16" />角色与分类
+            </button>
           </div>
         </div>
 
@@ -840,7 +854,12 @@ onBeforeUnmount(() => {
         </section>
       </main>
 
-      <aside class="label-panel" aria-labelledby="label-title">
+      <ResponsiveDetailPanel
+        v-model:open="labelPanelOpen"
+        title="角色与分类"
+        description="选择分类，并在人物截图中指定主角色。"
+        panel-class="label-panel"
+      >
         <div class="label-panel-heading">
           <div>
             <span class="eyebrow">快速分类</span>
@@ -954,7 +973,7 @@ onBeforeUnmount(() => {
           </button>
           <p>选择角色后开始本地处理和可靠归档</p>
         </div>
-      </aside>
+      </ResponsiveDetailPanel>
     </div>
 
     <footer class="capture-footer">

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { X } from "@lucide/vue";
-import { DialogContent, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
+import {
+  DialogContent,
+  DialogOverlay,
+  DialogPortal,
+  DialogRoot,
+  DialogTitle,
+} from "reka-ui";
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 
 const props = withDefaults(
@@ -36,7 +42,7 @@ const { isWideLayout } = useAdaptiveLayout();
     @update:open="emit('update:open', $event)"
   >
     <DialogPortal>
-      <div class="responsive-detail-scrim" />
+      <DialogOverlay class="responsive-detail-scrim" />
       <DialogContent
         :class="['responsive-detail-panel', 'is-drawer', panelClass]"
         :aria-describedby="description ? 'responsive-detail-description' : undefined"

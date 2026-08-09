@@ -12,6 +12,7 @@ import {
   Grid2X2,
   List,
   LoaderCircle,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
@@ -21,8 +22,16 @@ import {
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
+import PageHeader from "@/components/layout/PageHeader.vue";
 import ProjectDeleteDialog from "@/components/project/ProjectDeleteDialog.vue";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   captureApi,
   type CaptureItem,
@@ -230,13 +239,12 @@ function setupLabel(project: ProjectOverviewSummary): string {
 
 <template>
   <section class="project-home">
-    <header class="project-heading">
-      <div>
-        <span class="eyebrow">Scene Vault · Project Library</span>
-        <h1>项目中心</h1>
-        <p>所有项目一览；从项目进入人物工作台，或直接继续截图采集。</p>
-      </div>
-      <div class="heading-actions">
+    <PageHeader
+      eyebrow="项目库"
+      title="项目中心"
+      description="浏览所有项目，进入人物工作台或继续截图采集。"
+    >
+      <template #actions>
         <div class="runtime-pill" :class="{ idle: runtime?.workerStatus === 'idle' }">
           <span class="runtime-dot" />
           捕获服务 {{ runtime?.workerStatus === "idle" ? "待命" : "运行中" }}
@@ -245,8 +253,8 @@ function setupLabel(project: ProjectOverviewSummary): string {
           <span class="runtime-dot engine" />
           {{ runtime?.engineStatus === "configured" ? "AI 引擎已就绪" : "AI 未配置" }}
         </div>
-      </div>
-    </header>
+      </template>
+    </PageHeader>
 
     <div v-if="errorMessage" class="home-alert" role="alert">
       <TriangleAlert :size="17" aria-hidden="true" />
@@ -262,18 +270,14 @@ function setupLabel(project: ProjectOverviewSummary): string {
         <span class="sr-only">搜索项目</span>
         <input v-model="search" type="search" placeholder="搜索项目名称…" />
       </label>
-      <div class="sort-switch" role="group" aria-label="项目排序方式">
-        <button
-          v-for="mode in SORT_MODES"
-          :key="mode.value"
-          type="button"
-          :class="{ active: sortMode === mode.value }"
-          :aria-pressed="sortMode === mode.value"
-          @click="setSortMode(mode.value)"
-        >
-          {{ mode.label }}
-        </button>
-      </div>
+      <label class="sort-select">
+        <span>排序</span>
+        <select :value="sortMode" @change="setSortMode(($event.target as HTMLSelectElement).value as SortMode)">
+          <option v-for="mode in SORT_MODES" :key="mode.value" :value="mode.value">
+            {{ mode.label }}
+          </option>
+        </select>
+      </label>
       <button
         type="button"
         class="sort-direction-button"
@@ -393,29 +397,29 @@ function setupLabel(project: ProjectOverviewSummary): string {
             title="继续捕获"
             @click="startCapture(project.projectId)"
           >
-            <Camera :size="18" aria-hidden="true" />
+            <Camera :size="17" aria-hidden="true" />继续捕获
           </button>
-          <button
-            type="button"
-            class="card-action-button"
-            :aria-label="`重命名 ${project.name}`"
-            title="重命名"
-            @click="renameTarget = project"
-          >
-            <Pencil :size="16" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            class="card-action-button card-action-danger"
-            :aria-label="`删除 ${project.name}`"
-            title="删除项目"
-            @click="deleteTarget = project"
-          >
-            <Trash2 :size="16" aria-hidden="true" />
-          </button>
-          <button type="button" class="enter-project-button" @click="openProject(project.projectId)">
-            进入项目<ArrowRight :size="17" aria-hidden="true" />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger as-child>
+              <button
+                type="button"
+                class="card-action-button"
+                :aria-label="`${project.name} 更多操作`"
+                title="更多操作"
+              >
+                <MoreHorizontal :size="18" aria-hidden="true" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="project-action-menu">
+              <DropdownMenuItem @select="renameTarget = project">
+                <Pencil :size="15" aria-hidden="true" />重命名
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem class="project-menu-danger" @select="deleteTarget = project">
+                <Trash2 :size="15" aria-hidden="true" />删除项目
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </footer>
       </article>
     </div>
@@ -529,27 +533,6 @@ function setupLabel(project: ProjectOverviewSummary): string {
   margin: 0;
 }
 
-.project-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 28px;
-}
-
-.project-heading h1 {
-  margin: 3px 0 0;
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: -0.035em;
-  line-height: 1.12;
-}
-
-.project-heading p {
-  margin: 8px 0 0;
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-
 .heading-actions {
   display: none;
   align-items: center;
@@ -652,37 +635,28 @@ function setupLabel(project: ProjectOverviewSummary): string {
   font-size: 13px;
 }
 
-.sort-switch {
+.sort-select {
   display: inline-flex;
-  gap: 4px;
-  padding: 4px;
+  height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: color-mix(in srgb, var(--card) 58%, transparent);
-}
-
-.sort-switch button {
-  height: 34px;
-  padding: 0 10px;
-  border: none;
-  border-radius: 7px;
-  background: transparent;
   color: var(--muted-foreground);
   font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  font-weight: 650;
 }
 
-.sort-switch button:hover {
+.sort-select select {
+  height: 34px;
+  padding: 0 28px 0 8px;
+  border: 0;
+  background: transparent;
   color: var(--foreground);
-}
-
-.sort-switch button.active {
-  background: var(--accent);
-  color: var(--accent-foreground);
-  box-shadow: var(--inner-highlight);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .sort-direction-button {
@@ -853,7 +827,7 @@ function setupLabel(project: ProjectOverviewSummary): string {
 
 .active-session-badge span { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
-.project-card-body { min-height: 150px; padding: 15px 16px 13px; }
+.project-card-body { min-height: 136px; padding: 15px 16px 13px; }
 .project-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .project-title-row svg { flex: none; margin-top: 4px; color: var(--muted-foreground); transition: color .18s ease, transform .18s ease; }
 .project-card:hover .project-title-row svg { color: var(--accent); transform: translateX(2px); }
@@ -882,14 +856,17 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .project-config.warning { color: var(--warn); }
 
 .project-card-footer {
-  display: grid;
-  grid-template-columns: 44px 44px 44px minmax(0, 1fr);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 10px;
   padding: 12px 16px 15px;
   border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
 }
 
-.enter-project-button { width: 100%; }
+.capture-project-button { display: inline-flex; width: auto; padding: 0 14px; gap: 7px; color: var(--foreground); font-weight: 650; }
+.project-action-menu [role="menuitem"] { display: flex; align-items: center; gap: 8px; }
+.project-menu-danger { color: var(--destructive); }
 
 .project-list {
   width: 100%;
@@ -957,6 +934,13 @@ function setupLabel(project: ProjectOverviewSummary): string {
   .runtime-pill { display: none; }
   .project-list-head,
   .project-row { grid-template-columns: minmax(0, 1fr) 105px; }
+}
+
+@media (max-width: 1120px) {
+  .project-grid { grid-template-columns: 1fr; }
+  .project-toolbar { position: sticky; z-index: 10; top: -1px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--background) 92%, transparent); backdrop-filter: var(--panel-blur); }
+  .project-search { max-width: none; flex-basis: calc(100% - 320px); }
+  .project-cover { height: 132px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

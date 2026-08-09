@@ -319,9 +319,7 @@ describe("Workbench", () => {
     await mergeButton!.trigger("click");
     await flushPromises();
 
-    const dialog = document.body.querySelector(
-      '[role="dialog"][aria-labelledby="merge-character-title"]',
-    );
+    const dialog = document.body.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("Ava");
     const options = Array.from(dialog!.querySelectorAll("option")).map(
@@ -334,7 +332,7 @@ describe("Workbench", () => {
     select.value = "character-2";
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushPromises();
-    (dialog as HTMLFormElement).dispatchEvent(
+    (dialog!.querySelector("form") as HTMLFormElement).dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true }),
     );
     await flushPromises();
@@ -343,7 +341,7 @@ describe("Workbench", () => {
       sourceCharacterId: "character-1",
       targetCharacterId: "character-2",
     });
-    expect(document.body.querySelector("#merge-character-title")).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     expect(
       useToasts().toasts.some((entry) => entry.message.includes("已将「Ava」合并到「Bella」")),
     ).toBe(true);
@@ -364,14 +362,14 @@ describe("Workbench", () => {
     select.value = "character-2";
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushPromises();
-    (dialog as HTMLFormElement).dispatchEvent(
+    (dialog.querySelector("form") as HTMLFormElement).dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true }),
     );
     await flushPromises();
 
     const alert = dialog.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("角色正在被其他操作更新");
-    expect(document.body.querySelector("#merge-character-title")).toBeTruthy();
+    expect(document.body.querySelector('[role="dialog"]')).toBeTruthy();
   });
 
   it("sets the selected archived face crop as the representative avatar", async () => {

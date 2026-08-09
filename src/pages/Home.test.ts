@@ -165,7 +165,7 @@ describe("Home project library", () => {
     const wrapper = mount(Home);
     await flushPromises();
 
-    await wrapper.findAll(".enter-project-button")[0].trigger("click");
+    await wrapper.findAll(".project-card-main")[0].trigger("click");
     expect(localStorage.getItem("scene-vault.capture.project")).toBe("project-bad");
     expect(push).toHaveBeenCalledWith("/workbench");
 
@@ -192,7 +192,9 @@ describe("Home project library", () => {
     const wrapper = mount(Home);
     await flushPromises();
 
-    await wrapper.get('[aria-label="重命名 BAD"]').trigger("click");
+    await wrapper.get('[aria-label="BAD 更多操作"]').trigger("click");
+    await flushPromises();
+    (Array.from(document.body.querySelectorAll('[role="menuitem"]')).find((item) => item.textContent?.includes("重命名")) as HTMLElement).click();
     await flushPromises();
 
     const dialog = document.body.querySelector('[role="dialog"][aria-label="重命名项目"]');
@@ -217,7 +219,9 @@ describe("Home project library", () => {
     const wrapper = mount(Home);
     await flushPromises();
 
-    await wrapper.get('[aria-label="删除 BAD"]').trigger("click");
+    await wrapper.get('[aria-label="BAD 更多操作"]').trigger("click");
+    await flushPromises();
+    (Array.from(document.body.querySelectorAll('[role="menuitem"]')).find((item) => item.textContent?.includes("删除项目")) as HTMLElement).click();
     await flushPromises();
 
     expect(api.previewProjectDelete).toHaveBeenCalledWith("project-bad");
@@ -240,10 +244,7 @@ describe("Home project library", () => {
     const wrapper = mount(Home);
     await flushPromises();
 
-    const nameButton = wrapper
-      .findAll(".sort-switch button")
-      .find((button) => button.text() === "名称");
-    await nameButton!.trigger("click");
+    await wrapper.get(".sort-select select").setValue("name");
     expect(wrapper.findAll(".project-card")[0].text()).toContain("BAD");
     expect(wrapper.findAll(".project-card")[2].text()).toContain("Summer Heat");
 
@@ -260,18 +261,12 @@ describe("Home project library", () => {
     const wrapper = mount(Home);
     await flushPromises();
 
-    const capturesButton = wrapper
-      .findAll(".sort-switch button")
-      .find((button) => button.text() === "图片数");
-    await capturesButton!.trigger("click");
+    await wrapper.get(".sort-select select").setValue("captures");
     expect(wrapper.findAll(".project-card")[0].text()).toContain("BAD");
     await wrapper.get('[aria-label="当前倒序，点击切换为正序"]').trigger("click");
     expect(wrapper.findAll(".project-card")[0].text()).toContain("Eternum");
 
-    const createdButton = wrapper
-      .findAll(".sort-switch button")
-      .find((button) => button.text() === "创建时间");
-    await createdButton!.trigger("click");
+    await wrapper.get(".sort-select select").setValue("created");
     expect(wrapper.findAll(".project-card")[0].text()).toContain("Eternum");
     await wrapper.get('[aria-label="当前倒序，点击切换为正序"]').trigger("click");
     expect(wrapper.findAll(".project-card")[0].text()).toContain("BAD");

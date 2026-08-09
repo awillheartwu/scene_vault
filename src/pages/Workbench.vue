@@ -10,6 +10,7 @@ import {
   ChevronsRight,
   ExternalLink,
   Image,
+  MoreHorizontal,
   Pencil,
   RefreshCw,
   RotateCcw,
@@ -22,6 +23,14 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CharacterMergeDialog from "@/components/character/CharacterMergeDialog.vue";
+import PageHeader from "@/components/layout/PageHeader.vue";
+import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   captureApi,
   captureStatusLabel,
@@ -53,6 +62,7 @@ const renameOpen = ref(false);
 const renameName = ref("");
 const renameBusy = ref(false);
 const mergeOpen = ref(false);
+const detailOpen = ref(false);
 const mergeButton = ref<HTMLButtonElement | null>(null);
 let unlisteners: UnlistenFn[] = [];
 
@@ -126,6 +136,11 @@ function normalizeError(error: unknown): string {
 
 function thumbnailItem(id: string): CaptureItem {
   return { id, sourcePath: "capture.png" } as CaptureItem;
+}
+
+function openItemDetail(id: string) {
+  selectedItemId.value = id;
+  detailOpen.value = true;
 }
 
 function summaryThumbnailItemId(summary: CharacterSummary): string {
@@ -516,36 +531,39 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="workbench-page">
-    <header class="workbench-header">
-      <div>
-        <span class="eyebrow">Character Workbench</span>
-        <h1>人物工作台</h1>
-        <p>按角色复查截图与 AI 建议；改判后自动重新处理并替换归档。</p>
-      </div>
-      <label class="workbench-project">
-        项目
-        <select v-model="projectId">
-          <option v-for="project in projects" :key="project.id" :value="project.id">
-            {{ project.name }}
-          </option>
-        </select>
-      </label>
-      <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData">
-        <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
-      </button>
-      <button
-        type="button"
-        class="secondary-action"
-        :disabled="busy || !projectId"
-        title="用当前配置的识别模型重新提取全部人物截图特征并重建样本库"
-        @click="rebuildFaceBank"
-      >
-        <Sparkles :size="17" />重建人脸样本库
-        <span v-if="rebuildProgress" class="rebuild-progress">
-          {{ rebuildProgress.processed }}/{{ rebuildProgress.total }}
-        </span>
-      </button>
-    </header>
+    <PageHeader
+      eyebrow="人物与识别"
+      title="人物工作台"
+      description="按角色复查截图与识别建议；改判后自动重新处理并替换归档。"
+    >
+      <template #actions>
+        <label class="workbench-project">
+          项目
+          <select v-model="projectId">
+            <option v-for="project in projects" :key="project.id" :value="project.id">
+              {{ project.name }}
+            </option>
+          </select>
+        </label>
+        <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData">
+          <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <button type="button" class="icon-action" aria-label="人物维护" title="人物维护">
+              <MoreHorizontal :size="18" aria-hidden="true" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="workbench-maintenance-menu">
+            <DropdownMenuItem :disabled="busy || !projectId" @select="rebuildFaceBank">
+              <Sparkles :size="15" aria-hidden="true" />
+              重建人脸样本库
+              <span v-if="rebuildProgress">{{ rebuildProgress.processed }}/{{ rebuildProgress.total }}</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </template>
+    </PageHeader>
     <div v-if="modelStatus && !modelStatus.compatible" class="model-mismatch-banner">
       <span>
         样本库共有 {{ modelStatus.sampleCount }} 条，其中
@@ -735,7 +753,7 @@ onBeforeUnmount(() => {
             role="listitem"
             class="workbench-cell"
             :class="{ selected: selectedItemId === item.id }"
-            @click="selectedItemId = item.id"
+            @click="openItemDetail(item.id)"
           >
             <span class="workbench-cell-thumb">
               <CaptureThumbnail :item="item" :variant="item.destinationPath ? 'destination' : 'source'" />
@@ -758,7 +776,13 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <aside v-if="selectedItem" class="workbench-detail" aria-label="截图详情">
+      <ResponsiveDetailPanel
+        v-if="selectedItem"
+        v-model:open="detailOpen"
+        title="截图详情"
+        :description="pathFileName(selectedItem.sourcePath)"
+        panel-class="workbench-detail"
+      >
         <section v-if="view === 'characters'" class="sample-strip" aria-label="Face Bank 样本库">
           <div class="sample-strip-header">
             <button type="button" class="sample-strip-toggle" :aria-expanded="sampleStripOpen" @click="sampleStripOpen = !sampleStripOpen">
@@ -1000,7 +1024,7 @@ onBeforeUnmount(() => {
             </div>
           </section>
         </div>
-      </aside>
+      </ResponsiveDetailPanel>
       <aside v-else class="workbench-detail empty">选择一张截图查看详情。</aside>
     </div>
 
