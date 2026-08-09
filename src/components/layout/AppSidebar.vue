@@ -35,7 +35,10 @@ const menus = [
 
 <template>
   <aside class="app-sidebar">
-    <div class="sidebar-brand"><span class="brand-mark"><Vault :size="18" /></span><span>SCENE<br /><strong>VAULT</strong></span></div>
+    <div class="sidebar-brand">
+      <span class="brand-mark"><Vault :size="18" /></span>
+      <span class="brand-copy">SCENE<br /><strong>VAULT</strong></span>
+    </div>
 
     <nav aria-label="主导航">
       <RouterLink
@@ -44,14 +47,15 @@ const menus = [
         :to="item.path"
         class="sidebar-link"
         active-class="active"
+        :aria-label="item.name"
+        :title="item.name"
       >
-        <component :is="item.icon" :size="20" />
-
-        {{ item.name }}
+        <component :is="item.icon" :size="20" aria-hidden="true" />
+        <span class="sidebar-label">{{ item.name }}</span>
       </RouterLink>
     </nav>
     <div class="sidebar-footer">
-      <span class="status-dot active" />本地优先
+      <span class="status-dot active" /><span class="sidebar-footer-label">本地优先</span>
       <button
         type="button"
         class="theme-toggle"
