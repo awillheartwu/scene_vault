@@ -7,7 +7,7 @@ use tauri::WebviewUrl;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 
-use crate::{error::AppError, models::app_settings::AppSettings};
+use crate::{error::AppError, models::app_settings::AppSettings, services::log_service};
 
 pub const CLASSIFY_POPUP_LABEL: &str = "classify-popup";
 pub const NOTE_POPUP_LABEL: &str = "note-popup";
@@ -76,14 +76,26 @@ pub fn reconfigure(
 }
 
 fn register_classify_shortcut(app: &AppHandle, value: &str) -> Result<(), AppError> {
-    eprintln!("[shortcut] registering classify shortcut: {value}");
+    log_service::info(
+        "shortcut.classify",
+        format!("registering shortcut: {value}"),
+    );
     let shortcut = Shortcut::from_str(value).map_err(|error| {
-        eprintln!("[shortcut] invalid shortcut {value}: {error}");
+        log_service::error(
+            "shortcut.classify",
+            format!("invalid shortcut {value}: {error}"),
+        );
         AppError::Validation(format!("classify shortcut is invalid: {error}"))
     })?;
-    eprintln!("[shortcut] parsed: {shortcut:?}");
+    log_service::debug(
+        "shortcut.classify",
+        format!("parsed shortcut: {shortcut:?}"),
+    );
     let handler = move |app: &AppHandle, _shortcut: &Shortcut, event: ShortcutEvent| {
-        eprintln!("[shortcut] event received, state={:?}", event.state());
+        log_service::debug(
+            "shortcut.classify",
+            format!("event received: {:?}", event.state()),
+        );
         if event.state() == ShortcutState::Pressed {
             show_classify_popup(app);
         }
@@ -91,17 +103,20 @@ fn register_classify_shortcut(app: &AppHandle, value: &str) -> Result<(), AppErr
     app.global_shortcut()
         .on_shortcut(shortcut, handler)
         .map_err(|error| {
-            eprintln!("[shortcut] register failed: {error}");
+            log_service::error("shortcut.classify", format!("registration failed: {error}"));
             AppError::Validation(format!("cannot register shortcut: {error}"))
         })?;
-    eprintln!("[shortcut] registered ok");
+    log_service::info("shortcut.classify", "shortcut registered");
     Ok(())
 }
 
 fn register_note_shortcut(app: &AppHandle, value: &str) -> Result<(), AppError> {
-    eprintln!("[shortcut] registering note shortcut: {value}");
+    log_service::info("shortcut.note", format!("registering shortcut: {value}"));
     let shortcut = Shortcut::from_str(value).map_err(|error| {
-        eprintln!("[shortcut] invalid note shortcut {value}: {error}");
+        log_service::error(
+            "shortcut.note",
+            format!("invalid shortcut {value}: {error}"),
+        );
         AppError::Validation(format!("note shortcut is invalid: {error}"))
     })?;
     let handler = move |app: &AppHandle, _shortcut: &Shortcut, event: ShortcutEvent| {
@@ -112,10 +127,10 @@ fn register_note_shortcut(app: &AppHandle, value: &str) -> Result<(), AppError> 
     app.global_shortcut()
         .on_shortcut(shortcut, handler)
         .map_err(|error| {
-            eprintln!("[shortcut] note register failed: {error}");
+            log_service::error("shortcut.note", format!("registration failed: {error}"));
             AppError::Validation(format!("cannot register note shortcut: {error}"))
         })?;
-    eprintln!("[shortcut] note registered ok");
+    log_service::info("shortcut.note", "shortcut registered");
     Ok(())
 }
 
@@ -142,7 +157,7 @@ fn show_classify_popup(app: &AppHandle) {
 }
 
 fn show_workbench_window(app: &AppHandle, label: &str, title: &str, width: f64, height: f64) {
-    eprintln!("[shortcut] show_workbench_window called: {label}");
+    log_service::debug("shortcut.window", format!("show requested: {label}"));
     let window = match app.get_webview_window(label) {
         Some(window) => window,
         None => match WebviewWindowBuilder::new(app, label, WebviewUrl::default())
@@ -159,30 +174,45 @@ fn show_workbench_window(app: &AppHandle, label: &str, title: &str, width: f64, 
             .build()
         {
             Ok(window) => {
-                eprintln!("[shortcut] popup window recreated on demand");
+                log_service::info("shortcut.window", format!("recreated popup: {label}"));
                 window
             }
             Err(error) => {
-                eprintln!("[shortcut] popup window recreate failed: {error}");
+                log_service::error(
+                    "shortcut.window",
+                    format!("could not recreate {label}: {error}"),
+                );
                 return;
             }
         },
     };
     if !window.is_visible().unwrap_or(false) {
-        eprintln!("[shortcut] popup window hidden, showing");
+        log_service::debug("shortcut.window", format!("showing hidden popup: {label}"));
     }
     match window.show() {
-        Ok(()) => eprintln!("[shortcut] show ok"),
-        Err(error) => eprintln!("[shortcut] show failed: {error}"),
+        Ok(()) => log_service::debug("shortcut.window", format!("showed popup: {label}")),
+        Err(error) => log_service::error(
+            "shortcut.window",
+            format!("could not show {label}: {error}"),
+        ),
     }
     match window.set_focus() {
-        Ok(()) => eprintln!("[shortcut] focus ok"),
-        Err(error) => eprintln!("[shortcut] focus failed: {error}"),
+        Ok(()) => log_service::debug("shortcut.window", format!("focused popup: {label}")),
+        Err(error) => log_service::warn(
+            "shortcut.window",
+            format!("could not focus {label}: {error}"),
+        ),
     }
     if let Err(error) = window.emit("classify:refresh", ()) {
-        eprintln!("[shortcut] emit failed: {error}");
+        log_service::warn(
+            "shortcut.window",
+            format!("refresh event failed for {label}: {error}"),
+        );
     }
     if let Err(error) = window.emit("popup:configure", ()) {
-        eprintln!("[shortcut] configure emit failed: {error}");
+        log_service::warn(
+            "shortcut.window",
+            format!("configure event failed for {label}: {error}"),
+        );
     }
 }

@@ -204,7 +204,10 @@ async fn process_awaiting_label_feature(
             // marking it "no face", and back off a minute so a broken engine
             // does not spin the worker every poll cycle. Only a successful
             // run that finds no face writes the "[]" marker below.
-            eprintln!("[worker] face feature extraction failed: {error}");
+            crate::services::log_service::error(
+                "capture.worker",
+                format!("face feature extraction failed: {error}"),
+            );
             sqlx::query(
                 r#"
                 UPDATE capture_items

@@ -8,6 +8,7 @@ pub mod capture_service;
 pub mod capture_worker_service;
 pub mod character_service;
 pub mod font_service;
+pub mod log_service;
 pub mod notes_service;
 pub mod processing_settings_service;
 pub mod project_service;

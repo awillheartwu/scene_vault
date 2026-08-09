@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     error::AppError,
     models::capture::{DiscoverCapturesInput, DiscoverCapturesResult},
-    services::capture_service,
+    services::{capture_service, log_service},
 };
 
 const DEFAULT_STABILITY_DELAY_MS: u64 = 250;
@@ -209,7 +209,7 @@ async fn poll_active_sessions_once(
     for session_id in session_ids {
         // One unavailable source (for example a sleeping network share) must
         // not stop other active sessions from being reconciled.
-        if let Ok(result) = discover(
+        match discover(
             pool,
             DiscoverCapturesInput {
                 session_id: session_id.clone(),
@@ -218,25 +218,34 @@ async fn poll_active_sessions_once(
         )
         .await
         {
-            // Observability only: a scan crossing the poll interval or a
-            // directory growing large shows up here before polling needs any
-            // architectural change (notify/reconciliation is a later option).
-            if result.scan_duration_ms >= 1_000 || result.entries_scanned >= 1_000 {
-                eprintln!(
-                    "[discovery] session={session_id} scan={}ms entries={} new={} known={} unstable={} ignored={}",
-                    result.scan_duration_ms,
-                    result.entries_scanned,
-                    result.discovered_count,
-                    result.already_known_count,
-                    result.unstable_count,
-                    result.ignored_count,
-                );
-            }
-            if let Some(app) = app {
-                for item in result.discovered_items {
-                    let _ = app.emit("capture:item-created", item);
+            Ok(result) => {
+                // Observability only: a scan crossing the poll interval or a
+                // directory growing large shows up here before polling needs any
+                // architectural change (notify/reconciliation is a later option).
+                if result.scan_duration_ms >= 1_000 || result.entries_scanned >= 1_000 {
+                    log_service::warn(
+                        "capture.discovery",
+                        format!(
+                            "slow scan: session={session_id} duration={}ms entries={} new={} known={} unstable={} ignored={}",
+                            result.scan_duration_ms,
+                            result.entries_scanned,
+                            result.discovered_count,
+                            result.already_known_count,
+                            result.unstable_count,
+                            result.ignored_count,
+                        ),
+                    );
+                }
+                if let Some(app) = app {
+                    for item in result.discovered_items {
+                        let _ = app.emit("capture:item-created", item);
+                    }
                 }
             }
+            Err(error) => log_service::warn(
+                "capture.discovery",
+                format!("poll failed for session {session_id}: {error}"),
+            ),
         }
     }
     Ok(())

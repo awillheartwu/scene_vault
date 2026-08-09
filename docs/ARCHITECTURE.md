@@ -69,6 +69,18 @@ Python 每次只处理 Rust 指定的一张图片及本地输出路径。它不�
 名单、不修改 SQLite，也不把半成品写到 NAS。协议字段和错误码见
 [Python AI 协议](../python/README.md)。
 
+## 本地日志与诊断
+
+Rust 的 `log_service` 是运行日志的统一入口。日志按 JSON Lines 写入 Tauri 应用日志目录，
+使用 `debug`、`info`、`warn`、`error` 四个等级和稳定的模块名。Python 标准错误中的非进度
+信息由 Rust 归入 `vision.python` 模块；Python 不直接管理桌面应用日志文件。业务线程只向
+有界队列提交记录，独立日志线程负责写盘；队列满时丢弃单条日志，不阻塞截图处理。
+
+单个日志文件达到 5 MiB 后轮转，归档文件保留 14 天且最多 20 个。清理在启动、轮转和
+用户手动触发时执行。History 调试日志查看器通过只读 Tauri Command 查询最近记录，查询
+上限为 1000 条；诊断摘要只汇总运行环境和最近 24 小时的警告、错误，不读取数据库业务
+内容。完整约束见[本地日志与诊断信息决策](decisions/2026-08-09-local-logging-and-diagnostics.md)。
+
 OCR、Caption 和通用 Embedding Provider 仍是未来能力；现有 Provider 抽象应允许它们
 独立加入，但当前文档不得将其描述为已实现。
 

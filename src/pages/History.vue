@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { Archive, ExternalLink, Eye, EyeOff, Filter, Image, RefreshCw, Sparkles, UserRound } from "@lucide/vue";
+import { Archive, ExternalLink, Eye, EyeOff, FileClock, Filter, Image, RefreshCw, Sparkles, UserRound } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
+import DebugLogDialog from "@/components/history/DebugLogDialog.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
@@ -35,6 +36,7 @@ const detailOpen = ref(false);
 const loading = ref(false);
 const errorMessage = ref("");
 const showPrivate = ref(false);
+const debugLogsOpen = ref(false);
 
 const selected = computed(() => entries.value.find((entry) => entry.id === selectedId.value) ?? entries.value[0] ?? null);
 const filtered = computed(() => entries.value);
@@ -165,6 +167,9 @@ onMounted(async () => {
       description="按项目、角色和处理状态查看原图与归档结果。"
     >
       <template #actions>
+        <button type="button" class="secondary-action" @click="debugLogsOpen = true">
+          <FileClock :size="17" />调试日志
+        </button>
         <button type="button" class="secondary-action" :disabled="loading" @click="load">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
         </button>
@@ -257,6 +262,8 @@ onMounted(async () => {
         <div class="history-detail empty">选择一条历史记录查看详情。</div>
       </ResponsiveDetailPanel>
     </div>
+
+    <DebugLogDialog v-if="debugLogsOpen" @close="debugLogsOpen = false" />
   </section>
 </template>
 

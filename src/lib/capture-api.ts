@@ -224,6 +224,35 @@ export interface CaptureHistoryPage {
   total: number;
 }
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogRecord {
+  timestamp: string;
+  level: LogLevel;
+  module: string;
+  message: string;
+}
+
+export interface LogQueryResult {
+  records: LogRecord[];
+  matchedCount: number;
+  truncated: boolean;
+}
+
+export interface LogStatus {
+  directory: string;
+  fileCount: number;
+  totalBytes: number;
+  retentionDays: number;
+  maxFileBytes: number;
+  maxArchivedFiles: number;
+}
+
+export interface LogCleanupResult {
+  removedFiles: number;
+  status: LogStatus;
+}
+
 export interface VisionSettings {
   pythonExecutablePath: string | null;
   pythonModuleRoot: string | null;
@@ -483,6 +512,24 @@ export const captureApi = {
       },
     }),
   runtimeStatus: () => invoke<CaptureRuntimeStatus>("get_capture_runtime_status"),
+  listDebugLogs: (input: {
+    since?: string | null;
+    until?: string | null;
+    levels?: LogLevel[];
+    module?: string | null;
+    limit?: number;
+  }) => invoke<LogQueryResult>("list_debug_logs", {
+    input: {
+      since: input.since ?? null,
+      until: input.until ?? null,
+      levels: input.levels ?? [],
+      module: input.module ?? null,
+      limit: input.limit,
+    },
+  }),
+  getLogStatus: () => invoke<LogStatus>("get_log_status"),
+  cleanupDebugLogs: () => invoke<LogCleanupResult>("cleanup_debug_logs"),
+  getDiagnosticSummary: () => invoke<string>("get_diagnostic_summary"),
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   updateAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("update_app_settings", { input: { settings } }),

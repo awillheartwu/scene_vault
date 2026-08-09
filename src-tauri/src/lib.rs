@@ -31,6 +31,14 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let log_directory = app.path().app_log_dir()?;
+            if let Err(error) = services::log_service::initialize(log_directory) {
+                eprintln!("[ERROR] [app.startup] could not initialize logging: {error}");
+            }
+            services::log_service::info(
+                "app.startup",
+                format!("Scene Vault {} is starting", env!("CARGO_PKG_VERSION")),
+            );
             let app_handle = app.handle().clone();
             let cache_root = app.path().app_cache_dir()?.join("capture-output");
             let pool = tauri::async_runtime::block_on(async {
@@ -41,7 +49,10 @@ pub fn run() {
             app.manage(AppState { pool: pool.clone() });
             {
                 let labels: Vec<String> = app.webview_windows().keys().cloned().collect();
-                eprintln!("[window] webview windows at startup: {labels:?}");
+                services::log_service::debug(
+                    "window.startup",
+                    format!("webview windows at startup: {labels:?}"),
+                );
             }
             {
                 let app_settings =
@@ -150,6 +161,10 @@ pub fn run() {
             commands::settings::update_recognition_settings,
             commands::settings::get_processing_settings,
             commands::settings::update_processing_settings,
+            commands::diagnostics::list_debug_logs,
+            commands::diagnostics::get_log_status,
+            commands::diagnostics::cleanup_debug_logs,
+            commands::diagnostics::get_diagnostic_summary,
             commands::window::set_window_always_on_top,
         ])
         .run(tauri::generate_context!())

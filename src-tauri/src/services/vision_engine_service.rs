@@ -10,7 +10,7 @@ use tokio::{
 use crate::{
     error::AppError,
     models::vision::{ProcessingSettings, VisionHealth, VisionProcessData, VisionSettings},
-    services::vision_settings_service,
+    services::{log_service, vision_settings_service},
 };
 
 const PROTOCOL_VERSION: i64 = 1;
@@ -335,6 +335,11 @@ async fn invoke_with_progress(
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Some((stage, percent)) = parse_progress_line(&line) {
                         callback(&stage, percent);
+                    } else if !line.trim().is_empty() {
+                        log_service::debug(
+                            "vision.python",
+                            format!("stderr: {}", truncate(&line, 500)),
+                        );
                     }
                 }
             });
@@ -361,6 +366,15 @@ async fn invoke_with_progress(
         .map_err(|_| AppError::Vision("Python request timed out".to_owned()))?
         .map_err(|error| AppError::Vision(format!("Python process failed: {error}")))?;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        log_service::debug(
+            "vision.python",
+            format!(
+                "stderr: {}",
+                truncate(&stderr.replace(['\r', '\n'], " | "), 1_000)
+            ),
+        );
+    }
     let response: EngineResponse = serde_json::from_slice(&output.stdout).map_err(|error| {
         AppError::Vision(format!(
             "Python returned invalid JSON: {error}{}",
