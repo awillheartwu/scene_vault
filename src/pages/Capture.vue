@@ -809,6 +809,8 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <CaptureProgress persistent class="stage-progress" />
+
         <div class="preview-shell" :class="{ empty: !selectedItem }">
           <img v-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />
           <div v-else class="preview-empty">
@@ -899,8 +901,6 @@ onBeforeUnmount(() => {
           </div>
           <span v-if="pendingClassification === 'person'" class="shortcut-hint">1–5</span>
         </div>
-
-        <CaptureProgress class="aside-progress" />
 
         <button
           v-if="pendingClassification === 'person' && suggestedCharacter"

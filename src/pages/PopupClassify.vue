@@ -467,7 +467,7 @@ onBeforeUnmount(() => {
         <img v-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
         <div v-else class="popup-preview-empty"><ImageOff :size="28" /><span>无法加载预览</span></div>
       </div>
-      <CaptureProgress />
+      <CaptureProgress persistent />
 
       <div v-if="ctx && ctx.items.length > 1" class="popup-nav">
         <button type="button" class="popup-nav-button" :disabled="currentIndex === 0" aria-label="上一张" @click="selectPrevious">

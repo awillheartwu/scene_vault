@@ -46,7 +46,14 @@ export function useCaptureProgress() {
         }),
         await listen<RuntimeStatusPayload>("capture:runtime-status", (event) => {
           queuedCount.value = event.payload.queuedCount;
-          if (!event.payload.activeCaptureItemId) {
+          const nextActiveItemId = event.payload.activeCaptureItemId;
+          if (nextActiveItemId) {
+            if (activeItemId.value !== nextActiveItemId) {
+              stage.value = null;
+              percent.value = 0;
+            }
+            activeItemId.value = nextActiveItemId;
+          } else {
             if (event.payload.queuedCount === 0 && event.payload.archivePendingCount === 0) {
               activeItemId.value = null;
               stage.value = null;

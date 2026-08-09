@@ -186,6 +186,9 @@ describe("Capture adaptive label panel trigger", () => {
       await flushPromises();
       expect(wrapper.find(".responsive-detail-panel.is-static").exists()).toBe(true);
       expect(wrapper.find(".label-panel-trigger").exists()).toBe(false);
+      expect(wrapper.get(".stage-progress").text()).toContain("图片处理状态");
+      expect(wrapper.get(".stage-progress").text()).toContain("空闲");
+      expect(wrapper.findAll(".project-controls .icon-button")).toHaveLength(2);
     } finally {
       wrapper.unmount();
     }
