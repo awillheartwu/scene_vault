@@ -65,6 +65,7 @@ export interface CharacterSummary {
   name: string;
   aliasesJson: string;
   avatarAssetId: string | null;
+  avatarCaptureItemId: string | null;
   captureCount: number;
   pendingReviewCount: number;
   sampleCount: number;

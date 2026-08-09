@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useToasts } from "@/lib/toast";
 
 const { api, eventHandlers } = vi.hoisted(() => ({
@@ -19,6 +19,8 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     reviewRecognitionSuggestion: vi.fn(),
     relabel: vi.fn(),
     renameCharacter: vi.fn(),
+    mergeCharacters: vi.fn(),
+    setCharacterAvatar: vi.fn(),
     retry: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
@@ -62,6 +64,7 @@ const summaries = [
     name: "Ava",
     aliasesJson: "[]",
     avatarAssetId: null,
+    avatarCaptureItemId: null,
     captureCount: 2,
     pendingReviewCount: 1,
     sampleCount: 1,
@@ -75,6 +78,7 @@ const summaries = [
     name: "Bella",
     aliasesJson: "[]",
     avatarAssetId: null,
+    avatarCaptureItemId: null,
     captureCount: 0,
     pendingReviewCount: 0,
     sampleCount: 0,
@@ -181,8 +185,17 @@ beforeEach(() => {
   });
   api.reviewRecognitionSuggestion.mockResolvedValue(item);
   api.renameCharacter.mockResolvedValue({ ...characters[0], name: "Ava 2" });
+  api.mergeCharacters.mockResolvedValue(characters[1]);
+  api.setCharacterAvatar.mockResolvedValue({
+    ...characters[0],
+    avatarAssetId: "asset-1",
+  });
   api.readImage.mockResolvedValue(new ArrayBuffer(8));
   api.readThumbnail.mockResolvedValue(new ArrayBuffer(8));
+});
+
+afterEach(() => {
+  document.body.innerHTML = "";
 });
 
 describe("Workbench", () => {
@@ -293,6 +306,144 @@ describe("Workbench", () => {
     // The overview reloads after a successful rename.
     expect(api.listProjectCharacterSummaries.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(wrapper.find(".rename-dialog").exists()).toBe(false);
+  });
+
+  it("merges the selected character into an explicitly chosen target", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const mergeButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("合并角色"));
+    expect(mergeButton).toBeDefined();
+    await mergeButton!.trigger("click");
+    await flushPromises();
+
+    const dialog = document.body.querySelector(
+      '[role="dialog"][aria-labelledby="merge-character-title"]',
+    );
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("Ava");
+    const options = Array.from(dialog!.querySelectorAll("option")).map(
+      (option) => option.textContent,
+    );
+    expect(options.some((option) => option?.includes("Ava ·"))).toBe(false);
+    expect(options.some((option) => option?.includes("Bella ·"))).toBe(true);
+
+    const select = dialog!.querySelector("select") as HTMLSelectElement;
+    select.value = "character-2";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushPromises();
+    (dialog as HTMLFormElement).dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+    await flushPromises();
+
+    expect(api.mergeCharacters).toHaveBeenCalledWith({
+      sourceCharacterId: "character-1",
+      targetCharacterId: "character-2",
+    });
+    expect(document.body.querySelector("#merge-character-title")).toBeNull();
+    expect(
+      useToasts().toasts.some((entry) => entry.message.includes("已将「Ava」合并到「Bella」")),
+    ).toBe(true);
+  });
+
+  it("keeps the merge dialog open and announces backend errors", async () => {
+    api.mergeCharacters.mockRejectedValueOnce(new Error("角色正在被其他操作更新"));
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("合并角色"))!
+      .trigger("click");
+    await flushPromises();
+    const dialog = document.body.querySelector('[role="dialog"]')!;
+    const select = dialog.querySelector("select") as HTMLSelectElement;
+    select.value = "character-2";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushPromises();
+    (dialog as HTMLFormElement).dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+    await flushPromises();
+
+    const alert = dialog.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("角色正在被其他操作更新");
+    expect(document.body.querySelector("#merge-character-title")).toBeTruthy();
+  });
+
+  it("sets the selected archived face crop as the representative avatar", async () => {
+    api.listCharacterCaptureItems.mockResolvedValue([
+      {
+        ...item,
+        assetId: "asset-1",
+        avatarPath: "C:\\cache\\avatar.png",
+        destinationPath: "C:\\archive\\one.png",
+        destinationAvatarPath: "C:\\archive\\avatar.png",
+        status: "completed",
+        reviewStatus: "none",
+      },
+    ]);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const setAvatar = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("设为代表头像"));
+    expect(setAvatar).toBeDefined();
+    expect(setAvatar!.attributes("disabled")).toBeUndefined();
+    await setAvatar!.trigger("click");
+    await flushPromises();
+
+    expect(api.setCharacterAvatar).toHaveBeenCalledWith({
+      characterId: "character-1",
+      avatarAssetId: "asset-1",
+    });
+    expect(
+      useToasts().toasts.some((entry) => entry.message.includes("设为「Ava」的代表头像")),
+    ).toBe(true);
+  });
+
+  it("disables avatar assignment for an unarchived capture and can clear an existing avatar", async () => {
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], avatarAssetId: "asset-1", avatarCaptureItemId: "item-1" },
+      summaries[1],
+    ]);
+    api.setCharacterAvatar.mockResolvedValue({
+      ...characters[0],
+      avatarAssetId: null,
+    });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const setAvatar = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("设为代表头像"));
+    expect(setAvatar?.attributes("disabled")).toBeDefined();
+    const clearAvatar = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("清除代表头像"));
+    expect(clearAvatar).toBeDefined();
+    await clearAvatar!.trigger("click");
+    await flushPromises();
+
+    expect(api.setCharacterAvatar).toHaveBeenCalledWith({
+      characterId: "character-1",
+      avatarAssetId: null,
+    });
+  });
+
+  it("renders the explicit representative avatar instead of the newest fallback", async () => {
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], avatarAssetId: "asset-2", avatarCaptureItemId: "item-avatar" },
+      summaries[1],
+    ]);
+    mount(Workbench);
+    await flushPromises();
+
+    expect(api.readThumbnail).toHaveBeenCalledWith("item-avatar", "avatar");
   });
 
   it("shows the face-bank sample strip and revokes a sample", async () => {

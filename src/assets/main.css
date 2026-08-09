@@ -524,6 +524,7 @@
   .suggestion-status.empty { color: var(--muted-foreground); font-size: 11px; }
   .action-buttons { display: flex; gap: 8px; }
   .action-hint { color: var(--muted-foreground); font-size: 10.5px; line-height: 1.5; }
+  .avatar-actions .action-hint { flex-basis: 100%; }
   .path-button { display: flex; height: 30px; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--secondary); color: var(--foreground); font-size: 11px; }
   .path-button svg:last-child { margin-left: 3px; opacity: .7; }
   .workbench-empty { display: grid; min-height: 150px; place-items: center; color: var(--muted-foreground); font-size: 12px; }

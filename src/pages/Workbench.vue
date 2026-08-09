@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Archive,
@@ -21,6 +21,7 @@ import {
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
+import CharacterMergeDialog from "@/components/character/CharacterMergeDialog.vue";
 import {
   captureApi,
   captureStatusLabel,
@@ -51,6 +52,8 @@ const busy = ref(false);
 const renameOpen = ref(false);
 const renameName = ref("");
 const renameBusy = ref(false);
+const mergeOpen = ref(false);
+const mergeButton = ref<HTMLButtonElement | null>(null);
 let unlisteners: UnlistenFn[] = [];
 
 type WorkbenchView = "characters" | "unclassified" | "scene" | "private";
@@ -73,6 +76,22 @@ const viewLabel = computed(() => {
 });
 const selectedItem = computed(
   () => items.value.find((item) => item.id === selectedItemId.value) ?? null,
+);
+const canSetSelectedAsAvatar = computed(() => {
+  const item = selectedItem.value;
+  return Boolean(
+    view.value === "characters" &&
+      selectedCharacter.value &&
+      item?.characterId === selectedCharacterId.value &&
+      item.assetId &&
+      item.avatarPath,
+  );
+});
+const selectedItemIsRepresentativeAvatar = computed(() =>
+  Boolean(
+    selectedCharacter.value?.avatarAssetId &&
+      selectedCharacter.value.avatarAssetId === selectedItem.value?.assetId,
+  ),
 );
 
 function characterName(id: string | null | undefined): string {
@@ -107,6 +126,10 @@ function normalizeError(error: unknown): string {
 
 function thumbnailItem(id: string): CaptureItem {
   return { id, sourcePath: "capture.png" } as CaptureItem;
+}
+
+function summaryThumbnailItemId(summary: CharacterSummary): string {
+  return summary.avatarCaptureItemId ?? summary.latestCaptureItemId ?? "";
 }
 
 function canReprocess(item: CaptureItem): boolean {
@@ -326,6 +349,45 @@ async function submitRename() {
   } finally {
     renameBusy.value = false;
   }
+}
+
+function closeMerge() {
+  mergeOpen.value = false;
+  void nextTick(() => mergeButton.value?.focus());
+}
+
+async function onCharacterMerged(character: Character) {
+  mergeOpen.value = false;
+  selectedCharacterId.value = character.id;
+  await loadCharacterData();
+  void nextTick(() => mergeButton.value?.focus());
+}
+
+async function setRepresentativeAvatar(avatarAssetId: string | null) {
+  const character = selectedCharacter.value;
+  if (!character || busy.value) return;
+  busy.value = true;
+  try {
+    await captureApi.setCharacterAvatar({
+      characterId: character.id,
+      avatarAssetId,
+    });
+    toast.success(
+      avatarAssetId
+        ? `已将当前截图设为「${character.name}」的代表头像。`
+        : `已清除「${character.name}」的代表头像，将自动显示最近头像。`,
+    );
+    await loadCharacterData();
+  } catch (error) {
+    toast.error(normalizeError(error));
+  } finally {
+    busy.value = false;
+  }
+}
+
+function setSelectedAsRepresentativeAvatar() {
+  if (!canSetSelectedAsAvatar.value || !selectedItem.value?.assetId) return;
+  return setRepresentativeAvatar(selectedItem.value.assetId);
 }
 
 async function toggleSample(sample: FaceSample) {
@@ -556,9 +618,11 @@ onBeforeUnmount(() => {
         >
           <span class="character-avatar">
             <CaptureThumbnail
-              v-if="summary.latestCaptureItemId"
-              :item="thumbnailItem(summary.latestCaptureItemId)"
-              :variant="summary.latestAvatarPath ? 'avatar' : 'source'"
+              v-if="summary.avatarCaptureItemId || summary.latestCaptureItemId"
+              :item="thumbnailItem(summaryThumbnailItemId(summary))"
+              :variant="summary.avatarCaptureItemId || summary.latestAvatarPath ? 'avatar' : 'source'"
+              :fallback-variant="summary.avatarCaptureItemId || summary.latestAvatarPath ? 'source' : undefined"
+              :alt="`${summary.name} 的角色头像`"
             />
             <UserRound v-else :size="18" />
           </span>
@@ -620,6 +684,17 @@ onBeforeUnmount(() => {
             </button>
           </h2>
           <span class="grid-actions">
+            <button
+              v-if="view === 'characters' && selectedCharacter && summaries.length > 1"
+              ref="mergeButton"
+              type="button"
+              class="secondary-action"
+              :disabled="busy"
+              :title="`将 ${selectedCharacter.name} 合并到另一个角色`"
+              @click="mergeOpen = true"
+            >
+              <Users :size="14" />合并角色
+            </button>
             <button
               v-if="view === 'characters' && selectedCharacter && selectedCharacter.pendingReviewCount > 0"
               type="button"
@@ -863,6 +938,38 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
+          <section v-if="view === 'characters' && selectedCharacter" class="action-card">
+            <span class="action-card-title">代表头像</span>
+            <div class="action-card-body avatar-actions">
+              <button
+                type="button"
+                class="primary-action"
+                :disabled="busy || !canSetSelectedAsAvatar || selectedItemIsRepresentativeAvatar"
+                @click="setSelectedAsRepresentativeAvatar"
+              >
+                <UserRound :size="16" />
+                {{ selectedItemIsRepresentativeAvatar ? "当前代表头像" : "设为代表头像" }}
+              </button>
+              <button
+                v-if="selectedCharacter.avatarAssetId"
+                type="button"
+                class="secondary-action"
+                :disabled="busy"
+                @click="setRepresentativeAvatar(null)"
+              >
+                <RotateCcw :size="16" />清除代表头像
+              </button>
+              <span class="action-hint">
+                <template v-if="canSetSelectedAsAvatar">
+                  使用当前截图的人脸裁剪；只影响角色卡片展示，不修改截图或归档文件。
+                </template>
+                <template v-else>
+                  当前截图需要完成人脸处理和归档后，才能设为代表头像。
+                </template>
+              </span>
+            </div>
+          </section>
+
           <section v-if="canReprocess(selectedItem)" class="action-card">
             <span class="action-card-title">处理</span>
             <div class="action-card-body">
@@ -896,6 +1003,14 @@ onBeforeUnmount(() => {
       </aside>
       <aside v-else class="workbench-detail empty">选择一张截图查看详情。</aside>
     </div>
+
+    <CharacterMergeDialog
+      v-if="mergeOpen && selectedCharacter"
+      :source="selectedCharacter"
+      :characters="summaries"
+      @close="closeMerge"
+      @merged="onCharacterMerged"
+    />
 
     <div v-if="renameOpen && selectedCharacter" class="rename-overlay" @click.self="renameOpen = false">
       <form class="rename-dialog" @submit.prevent="submitRename" @keydown.esc="renameOpen = false">

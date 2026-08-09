@@ -50,6 +50,10 @@ pub struct CharacterSummary {
     pub name: String,
     pub aliases_json: String,
     pub avatar_asset_id: Option<String>,
+    /// Capture item behind the explicitly selected representative avatar.
+    /// Null when the character has no representative asset or that asset has
+    /// no readable avatar crop.
+    pub avatar_capture_item_id: Option<String>,
     pub capture_count: i64,
     pub pending_review_count: i64,
     /// Active face-bank samples of this character.

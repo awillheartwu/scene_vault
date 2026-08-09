@@ -318,6 +318,15 @@ pub async fn list_project_summaries(
             character.name,
             character.aliases_json,
             character.avatar_asset_id,
+            (
+                SELECT representative.id
+                FROM capture_items representative
+                WHERE representative.asset_id = character.avatar_asset_id
+                  AND representative.classification = 'person'
+                  AND representative.avatar_path IS NOT NULL
+                ORDER BY representative.captured_at DESC, representative.created_at DESC
+                LIMIT 1
+            ) AS avatar_capture_item_id,
             COUNT(item.id) AS capture_count,
             (
                 SELECT COUNT(*)
@@ -776,6 +785,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_keeps_the_target_representative_avatar() {
+        let pool = db::test_pool().await;
+        let project = project_service::create(
+            &pool,
+            CreateProjectInput {
+                name: "Sample Game".to_owned(),
+                description: None,
+                cover_asset_id: None,
+            },
+        )
+        .await
+        .expect("project");
+        let source = character(&pool, &project.id, "Ava", None).await;
+        let target = character(&pool, &project.id, "Bella", None).await;
+        asset(&pool, &project.id, "asset-source-avatar").await;
+        asset(&pool, &project.id, "asset-target-avatar").await;
+        set_avatar(
+            &pool,
+            SetCharacterAvatarInput {
+                character_id: source.id.clone(),
+                avatar_asset_id: Some("asset-source-avatar".to_owned()),
+            },
+        )
+        .await
+        .expect("source avatar");
+        set_avatar(
+            &pool,
+            SetCharacterAvatarInput {
+                character_id: target.id.clone(),
+                avatar_asset_id: Some("asset-target-avatar".to_owned()),
+            },
+        )
+        .await
+        .expect("target avatar");
+
+        let merged = merge(
+            &pool,
+            MergeCharactersInput {
+                source_character_id: source.id,
+                target_character_id: target.id,
+            },
+        )
+        .await
+        .expect("merge");
+
+        assert_eq!(
+            merged.avatar_asset_id.as_deref(),
+            Some("asset-target-avatar")
+        );
+    }
+
+    #[tokio::test]
     async fn merge_rejects_self_and_different_projects() {
         let pool = db::test_pool().await;
         let project = project_service::create(
@@ -1047,6 +1108,41 @@ mod tests {
         assert_eq!(
             ava_updated.latest_avatar_path.as_deref(),
             Some(avatar_path.to_str().expect("path"))
+        );
+
+        // An explicit representative avatar points at its capture even when
+        // that capture is not the newest one. The workbench can then render
+        // the user-selected crop instead of silently continuing to show the
+        // latest image.
+        let representative_item_id = first_item_id.as_deref().expect("first item");
+        asset(&pool, &project.id, "representative-asset").await;
+        let representative_avatar_path = source_dir.join("representative-avatar.png");
+        sqlx::query("UPDATE capture_items SET asset_id = ?, avatar_path = ? WHERE id = ?")
+            .bind("representative-asset")
+            .bind(representative_avatar_path.to_str().expect("avatar path"))
+            .bind(representative_item_id)
+            .execute(&pool)
+            .await
+            .expect("set representative capture");
+        set_avatar(
+            &pool,
+            SetCharacterAvatarInput {
+                character_id: ava.id.clone(),
+                avatar_asset_id: Some("representative-asset".to_owned()),
+            },
+        )
+        .await
+        .expect("set representative avatar");
+        let representative = list_project_summaries(&pool, &project.id)
+            .await
+            .expect("representative summary");
+        let ava_representative = representative
+            .iter()
+            .find(|summary| summary.id == ava.id)
+            .expect("ava representative summary");
+        assert_eq!(
+            ava_representative.avatar_capture_item_id.as_deref(),
+            Some(representative_item_id)
         );
 
         // Enrolling a face sample surfaces in the overview count.
