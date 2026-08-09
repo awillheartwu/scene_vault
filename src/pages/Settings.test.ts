@@ -112,6 +112,7 @@ const processingSettings = {
     strokeColor: [0, 0, 0],
     strokeWidth: null,
     padding: null,
+    faceBoxExpansion: null,
     faceTextPosition: null,
     fallbackPosition: null,
     textOffsetX: null,
@@ -316,5 +317,33 @@ describe("Settings dirty leave protection", () => {
     const savedEvent = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(savedEvent);
     expect(savedEvent.defaultPrevented).toBe(false);
+  });
+});
+
+describe("Settings processing hierarchy", () => {
+  it("uses semantic secondary headings and saves independent positioning margins", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#settings-tab-processing").trigger("click");
+    expect(page.findAll("#settings-pane-processing h3").map((heading) => heading.text())).toEqual([
+      "01人脸检测",
+      "02文字标注",
+      "03头像裁剪",
+    ]);
+
+    await page.get("#face-box-expansion").setValue("48");
+    await page.get("#canvas-padding").setValue("24");
+    await page.get("#settings-pane-processing form").trigger("submit");
+    await flushPromises();
+
+    expect(api.updateProcessingSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        annotation: expect.objectContaining({
+          faceBoxExpansion: 48,
+          padding: 24,
+        }),
+      }),
+    );
   });
 });

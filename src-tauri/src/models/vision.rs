@@ -57,6 +57,9 @@ pub struct AnnotationSettings {
     pub stroke_color: Option<[u8; 3]>,
     pub stroke_width: Option<i64>,
     pub padding: Option<i64>,
+    /// Symmetric pixel expansion of the detected face reference box used for
+    /// text placement. `padding` remains the canvas safety/text gap.
+    pub face_box_expansion: Option<i64>,
     /// Preferred text position relative to the detected face:
     /// `above`, `right`, `below` or `left`.
     pub face_text_position: Option<String>,

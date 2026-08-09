@@ -52,6 +52,7 @@ _ANNOTATION_FIELDS = frozenset(
         "strokeColor",
         "strokeWidth",
         "padding",
+        "faceBoxExpansion",
         "faceTextPosition",
         "fallbackPosition",
         "fontPath",
@@ -99,6 +100,9 @@ class AnnotationConfig:
     stroke_color: tuple[int, int, int] = (0, 0, 0)
     stroke_width: int = 2
     padding: int = 32
+    # Symmetric pixel expansion of the detected face reference box used for
+    # text placement; padding remains the canvas safety/text gap.
+    face_box_expansion: int = 0
     face_text_position: str = "above"
     fallback_position: str = "top_left"
     # Custom text placement relative to the face box when
@@ -316,6 +320,13 @@ class ProcessingRequest:
                 annotation_payload,
                 "padding",
                 32,
+                minimum=0,
+                maximum=4096,
+            ),
+            face_box_expansion=_integer(
+                annotation_payload,
+                "faceBoxExpansion",
+                0,
                 minimum=0,
                 maximum=4096,
             ),

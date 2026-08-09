@@ -78,6 +78,30 @@ class VisionConfigTests(unittest.TestCase):
         with self.assertRaises(InvalidPayloadError):
             ProcessingRequest.from_payload(payload)
 
+    def test_parses_face_box_expansion(self) -> None:
+        payload = valid_payload()
+        payload["annotation"] = {"faceBoxExpansion": 64}
+        request = ProcessingRequest.from_payload(payload)
+        self.assertEqual(request.annotation.face_box_expansion, 64)
+
+        request = ProcessingRequest.from_payload(valid_payload())
+        self.assertEqual(request.annotation.face_box_expansion, 0)
+
+    def test_rejects_out_of_range_face_box_expansion(self) -> None:
+        for value in (-1, 4097, 1.5, "32"):
+            with self.subTest(value=value):
+                payload = valid_payload()
+                payload["annotation"] = {"faceBoxExpansion": value}
+                with self.assertRaises(InvalidPayloadError):
+                    ProcessingRequest.from_payload(payload)
+
+        for value in (0, 4096):
+            with self.subTest(value=value):
+                payload = valid_payload()
+                payload["annotation"] = {"faceBoxExpansion": value}
+                request = ProcessingRequest.from_payload(payload)
+                self.assertEqual(request.annotation.face_box_expansion, value)
+
     def test_rejects_relative_uri_unc_and_device_paths(self) -> None:
         invalid_paths = (
             "relative/input.png",

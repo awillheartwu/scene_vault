@@ -208,6 +208,9 @@ fn processing_payload(
         if let Some(padding) = annotation.padding {
             object.insert("padding".to_owned(), json!(padding));
         }
+        if let Some(face_box_expansion) = annotation.face_box_expansion {
+            object.insert("faceBoxExpansion".to_owned(), json!(face_box_expansion));
+        }
         if let Some(position) = &annotation.face_text_position {
             object.insert("faceTextPosition".to_owned(), json!(position));
         }
@@ -463,6 +466,7 @@ mod tests {
                 font_size: Some(64),
                 stroke_width: Some(4),
                 padding: Some(40),
+                face_box_expansion: Some(48),
                 text_color: Some([1, 2, 3]),
                 face_text_position: Some("custom".to_owned()),
                 text_offset_x: Some(-0.3),
@@ -484,6 +488,7 @@ mod tests {
         assert_eq!(payload["annotation"]["fontSize"].as_i64(), Some(64));
         assert_eq!(payload["annotation"]["strokeWidth"].as_i64(), Some(4));
         assert_eq!(payload["annotation"]["padding"].as_i64(), Some(40));
+        assert_eq!(payload["annotation"]["faceBoxExpansion"].as_i64(), Some(48));
         assert_eq!(payload["annotation"]["textColor"], json!([1, 2, 3]));
         assert_eq!(payload["annotation"]["faceTextPosition"], "custom");
         assert_eq!(payload["annotation"]["textOffsetX"].as_f64(), Some(-0.3));

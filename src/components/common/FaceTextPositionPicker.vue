@@ -66,6 +66,10 @@ const position = computed<string>(() => props.modelValue.faceTextPosition || "ab
 const isCustom = computed(() => position.value === "custom");
 const offsetX = computed(() => props.modelValue.textOffsetX);
 const offsetY = computed(() => props.modelValue.textOffsetY);
+const faceBoxExpansion = computed(() => props.modelValue.faceBoxExpansion ?? 0);
+const expansionPreview = computed(() =>
+  Math.min(36, Math.round(Math.sqrt(Math.max(0, faceBoxExpansion.value)) * 2.5)),
+);
 
 /** 1-based rank for a star: 1 when it is the discrete primary, else chain order. */
 function starRank(value: string): number {
@@ -303,8 +307,12 @@ const chainPreview = computed(() => {
     <div
       ref="stageRef"
       class="picker-stage"
+      role="group"
+      aria-label="人脸旁文字位置示意图"
+      :style="{ '--face-expansion': `${expansionPreview * 2}px` }"
       @pointerdown="onPointerDown"
     >
+      <div class="face-reference-box" aria-hidden="true" />
       <div class="face-circle" aria-hidden="true">
         <UserRound :size="34" stroke-width="1.5" />
       </div>
@@ -347,10 +355,14 @@ const chainPreview = computed(() => {
         <span v-if="isCustom" class="marker-badge">1</span>
       </div>
     </div>
-    <p class="picker-hint">
-      首选 <strong>{{ primaryLabel }}</strong>；放不下时按顺序降级：{{ chainPreview }}
+    <div class="picker-summary" aria-live="polite">
+      <span>当前首选</span>
+      <strong>{{ primaryLabel }}</strong>
+      <span v-if="faceBoxExpansion > 0" class="expansion-chip">参考框外扩 {{ faceBoxExpansion }} px</span>
+    </div>
+    <p class="picker-instructions">
+      备用顺序：{{ chainPreview }}<br />点星星选方向；拖动圆点或点击空白自由定位；方向键微调，Shift 加快。
     </p>
-    <p class="picker-caption">点星星选方向 · 拖动圆点或点击空白自由定位 · 方向键微调（Shift 加快）</p>
   </div>
 </template>
 
@@ -386,6 +398,20 @@ const chainPreview = computed(() => {
   align-items: center;
   justify-content: center;
   pointer-events: none;
+}
+
+.face-reference-box {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(84px + var(--face-expansion));
+  height: calc(84px + var(--face-expansion));
+  border: 1px dashed color-mix(in srgb, var(--primary) 58%, var(--border));
+  border-radius: 14px;
+  transform: translate(-50%, -50%);
+  background: color-mix(in srgb, var(--primary) 4%, transparent);
+  pointer-events: none;
+  transition: width var(--motion-fast), height var(--motion-fast);
 }
 
 .pos-btn {
@@ -477,17 +503,34 @@ const chainPreview = computed(() => {
   padding: 0 3px;
 }
 
-.picker-hint {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.6;
+.picker-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
   color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.picker-caption {
-  margin-top: 2px;
-  font-size: 10.5px;
-  line-height: 1.5;
-  color: color-mix(in srgb, var(--muted-foreground) 80%, transparent);
+.picker-summary strong {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.expansion-chip {
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
+  border-radius: 999px;
+  color: var(--primary);
+}
+
+.picker-instructions {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

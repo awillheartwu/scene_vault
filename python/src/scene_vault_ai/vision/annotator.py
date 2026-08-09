@@ -51,17 +51,20 @@ class ImageAnnotator:
         text_height = text_box[3] - text_box[1]
 
         if face_box is not None:
+            ref_x, ref_y, ref_width, ref_height = self._expanded_face_box(
+                face_box
+            )
             preferred = {
-                "above": (face_box.x, face_box.y - text_height - padding),
+                "above": (ref_x, ref_y - text_height - padding),
                 "right": (
-                    face_box.x + face_box.width + padding,
-                    face_box.y,
+                    ref_x + ref_width + padding,
+                    ref_y,
                 ),
                 "below": (
-                    face_box.x,
-                    face_box.y + face_box.height + padding,
+                    ref_x,
+                    ref_y + ref_height + padding,
                 ),
-                "left": (face_box.x - text_width - padding, face_box.y),
+                "left": (ref_x - text_width - padding, ref_y),
             }
             if (
                 self.config.face_text_position == "custom"
@@ -71,12 +74,10 @@ class ImageAnnotator:
                 # Place the text center at an arbitrary point relative to the
                 # face box; offsets are multiples of the box width/height.
                 center_x = (
-                    face_box.x
-                    + face_box.width * (0.5 + self.config.text_offset_x)
+                    ref_x + ref_width * (0.5 + self.config.text_offset_x)
                 )
                 center_y = (
-                    face_box.y
-                    + face_box.height * (0.5 + self.config.text_offset_y)
+                    ref_y + ref_height * (0.5 + self.config.text_offset_y)
                 )
                 first = (
                     int(round(center_x - text_width / 2)),
@@ -115,6 +116,25 @@ class ImageAnnotator:
         }
         left, top = positions.get(self.config.fallback_position, (padding, padding))
         return max(padding, left), max(padding, top)
+
+    def _expanded_face_box(
+        self, face_box: FaceBox
+    ) -> tuple[int, int, int, int]:
+        """Expands the face reference box symmetrically for text placement.
+
+        `padding` is intentionally not involved: it remains the canvas
+        safety/text gap, while this expansion moves text farther from the
+        face and scales custom offsets against a larger reference box.
+        """
+        expansion = self.config.face_box_expansion
+        if expansion == 0:
+            return face_box.x, face_box.y, face_box.width, face_box.height
+        return (
+            face_box.x - expansion,
+            face_box.y - expansion,
+            face_box.width + 2 * expansion,
+            face_box.height + 2 * expansion,
+        )
 
 
 def _load_font(config: AnnotationConfig) -> Any:

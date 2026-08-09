@@ -481,6 +481,7 @@ function emptyAnnotation(): AnnotationSettings {
     strokeColor: null,
     strokeWidth: null,
     padding: null,
+    faceBoxExpansion: null,
     faceTextPosition: null,
     fallbackPosition: null,
     textOffsetX: null,
@@ -1063,9 +1064,9 @@ onBeforeUnmount(() => {
         <span class="eyebrow">图像处理 · 可选</span>
         <h2>视觉处理参数</h2>
       </div>
-      <div class="processing-group">
+      <section class="processing-group" aria-labelledby="processing-detection-title">
         <div class="processing-group-title">
-          <span>人脸检测</span>
+          <h3 id="processing-detection-title"><span aria-hidden="true">01</span>人脸检测</h3>
           <button type="button" class="clear-field" @click="resetProcessingGroup('detection')">恢复默认</button>
         </div>
         <div class="processing-grid">
@@ -1082,11 +1083,11 @@ onBeforeUnmount(() => {
             <small>{{ field.hint }}</small>
           </label>
         </div>
-      </div>
+      </section>
 
-      <div class="processing-group">
+      <section class="processing-group" aria-labelledby="processing-annotation-title">
         <div class="processing-group-title">
-          <span>标注</span>
+          <h3 id="processing-annotation-title"><span aria-hidden="true">02</span>文字标注</h3>
           <button type="button" class="clear-field" @click="resetProcessingGroup('annotation')">恢复默认</button>
         </div>
         <div class="processing-grid">
@@ -1106,33 +1107,61 @@ onBeforeUnmount(() => {
             <small>文字描边粗细（像素），0 为无描边</small>
           </label>
           <label class="processing-field">
-            <span>边距</span>
-            <input v-model.number="processingUi.annotation.padding" type="number" min="0" max="4096" step="1" placeholder="32" />
-            <small>文字与人脸/画面边缘的最小间距</small>
-          </label>
-          <label class="processing-field">
             <span>字号</span>
             <input v-model.number="processingUi.annotation.fontSize" type="number" min="1" max="512" step="1" placeholder="48" />
             <small>角色名字的字体大小（像素）</small>
           </label>
         </div>
-        <div class="processing-position-row">
-          <div class="processing-position-block">
-            <span class="processing-position-title">文字在人脸旁的位置</span>
-            <FaceTextPositionPicker v-model="processingUi.annotation" />
-            <small>检测到人脸时名字优先放的方向，放不下会自动换方向</small>
-          </div>
-          <div class="processing-position-block">
-            <span class="processing-position-title">无脸时文字位置</span>
-            <CornerFallbackPicker v-model="processingUi.annotation.fallbackPosition" />
-            <small>未检测到人脸时，名字落在画面的哪个角落</small>
-          </div>
-        </div>
-      </div>
 
-      <div class="processing-group">
+        <section class="positioning-config" aria-labelledby="positioning-title">
+          <div class="positioning-header">
+            <div>
+              <h4 id="positioning-title">文字定位</h4>
+              <p>分别控制人脸参考框、画面安全区和文字落点；外扩量会叠加在基础安全边距之上。</p>
+            </div>
+          </div>
+          <div class="positioning-controls">
+            <label class="processing-field">
+              <span>人脸框外扩</span>
+              <input
+                id="face-box-expansion"
+                v-model.number="processingUi.annotation.faceBoxExpansion"
+                type="number"
+                min="0"
+                max="4096"
+                step="1"
+                placeholder="0"
+              />
+              <small>在检测框四周额外增加像素；0 保持原有结果，数值越大，文字离脸越远，自定义定位范围也随之扩大。</small>
+            </label>
+            <label class="processing-field">
+              <span>画面安全边距</span>
+              <input id="canvas-padding" v-model.number="processingUi.annotation.padding" type="number" min="0" max="4096" step="1" placeholder="32" />
+              <small>文字离图片边缘至少保留的像素，同时也是人脸参考框与文字之间的基础间距。</small>
+            </label>
+          </div>
+          <div class="processing-position-row">
+            <div class="processing-position-block">
+              <div class="processing-position-heading">
+                <strong>检测到人脸</strong>
+                <span>先选择首选方向，也可以直接拖动圆点。</span>
+              </div>
+            <FaceTextPositionPicker v-model="processingUi.annotation" />
+            </div>
+            <div class="processing-position-block is-fallback">
+              <div class="processing-position-heading">
+                <strong>未检测到人脸</strong>
+                <span>选择文字在完整画面中的备用落点。</span>
+              </div>
+            <CornerFallbackPicker v-model="processingUi.annotation.fallbackPosition" />
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="processing-group" aria-labelledby="processing-crop-title">
         <div class="processing-group-title">
-          <span>头像裁剪</span>
+          <h3 id="processing-crop-title"><span aria-hidden="true">03</span>头像裁剪</h3>
           <button type="button" class="clear-field" @click="resetProcessingGroup('crop')">恢复默认</button>
         </div>
         <div class="processing-grid">
@@ -1153,7 +1182,7 @@ onBeforeUnmount(() => {
             <small>{{ field.hint }}</small>
           </label>
         </div>
-      </div>
+      </section>
 
       <div class="settings-actions">
         <button type="submit" class="primary-action" :disabled="processingBusy">

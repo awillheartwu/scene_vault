@@ -10,6 +10,7 @@ function baseAnnotation(over: Partial<AnnotationSettings> = {}): AnnotationSetti
     strokeColor: null,
     strokeWidth: null,
     padding: null,
+    faceBoxExpansion: null,
     faceTextPosition: null,
     fallbackPosition: null,
     textOffsetX: null,
@@ -63,6 +64,15 @@ describe("FaceTextPositionPicker", () => {
     expect(wrapper.find(".marker").exists()).toBe(true);
     expect(wrapper.text()).toContain("首选");
     expect(wrapper.text()).toContain("上方 → 右侧 → 下方 → 左侧");
+  });
+
+  it("visualizes the configured face box expansion", () => {
+    const wrapper = mount(FaceTextPositionPicker, {
+      props: { modelValue: baseAnnotation({ faceBoxExpansion: 64 }) },
+    });
+
+    expect(wrapper.get(".picker-stage").attributes("style")).toContain("--face-expansion");
+    expect(wrapper.text()).toContain("参考框外扩 64 px");
   });
 
   it("selects a discrete direction on star click", async () => {

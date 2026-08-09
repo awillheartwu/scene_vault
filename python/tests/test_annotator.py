@@ -76,6 +76,59 @@ class AnnotatorPositionTests(unittest.TestCase):
         self.assertEqual(left, self.face.x + self.face.width + config.padding)
         self.assertEqual(top, self.face.y)
 
+    def test_default_expansion_zero_preserves_face_box(self) -> None:
+        annotator = ImageAnnotator(AnnotationConfig())
+
+        self.assertEqual(
+            annotator._expanded_face_box(self.face),
+            (self.face.x, self.face.y, self.face.width, self.face.height),
+        )
+
+    def test_face_box_expansion_shifts_preferred_positions(self) -> None:
+        expansion = 24
+        config = AnnotationConfig(
+            padding=10,
+            font_size=24,
+            face_text_position="right",
+            face_box_expansion=expansion,
+        )
+        annotator = ImageAnnotator(config)
+
+        left, top = annotator._text_position(
+            self.draw, "名字", self.image.size, self.face
+        )
+
+        self.assertEqual(
+            left, self.face.x + self.face.width + expansion + config.padding
+        )
+        self.assertEqual(top, self.face.y - expansion)
+
+    def test_custom_offset_scales_against_expanded_face_box(self) -> None:
+        expansion = 20
+        config = AnnotationConfig(
+            padding=10,
+            font_size=24,
+            face_text_position="custom",
+            text_offset_x=0.5,
+            text_offset_y=-0.5,
+            face_box_expansion=expansion,
+        )
+        annotator = ImageAnnotator(config)
+        text_width, text_height = self._text_metrics(annotator)
+
+        left, top = annotator._text_position(
+            self.draw, "名字", self.image.size, self.face
+        )
+
+        ref_x = self.face.x - expansion
+        ref_y = self.face.y - expansion
+        ref_width = self.face.width + 2 * expansion
+        ref_height = self.face.height + 2 * expansion
+        center_x = ref_x + ref_width * (0.5 + 0.5)
+        center_y = ref_y + ref_height * (0.5 - 0.5)
+        self.assertEqual(left, round(center_x - text_width / 2))
+        self.assertEqual(top, round(center_y - text_height / 2))
+
 
 if __name__ == "__main__":
     unittest.main()

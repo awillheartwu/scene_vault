@@ -125,6 +125,7 @@ export interface AnnotationSettings {
   strokeColor: [number, number, number] | null;
   strokeWidth: number | null;
   padding: number | null;
+  faceBoxExpansion: number | null;
   faceTextPosition: string | null;
   fallbackPosition: string | null;
   textOffsetX: number | null;

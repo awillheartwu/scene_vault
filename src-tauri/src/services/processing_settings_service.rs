@@ -87,6 +87,11 @@ fn normalize(settings: &ProcessingSettings) -> Result<(), AppError> {
                 }
             }
         }
+        if let Some(value) = annotation.face_box_expansion {
+            if !(0..=4096).contains(&value) {
+                return Err(range_error("faceBoxExpansion", "0 and 4096"));
+            }
+        }
         if let Some(position) = &annotation.fallback_position {
             if !FALLBACK_POSITIONS.contains(&position.as_str()) {
                 return Err(AppError::Validation(format!(
@@ -183,6 +188,7 @@ mod tests {
             }),
             annotation: Some(AnnotationSettings {
                 font_size: Some(64),
+                face_box_expansion: Some(48),
                 text_color: Some([80, 220, 255]),
                 ..Default::default()
             }),
@@ -241,6 +247,51 @@ mod tests {
         .await
         .expect_err("offset out of range");
         assert!(matches!(error, AppError::Validation(_)));
+
+        let error = update(
+            &pool,
+            ProcessingSettings {
+                annotation: Some(AnnotationSettings {
+                    face_box_expansion: Some(4097),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("expansion out of range");
+        assert!(matches!(error, AppError::Validation(_)));
+
+        let error = update(
+            &pool,
+            ProcessingSettings {
+                annotation: Some(AnnotationSettings {
+                    face_box_expansion: Some(-1),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("negative expansion");
+        assert!(matches!(error, AppError::Validation(_)));
+
+        let saved = update(
+            &pool,
+            ProcessingSettings {
+                annotation: Some(AnnotationSettings {
+                    face_box_expansion: Some(4096),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("boundary expansion");
+        assert_eq!(
+            saved.annotation.as_ref().and_then(|a| a.face_box_expansion),
+            Some(4096)
+        );
 
         let saved = update(
             &pool,
