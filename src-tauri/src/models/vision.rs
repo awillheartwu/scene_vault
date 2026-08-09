@@ -103,6 +103,7 @@ pub struct CaptureRuntimeStatus {
     pub engine_status: String,
     pub worker_status: String,
     pub active_capture_item_id: Option<String>,
+    pub active_capture_source_path: Option<String>,
     pub queued_count: i64,
     pub archive_pending_count: i64,
     pub last_error: Option<String>,

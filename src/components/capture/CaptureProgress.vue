@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import { Activity, LoaderCircle } from "@lucide/vue";
 import { stageLabel, useCaptureProgress } from "@/lib/capture-progress";
 
 withDefaults(defineProps<{ persistent?: boolean }>(), { persistent: false });
 
-const { start, activeItemId, stage, percent, queuedCount } = useCaptureProgress();
+const { start, activeItemId, activeSourcePath, stage, percent, queuedCount } = useCaptureProgress();
+const activeFileName = computed(() => activeSourcePath.value?.split(/[\\/]/).pop() || "正在读取任务…");
 onMounted(() => void start());
 </script>
 
@@ -13,10 +14,14 @@ onMounted(() => void start());
   <div v-if="activeItemId || persistent" class="capture-progress" :class="{ idle: !activeItemId }" role="status" aria-live="polite">
     <div class="capture-progress-text">
       <template v-if="activeItemId">
-        <span><LoaderCircle class="animate-spin" :size="13" />{{ stageLabel(stage) }}</span>
-        <span>
-          {{ Math.round(percent) }}%
-          <template v-if="queuedCount > 0"> · 队列 {{ queuedCount }}</template>
+        <span class="capture-progress-task">
+          <LoaderCircle class="animate-spin" :size="13" />
+          <span>{{ stageLabel(stage) }}</span>
+          <strong :title="activeSourcePath || activeFileName">{{ activeFileName }}</strong>
+        </span>
+        <span class="capture-progress-value">
+          <strong>{{ Math.round(percent) }}%</strong>
+          <template v-if="queuedCount > 0"> · 后续 {{ queuedCount }} 张</template>
         </span>
       </template>
       <template v-else>

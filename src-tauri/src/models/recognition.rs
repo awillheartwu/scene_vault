@@ -132,6 +132,8 @@ pub struct FaceBankRebuildSummary {
     pub skipped_missing_source: u32,
     pub failed: u32,
     pub stale_preserved: u32,
+    /// Unclassified captures re-evaluated against the freshly rebuilt bank.
+    pub suggestions_refreshed: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -95,6 +95,7 @@ export interface FaceBankRebuildSummary {
   skippedMissingSource: number;
   failed: number;
   stalePreserved: number;
+  suggestionsRefreshed: number;
 }
 
 export interface VerificationResult {
@@ -326,6 +327,7 @@ export interface CaptureRuntimeStatus {
   engineStatus: string;
   workerStatus: string;
   activeCaptureItemId: string | null;
+  activeCaptureSourcePath: string | null;
   queuedCount: number;
   archivePendingCount: number;
   lastError: string | null;

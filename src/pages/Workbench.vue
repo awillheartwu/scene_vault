@@ -5,7 +5,6 @@ import {
   Archive,
   Ban,
   Check,
-  ChevronDown,
   ChevronsLeft,
   ChevronsRight,
   ExternalLink,
@@ -76,7 +75,6 @@ type WorkbenchView = "characters" | "unclassified" | "scene" | "private";
 const view = ref<WorkbenchView>("characters");
 const panelCollapsed = ref(false);
 const showPrivate = ref(false);
-const sampleStripOpen = ref(false);
 
 const selectedCharacter = computed(
   () => summaries.value.find((summary) => summary.id === selectedCharacterId.value) ?? null,
@@ -109,6 +107,9 @@ const selectedItemIsRepresentativeAvatar = computed(() =>
       selectedCharacter.value.avatarAssetId === selectedItem.value?.assetId,
   ),
 );
+const activeSampleCaptureIds = computed(
+  () => new Set(samples.value.filter((sample) => sample.status === "active").map((sample) => sample.captureItemId)),
+);
 
 function characterName(id: string | null | undefined): string {
   if (!id) return "";
@@ -134,6 +135,56 @@ function recognitionSourceLabel(value: string | null): string {
   if (value === "vision") return "视觉引擎";
   if (value === "manual") return "手动";
   return "—";
+}
+
+function processingWarnings(item: CaptureItem): string[] {
+  try {
+    const value = JSON.parse(item.processingWarningsJson || "[]");
+    return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function sampleIssueLabel(item: CaptureItem): string | null {
+  if (item.faceCount === 0) return "未检测到脸";
+  if (
+    view.value !== "characters" ||
+    item.classification !== "person" ||
+    item.characterId !== selectedCharacterId.value ||
+    activeSampleCaptureIds.value.has(item.id)
+  ) {
+    return null;
+  }
+  const warning = processingWarnings(item).find((entry) => entry.startsWith("sample_not_enrolled"));
+  if (warning?.includes("sharpness")) return "清晰度不足";
+  if (warning?.includes("area ratio")) return "人脸过小";
+  return "未入样本";
+}
+
+function suggestionEmptyReason(item: CaptureItem): string {
+  if (item.faceCount === 0) {
+    return "视觉引擎未在这张图片中检测到可用人脸，因此无法生成匹配建议，也不会加入样本库。";
+  }
+  if (item.faceCount == null) {
+    return item.status === "queued" || item.status === "processing"
+      ? "人脸识别尚未完成，处理结束后会自动更新建议。"
+      : "这张图片还没有可用于匹配的人脸特征。";
+  }
+  const warning = processingWarnings(item).find((entry) => entry.startsWith("sample_not_enrolled"));
+  if (warning?.includes("sharpness")) {
+    const values = warning.match(/sharpness ([\d.]+) below ([\d.]+)/);
+    return values
+      ? `检测到了人脸，但清晰度 ${values[1]} 低于样本门槛 ${values[2]}，因此不会加入样本库。`
+      : "检测到了人脸，但清晰度未达到样本门槛，因此不会加入样本库。";
+  }
+  if (warning?.includes("area ratio")) {
+    return "检测到了人脸，但人脸在画面中占比过小，因此不会加入样本库。";
+  }
+  if (item.classification === "person" && item.characterId) {
+    return `已检测到 ${item.faceCount} 张脸。当前截图已归为「${characterName(item.characterId)}」，匹配时会排除该角色自身样本，只提示可能的错分；其他候选未达到建议门槛。`;
+  }
+  return `已检测到 ${item.faceCount} 张脸，但最佳候选没有同时达到相似度和区分度门槛。`;
 }
 
 function normalizeError(error: unknown): string {
@@ -411,45 +462,6 @@ function setSelectedAsRepresentativeAvatar() {
   return setRepresentativeAvatar(selectedItem.value.assetId);
 }
 
-async function toggleSample(sample: FaceSample) {
-  if (busy.value) return;
-  busy.value = true;
-  try {
-    const updated = await captureApi.setFaceSampleStatus(
-      sample.id,
-      sample.status === "active" ? "revoked" : "active",
-    );
-    const index = samples.value.findIndex((entry) => entry.id === sample.id);
-    if (index >= 0) samples.value[index] = updated;
-    await loadCharacterData();
-  } catch (error) {
-    toast.error(normalizeError(error));
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function clearSampleFlag(sample: FaceSample) {
-  if (busy.value) return;
-  busy.value = true;
-  try {
-    const updated = await captureApi.setFaceSampleFlagged(sample.id, false);
-    const index = samples.value.findIndex((entry) => entry.id === sample.id);
-    if (index >= 0) samples.value[index] = updated;
-    await loadCharacterData();
-  } catch (error) {
-    toast.error(normalizeError(error));
-  } finally {
-    busy.value = false;
-  }
-}
-
-function selectCapture(captureItemId: string) {
-  if (items.value.some((item) => item.id === captureItemId)) {
-    selectedItemId.value = captureItemId;
-  }
-}
-
 async function batchReprocess(characterId: string | null) {
   if (!projectId.value || busy.value) return;
   busy.value = true;
@@ -480,7 +492,8 @@ async function rebuildFaceBank() {
     toast.success(
       `人脸样本库重建完成：${summary.rebuilt} 张已提取，${summary.noFace} 张无脸，` +
         `${summary.notEnrolled} 张未通过样本门槛，${summary.skippedMissingSource} 张源文件缺失，` +
-        `${summary.failed} 张失败，其中 ${summary.stalePreserved} 张保留旧样本（共 ${summary.total} 张）。`,
+        `${summary.failed} 张失败，其中 ${summary.stalePreserved} 张保留旧样本；` +
+        `已按当前匹配参数刷新 ${summary.suggestionsRefreshed} 张待分类图片的建议（共 ${summary.total} 张人物图）。`,
     );
     await loadCharacterData();
   } catch (error) {
@@ -561,7 +574,11 @@ onBeforeUnmount(() => {
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="workbench-maintenance-menu">
-            <DropdownMenuItem :disabled="busy || !projectId" @select="rebuildFaceBank">
+            <DropdownMenuItem
+              title="重新提取特征，保留截图当前角色绑定，并按当前匹配参数刷新待分类建议"
+              :disabled="busy || !projectId"
+              @select="rebuildFaceBank"
+            >
               <Sparkles :size="15" aria-hidden="true" />
               重建人脸样本库
               <span v-if="rebuildProgress">{{ rebuildProgress.processed }}/{{ rebuildProgress.total }}</span>
@@ -580,6 +597,7 @@ onBeforeUnmount(() => {
       <button
         type="button"
         class="secondary-action compact-action"
+        title="重新提取特征，保留截图当前角色绑定，并按当前匹配参数刷新待分类建议"
         :disabled="busy"
         @click="rebuildFaceBank"
       >
@@ -720,29 +738,29 @@ onBeforeUnmount(() => {
               <Users :size="14" />合并角色
             </button>
             <button
-              v-if="view === 'characters' && selectedCharacter && selectedCharacter.pendingReviewCount > 0"
+              v-if="view === 'characters' && selectedCharacter"
               type="button"
               class="secondary-action compact-action"
-              :disabled="busy"
+              :disabled="busy || selectedCharacter.pendingReviewCount === 0"
               title="否决当前角色全部待确认建议，并把对应人脸登记进该角色样本库"
               @click="batchRejectAndEnroll"
             >
               <Ban :size="14" />批量拒绝并登记 ({{ selectedCharacter.pendingReviewCount }})
             </button>
             <button
-              v-if="view === 'characters' && selectedCharacter && selectedCharacter.degradedCount > 0"
+              v-if="view === 'characters' && selectedCharacter"
               type="button"
               class="secondary-action compact-action"
-              :disabled="busy"
+              :disabled="busy || selectedCharacter.degradedCount === 0"
               @click="batchReprocess(selectedCharacter.id)"
             >
               <Sparkles :size="14" />当前角色重新识别 ({{ selectedCharacter.degradedCount }})
             </button>
             <button
-              v-if="view === 'characters' && projectDegradedCount > 0"
+              v-if="view === 'characters' && selectedCharacter"
               type="button"
               class="secondary-action compact-action"
-              :disabled="busy"
+              :disabled="busy || projectDegradedCount === 0"
               @click="batchReprocess(null)"
             >
               <Sparkles :size="14" />全部重新识别 ({{ projectDegradedCount }})
@@ -775,6 +793,13 @@ onBeforeUnmount(() => {
               <span v-if="item.faceCount && item.faceCount > 1" class="multi-face-chip" :title="`YuNet 检测到 ${item.faceCount} 张脸，AI 建议基于主脸`">
                 多脸 ×{{ item.faceCount }}
               </span>
+              <span
+                v-if="sampleIssueLabel(item)"
+                class="face-status-chip"
+                :data-status="item.faceCount === 0 ? 'no-face' : 'not-enrolled'"
+              >
+                {{ sampleIssueLabel(item) }}
+              </span>
               <span v-if="item.reviewStatus === 'pending'" class="review-chip">建议待确认</span>
             </span>
           </button>
@@ -789,48 +814,38 @@ onBeforeUnmount(() => {
         :description="pathFileName(selectedItem.sourcePath)"
         panel-class="workbench-detail"
       >
-        <section v-if="view === 'characters'" class="sample-strip" aria-label="人脸样本库">
-          <div class="sample-strip-header">
-            <button type="button" class="sample-strip-toggle" :aria-expanded="sampleStripOpen" @click="sampleStripOpen = !sampleStripOpen">
-              <span class="eyebrow">人脸样本库</span>
-              <span class="sample-strip-count">{{ samples.length }} 条样本</span>
-              <ChevronDown :size="14" :class="{ rotated: sampleStripOpen }" />
-            </button>
+        <section
+          v-if="view === 'characters' && selectedCharacter"
+          class="sample-summary-bar"
+          aria-label="人脸样本库与代表头像"
+        >
+          <div class="sample-summary-copy">
+            <span class="eyebrow">人脸样本库</span>
+            <strong>{{ selectedCharacter.sampleCount }} 条样本</strong>
+            <span v-if="sampleIssueLabel(selectedItem)" class="sample-current-status">
+              当前图：{{ sampleIssueLabel(selectedItem) }}
+            </span>
           </div>
-          <div v-if="sampleStripOpen && samples.length" class="sample-list">
+          <div class="sample-summary-actions">
             <button
-              v-for="sample in samples"
-              :key="sample.id"
               type="button"
-              class="sample-item"
-              :class="{ revoked: sample.status === 'revoked', flagged: sample.flagged === 1 }"
-              :title="`查看来源截图（${sample.status === 'active' ? '使用中' : '已撤销'}）`"
-              @click="selectCapture(sample.captureItemId)"
+              class="secondary-action compact-action"
+              :disabled="busy || !canSetSelectedAsAvatar || selectedItemIsRepresentativeAvatar"
+              :title="canSetSelectedAsAvatar ? '使用当前截图的人脸裁剪作为角色头像' : '当前截图需要完成人脸处理和归档'"
+              @click="setSelectedAsRepresentativeAvatar"
             >
-              <span class="sample-thumb">
-                <CaptureThumbnail
-                  :item="thumbnailItem(sample.captureItemId)"
-                  variant="avatar"
-                  fallback-variant="source"
-                />
-              </span>
-              <span class="sample-meta">
-                <strong>{{ sample.confidence != null ? `${Math.round(sample.confidence * 100)}%` : "—" }}</strong>
-                <span>
-                  {{ sample.flagged === 1 ? "待复查" : sample.status === "active" ? "使用中" : "已撤销" }}
-                </span>
-              </span>
-              <span
-                class="sample-toggle"
-                :title="sample.flagged === 1 ? '信任该样本（恢复参与匹配）' : sample.status === 'active' ? '撤销样本（不再参与匹配）' : '恢复样本'"
-                @click.stop="sample.flagged === 1 ? clearSampleFlag(sample) : toggleSample(sample)"
-              >
-                <Ban v-if="sample.flagged === 0 && sample.status === 'active'" :size="14" />
-                <RotateCcw v-else :size="14" />
-              </span>
+              <UserRound :size="15" />{{ selectedItemIsRepresentativeAvatar ? "当前代表头像" : "设为代表头像" }}
+            </button>
+            <button
+              v-if="selectedCharacter.avatarAssetId"
+              type="button"
+              class="secondary-action compact-action"
+              :disabled="busy"
+              @click="setRepresentativeAvatar(null)"
+            >
+              <RotateCcw :size="15" />恢复自动头像
             </button>
           </div>
-          <p v-if="!samples.length" class="sample-empty">还没有样本：对人物图执行"重新识别"后自动登记。</p>
         </section>
 
         <div class="workbench-detail-top">
@@ -905,7 +920,10 @@ onBeforeUnmount(() => {
                   {{ reviewStatusLabel(selectedItem.reviewStatus) }}
                 </span>
               </span>
-              <span v-else class="suggestion-status empty">暂无建议</span>
+              <span v-else class="suggestion-status empty">
+                <strong>暂无建议</strong>
+                <span>{{ suggestionEmptyReason(selectedItem) }}</span>
+              </span>
               <span v-if="selectedItem.reviewStatus === 'pending'" class="action-buttons">
                 <button type="button" class="primary-action" :disabled="busy" @click="acceptSuggestion(selectedItem)">
                   <Check :size="16" />确认建议
@@ -965,38 +983,6 @@ onBeforeUnmount(() => {
                   <option value="private">收藏图</option>
                 </select>
               </label>
-            </div>
-          </section>
-
-          <section v-if="view === 'characters' && selectedCharacter" class="action-card">
-            <span class="action-card-title">代表头像</span>
-            <div class="action-card-body avatar-actions">
-              <button
-                type="button"
-                class="primary-action"
-                :disabled="busy || !canSetSelectedAsAvatar || selectedItemIsRepresentativeAvatar"
-                @click="setSelectedAsRepresentativeAvatar"
-              >
-                <UserRound :size="16" />
-                {{ selectedItemIsRepresentativeAvatar ? "当前代表头像" : "设为代表头像" }}
-              </button>
-              <button
-                v-if="selectedCharacter.avatarAssetId"
-                type="button"
-                class="secondary-action"
-                :disabled="busy"
-                @click="setRepresentativeAvatar(null)"
-              >
-                <RotateCcw :size="16" />清除代表头像
-              </button>
-              <span class="action-hint">
-                <template v-if="canSetSelectedAsAvatar">
-                  使用当前截图的人脸裁剪；只影响角色卡片展示，不修改截图或归档文件。
-                </template>
-                <template v-else>
-                  当前截图需要完成人脸处理和归档后，才能设为代表头像。
-                </template>
-              </span>
             </div>
           </section>
 

@@ -178,12 +178,14 @@ async fn process_awaiting_label_feature(
         return Ok(false);
     };
     let item_id_for_progress = item.id.clone();
+    let source_path_for_progress = item.source_path.clone();
     let progress_app = app.clone();
     let progress = Some(Box::new(move |stage: &str, percent: f64| {
         let _ = progress_app.emit(
             "capture:progress",
             json!({
                 "captureItemId": item_id_for_progress,
+                "sourcePath": source_path_for_progress,
                 "stage": stage,
                 "percent": percent,
             }),
@@ -270,12 +272,14 @@ async fn process_item(
     let annotated = output_directory.join("annotated.png");
     let avatar = output_directory.join("avatar.png");
     let item_id_for_progress = item.id.clone();
+    let source_path_for_progress = item.source_path.clone();
     let progress_app = app.clone();
     let progress = Some(Box::new(move |stage: &str, percent: f64| {
         let _ = progress_app.emit(
             "capture:progress",
             json!({
                 "captureItemId": item_id_for_progress,
+                "sourcePath": source_path_for_progress,
                 "stage": stage,
                 "percent": percent,
             }),
@@ -349,11 +353,14 @@ async fn verify_returned_path(
 
 pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, AppError> {
     let settings = vision_settings_service::get(pool).await?;
-    let active_capture_item_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM capture_items WHERE status = 'processing' ORDER BY updated_at LIMIT 1",
+    let active_capture: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, source_path FROM capture_items WHERE status = 'processing' ORDER BY updated_at LIMIT 1",
     )
     .fetch_optional(pool)
     .await?;
+    let (active_capture_item_id, active_capture_source_path) = active_capture
+        .map(|(id, source_path)| (Some(id), Some(source_path)))
+        .unwrap_or((None, None));
     let queued_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM capture_items WHERE status = 'queued'")
             .fetch_one(pool)
@@ -379,6 +386,7 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
             "idle".to_owned()
         },
         active_capture_item_id,
+        active_capture_source_path,
         queued_count,
         archive_pending_count,
         last_error,

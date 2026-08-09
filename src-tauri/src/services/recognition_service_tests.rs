@@ -998,6 +998,54 @@ async fn does_not_suggest_below_threshold() {
 }
 
 #[tokio::test]
+async fn refresh_clears_a_stale_face_bank_suggestion_below_threshold() {
+    let pool = db::test_pool().await;
+    let fixture = fixture(&pool).await;
+    let session_id: String =
+        sqlx::query_scalar("SELECT session_id FROM capture_items WHERE id = ?")
+            .bind(&fixture.item_id)
+            .fetch_one(&pool)
+            .await
+            .expect("session id");
+    set_item_feature(&pool, &fixture.item_id, "[1.0, 0.0, 0.0]").await;
+    enroll_face_sample(&pool, &fixture.item_id)
+        .await
+        .expect("enroll baseline");
+
+    let candidate = register_item(
+        &pool,
+        &fixture._workspace,
+        &session_id,
+        "stale-suggestion.png",
+        None,
+    )
+    .await;
+    set_item_feature(&pool, &candidate.id, "[0.4, 0.8, 0.0]").await;
+    set_suggestion(
+        &pool,
+        SetRecognitionSuggestionInput {
+            capture_item_id: candidate.id.clone(),
+            suggested_character_id: Some(fixture.character_id),
+            confidence: Some(0.9),
+            source: Some("face_bank".to_owned()),
+        },
+    )
+    .await
+    .expect("seed stale suggestion");
+
+    suggest_from_face_bank(&pool, &candidate.id)
+        .await
+        .expect("refresh suggestion");
+    let refreshed = capture_service::get_item(&pool, &candidate.id)
+        .await
+        .expect("candidate");
+    assert!(refreshed.suggested_character_id.is_none());
+    assert!(refreshed.recognition_confidence.is_none());
+    assert!(refreshed.recognition_source.is_none());
+    assert_eq!(refreshed.review_status, "none");
+}
+
+#[tokio::test]
 async fn sample_list_and_status_toggle_control_matching() {
     let pool = db::test_pool().await;
     let fixture = fixture(&pool).await;
@@ -1985,5 +2033,6 @@ async fn rebuild_face_bank_empty_project_reports_zero() {
     assert_eq!(summary.no_face, 0);
     assert_eq!(summary.skipped_missing_source, 0);
     assert_eq!(summary.failed, 0);
+    assert_eq!(summary.suggestions_refreshed, 0);
     assert!(progress.is_empty(), "no items, no progress ticks");
 }

@@ -426,7 +426,7 @@ describe("Workbench", () => {
     expect(setAvatar?.attributes("disabled")).toBeDefined();
     const clearAvatar = wrapper
       .findAll("button")
-      .find((button) => button.text().includes("清除代表头像"));
+      .find((button) => button.text().includes("恢复自动头像"));
     expect(clearAvatar).toBeDefined();
     await clearAvatar!.trigger("click");
     await flushPromises();
@@ -448,37 +448,64 @@ describe("Workbench", () => {
     expect(api.readThumbnail).toHaveBeenCalledWith("item-avatar", "avatar");
   });
 
-  it("shows the face-bank sample strip and revokes a sample", async () => {
+  it("shows only the face-bank count and keeps sample thumbnails collapsed permanently", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
 
     expect(wrapper.text()).toContain("人脸样本库");
     expect(wrapper.text()).toContain("1 条样本");
     expect(api.listCharacterFaceSamples).toHaveBeenCalledWith("character-1");
-
-    // The strip is collapsed by default; expand it first.
-    await wrapper.find(".sample-strip-toggle").trigger("click");
-    await flushPromises();
-    await wrapper.find(".sample-toggle").trigger("click");
-    await flushPromises();
-
-    expect(api.setFaceSampleStatus).toHaveBeenCalledWith("sample-1", "revoked");
+    expect(wrapper.find(".sample-list").exists()).toBe(false);
+    expect(wrapper.find(".sample-strip-toggle").exists()).toBe(false);
   });
 
-  it("marks flagged samples as pending review and restores them", async () => {
-    api.listCharacterFaceSamples.mockResolvedValue([
-      { ...sample, flagged: 1 },
-    ]);
+  it("shows all conditional character actions so their crowded state can be reviewed", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
 
-    await wrapper.find(".sample-strip-toggle").trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("待复查");
-    await wrapper.find(".sample-toggle").trigger("click");
+    const actions = wrapper.findAll(".grid-actions button");
+    expect(actions.some((button) => button.text().includes("批量拒绝并登记 (1)"))).toBe(true);
+    const current = actions.find((button) => button.text().includes("当前角色重新识别 (0)"));
+    const all = actions.find((button) => button.text().includes("全部重新识别 (0)"));
+    expect(current?.attributes("disabled")).toBeDefined();
+    expect(all?.attributes("disabled")).toBeDefined();
+  });
+
+  it("explains a detected but low-quality face in Chinese and marks the card", async () => {
+    api.listCharacterCaptureItems.mockResolvedValue([{
+      ...item,
+      status: "completed",
+      faceCount: 1,
+      suggestedCharacterId: null,
+      recognitionConfidence: null,
+      recognitionSource: null,
+      reviewStatus: "none",
+      processingWarningsJson: '["sample_not_enrolled_low_quality: sharpness 2.2 below 3"]',
+    }]);
+    api.listCharacterFaceSamples.mockResolvedValue([]);
+    const wrapper = mount(Workbench);
     await flushPromises();
 
-    expect(api.setFaceSampleFlagged).toHaveBeenCalledWith("sample-1", false);
+    expect(wrapper.find(".face-status-chip").text()).toBe("清晰度不足");
+    expect(wrapper.text()).toContain("清晰度 2.2 低于样本门槛 3");
+  });
+
+  it("marks and explains captures where no usable face was detected", async () => {
+    api.listCharacterCaptureItems.mockResolvedValue([{
+      ...item,
+      status: "completed",
+      faceCount: 0,
+      suggestedCharacterId: null,
+      recognitionConfidence: null,
+      recognitionSource: null,
+      reviewStatus: "none",
+    }]);
+    api.listCharacterFaceSamples.mockResolvedValue([]);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(wrapper.find(".face-status-chip").text()).toBe("未检测到脸");
+    expect(wrapper.text()).toContain("未在这张图片中检测到可用人脸");
   });
 
   it("refreshes items when a capture changes while the worker runs", async () => {

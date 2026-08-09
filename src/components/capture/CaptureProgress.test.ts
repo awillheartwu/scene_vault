@@ -44,6 +44,7 @@ describe("CaptureProgress", () => {
         engineStatus: "configured",
         workerStatus: "running",
         activeCaptureItemId: "item-1",
+        activeCaptureSourcePath: "D:\\Screenshots\\screenshot0044.png",
         queuedCount: 2,
         archivePendingCount: 0,
         lastError: null,
@@ -53,15 +54,21 @@ describe("CaptureProgress", () => {
 
     expect(wrapper.get(".capture-progress").classes()).not.toContain("idle");
     expect(wrapper.text()).toContain("处理中");
-    expect(wrapper.text()).toMatch(/0%\s+· 队列 2/);
+    expect(wrapper.text()).toContain("screenshot0044.png");
+    expect(wrapper.text()).toMatch(/0%\s+· 后续 2 张/);
 
     eventHandlers.get("capture:progress")?.({
-      payload: { captureItemId: "item-1", stage: "detect_face", percent: 45 },
+      payload: {
+        captureItemId: "item-1",
+        sourcePath: "D:\\Screenshots\\screenshot0044.png",
+        stage: "detect_face",
+        percent: 45,
+      },
     });
     await wrapper.vm.$nextTick();
 
     expect(wrapper.text()).toContain("检测人脸");
-    expect(wrapper.text()).toMatch(/45%\s+· 队列 2/);
+    expect(wrapper.text()).toMatch(/45%\s+· 后续 2 张/);
     expect(wrapper.get(".capture-progress-bar").attributes("style")).toContain("width: 45%");
     wrapper.unmount();
   });

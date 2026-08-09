@@ -820,6 +820,22 @@ pub async fn suggest_from_face_bank(
     capture_item_id: &str,
 ) -> Result<(), AppError> {
     let item = capture_service::get_item(pool, capture_item_id).await?;
+    // A refresh must not leave an old Face Bank result visible when the
+    // current samples or thresholds no longer produce a valid candidate.
+    // Preserve manual/other-provider suggestions; this function owns only
+    // results previously written by the Face Bank.
+    if item.recognition_source.as_deref() == Some("face_bank") {
+        set_suggestion(
+            pool,
+            SetRecognitionSuggestionInput {
+                capture_item_id: capture_item_id.to_owned(),
+                suggested_character_id: None,
+                confidence: None,
+                source: None,
+            },
+        )
+        .await?;
+    }
     let Some(face) = primary_face(pool, capture_item_id).await? else {
         return Ok(());
     };
@@ -912,6 +928,39 @@ pub async fn suggest_from_face_bank(
         .await?;
     }
     Ok(())
+}
+
+/// Re-evaluates unclassified captures after a Face Bank rebuild. This keeps
+/// pending recommendations aligned with the rebuilt features and the current
+/// threshold/margin profile instead of leaving pre-rebuild results in place.
+async fn refresh_project_suggestions(pool: &SqlitePool, project_id: &str) -> Result<u32, AppError> {
+    let item_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT item.id
+        FROM capture_items item
+        WHERE item.project_id = ?
+          AND item.classification = 'unclassified'
+          AND (
+            item.recognition_source = 'face_bank'
+            OR EXISTS (
+              SELECT 1
+              FROM capture_faces face
+              WHERE face.capture_item_id = item.id
+                AND face.is_primary = 1
+                AND face.feature_json IS NOT NULL
+                AND face.feature_json != '[]'
+            )
+          )
+        ORDER BY item.captured_at ASC, item.created_at ASC
+        "#,
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    for item_id in &item_ids {
+        suggest_from_face_bank(pool, item_id).await?;
+    }
+    Ok(item_ids.len() as u32)
 }
 
 fn cosine_similarity(first: &[f64], second: &[f64]) -> f64 {
@@ -1080,6 +1129,8 @@ pub async fn rebuild_face_bank(
         }
     }
 
+    let suggestions_refreshed = refresh_project_suggestions(pool, project_id).await?;
+
     Ok(FaceBankRebuildSummary {
         total,
         rebuilt,
@@ -1088,6 +1139,7 @@ pub async fn rebuild_face_bank(
         skipped_missing_source,
         failed,
         stale_preserved,
+        suggestions_refreshed,
     })
 }
 
