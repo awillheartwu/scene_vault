@@ -25,6 +25,8 @@ const { eventHandlers, api } = vi.hoisted(() => ({
     verifyCaptureIdentity: vi.fn(),
     suggestForCapture: vi.fn(),
     retry: vi.fn(),
+    setProjectCover: vi.fn(),
+    revealPath: vi.fn(),
     createProject: vi.fn(),
     createCharacter: vi.fn(),
     startSession: vi.fn(),
@@ -58,6 +60,7 @@ vi.mock("@/lib/capture-api", () => ({
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
   pickDirectory: vi.fn(async () => null),
+  revealPath: api.revealPath,
 }));
 
 import Capture from "./Capture.vue";
@@ -489,6 +492,76 @@ describe("Capture quick-label flow", () => {
 
     expect(api.startSession).toHaveBeenCalledWith(project.id);
     expect(wrapper.text()).toContain("停止会话");
+    wrapper.unmount();
+  });
+});
+
+describe("Capture item context menu", () => {
+  function menuItems() {
+    return Array.from(document.body.querySelectorAll('[role="menuitem"]')) as HTMLElement[];
+  }
+
+  it("offers labeling for awaiting captures and opens the label panel", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([item()]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).toContain("标记角色/分类");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("标记角色/分类"))!
+      .click();
+    await flushPromises();
+    expect(api.suggestForCapture).toHaveBeenCalledWith("item-1");
+    wrapper.unmount();
+  });
+
+  it("offers retry for failed captures", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([item("failed")]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).toContain("重新识别");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("重新识别"))!
+      .click();
+    await flushPromises();
+    expect(api.retry).toHaveBeenCalledWith("item-1");
+    wrapper.unmount();
+  });
+
+  it("reveals the source image and sets the project cover", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([
+      { ...item("archive_pending"), destinationPath: "D:\\Archive\\001.png" },
+    ]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu!.textContent).toContain("显示原图");
+    expect(menu!.textContent).toContain("显示归档图");
+    expect(menu!.textContent).toContain("设为项目封面");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("显示原图"))!
+      .click();
+    await flushPromises();
+    expect(api.revealPath).toHaveBeenCalledWith("D:\\Game\\Screenshots\\001.png");
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    menuItems()
+      .find((entry) => entry.textContent?.includes("设为项目封面"))!
+      .click();
+    await flushPromises();
+    expect(api.setProjectCover).toHaveBeenCalledWith("project-1", "item-1");
     wrapper.unmount();
   });
 });

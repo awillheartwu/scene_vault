@@ -30,7 +30,9 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import { ContextMenu } from "@/components/ui/context-menu";
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
+import { useContextMenu, type ContextMenuItem } from "@/composables/useContextMenu";
 import {
   Dialog,
   DialogContent,
@@ -45,6 +47,7 @@ import {
   pathFileName,
   pathMimeType,
   pickDirectory,
+  revealPath,
   type CaptureItem,
   type CaptureClassification,
   type CaptureRuntimeStatus,
@@ -76,6 +79,68 @@ const previewUrl = ref<string | null>(null);
 const loading = ref(true);
 const busy = ref(false);
 const importCandidates = ref<UnimportedCapture[] | null>(null);
+const itemMenu = useContextMenu();
+
+function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  if (item.status === "awaiting_label") {
+    items.push({
+      id: "label",
+      label: "标记角色/分类",
+      icon: UserRound,
+      action: () => {
+        void submitClassification("person");
+      },
+    });
+  }
+  if (item.status === "failed") {
+    items.push({
+      id: "retry",
+      label: "重新识别",
+      icon: RefreshCw,
+      action: () => retryItem(item),
+    });
+  }
+  items.push({
+    id: "reveal-source",
+    label: "显示原图",
+    icon: Image,
+    action: () => void revealPath(item.sourcePath),
+  });
+  if (item.destinationPath) {
+    items.push({
+      id: "reveal-destination",
+      label: "显示归档图",
+      icon: Archive,
+      action: () => void revealPath(item.destinationPath!),
+    });
+  }
+  if (projectId.value && item.destinationPath) {
+    items.push({
+      id: "set-cover",
+      label: "设为项目封面",
+      icon: FolderOpen,
+      separatorBefore: true,
+      action: () => setProjectCover(item),
+    });
+  }
+  return items;
+}
+
+function onItemContext(event: MouseEvent, item: CaptureItem) {
+  if (!itemMenu.open(event, buildItemMenu(item))) return;
+  selectedItemId.value = item.id;
+}
+
+async function setProjectCover(item: CaptureItem) {
+  if (!projectId.value) return;
+  try {
+    await captureApi.setProjectCover(projectId.value, item.id);
+    toast.success("已设为项目封面。");
+  } catch (error) {
+    toast.error(normalizeError(error));
+  }
+}
 const importBusy = ref(false);
 const deferredImportCount = ref(0);
 const showProjectForm = ref(false);
@@ -888,6 +953,7 @@ onBeforeUnmount(() => {
               :class="{ selected: selectedItemId === item.id }"
               :aria-label="`选择 ${pathFileName(item.sourcePath)}`"
               @click="selectedItemId = item.id"
+              @contextmenu="onItemContext($event, item)"
             >
               <div class="thumb-image"><CaptureThumbnail :item="item" /></div>
               <div class="thumb-status" :data-status="item.status">
@@ -1077,5 +1143,6 @@ onBeforeUnmount(() => {
       @close="renameTarget = null"
       @saved="onProjectRenamed"
     />
+    <ContextMenu :menu="itemMenu" />
   </section>
 </template>
