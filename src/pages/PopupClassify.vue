@@ -25,6 +25,7 @@ import {
   captureApi,
   pathMimeType,
   type CaptureClassification,
+  type CaptureItem,
   type Character,
   type ClassifyPopupContext,
   type VerificationResult,
@@ -132,6 +133,28 @@ function cancelAutoClose() {
 
 function choosePerson() {
   mode.value = "person";
+  void refreshCurrentSuggestion();
+}
+
+// Mirrors the Capture page: re-run the face-bank comparison with the freshest
+// samples when the user is about to label a person capture, so a suggestion
+// uses samples enrolled earlier in the same session. Best-effort: the stored
+// suggestion remains if the refresh fails.
+async function refreshCurrentSuggestion() {
+  const item = currentItem.value;
+  if (!item || busy.value) return;
+  try {
+    const updated = await captureApi.suggestForCapture(item.id);
+    const ctxValue = ctx.value;
+    if (!ctxValue) return;
+    const index = ctxValue.items.findIndex((entry) => entry.id === updated.id);
+    if (index < 0) return;
+    const items = [...ctxValue.items];
+    items[index] = updated;
+    ctx.value = { ...ctxValue, items };
+  } catch {
+    // Best-effort refresh; the previously stored suggestion stays visible.
+  }
 }
 
 function resetSelection() {
@@ -391,15 +414,22 @@ onMounted(async () => {
       await listen("classify:refresh", () => {
         void load();
       }),
-      await listen<{ id?: string }>("capture:item-updated", (event) => {
-        // Another window classified one of our queued items; drop it from the
-        // local list so the popup does not offer it again.
-        const id = event.payload?.id;
-        if (!id || !ctx.value) return;
-        const current = ctx.value;
-        const index = current.items.findIndex((item) => item.id === id);
+      await listen<CaptureItem>("capture:item-updated", (event) => {
+        const updated = event.payload;
+        if (!updated?.id || !ctx.value) return;
+        const index = ctx.value.items.findIndex((item) => item.id === updated.id);
         if (index < 0) return;
-        removeItem(id);
+        // Feature/suggestion updates keep the capture in the queue: refresh
+        // it in place so a fresh recommendation shows up. Only a capture
+        // that was actually classified (or reclassified) elsewhere leaves
+        // the queue.
+        if (updated.status === "awaiting_label" && updated.classification === "unclassified") {
+          const items = [...ctx.value.items];
+          items[index] = updated;
+          ctx.value = { ...ctx.value, items };
+          return;
+        }
+        removeItem(updated.id);
         if (!ctx.value?.items.length) {
           finishAll();
         } else {
@@ -532,6 +562,20 @@ onBeforeUnmount(() => {
           <p class="popup-hint">选择人物（点击即提交）</p>
           <button type="button" class="popup-back" @click="mode = 'choose'">‹ 返回</button>
         </div>
+        <button
+          v-if="suggestedCharacter"
+          type="button"
+          class="popup-suggestion"
+          :disabled="busy"
+          @click="acceptSuggestion"
+        >
+          <Sparkles :size="17" />
+          <span>
+            <strong>推荐：{{ suggestedCharacter.name }}</strong>
+            <small>相似度 {{ Math.round((currentItem?.recognitionConfidence ?? 0) * 100) }}%</small>
+          </span>
+          <Check :size="16" />
+        </button>
         <div v-if="pendingVerification" class="popup-verification" role="alert">
           <p>{{ verificationWarning }}</p>
           <div class="popup-verification-actions">
