@@ -9,7 +9,8 @@ use crate::{
     models::project::{
         AddProjectSourceDirectoryInput, CreateProjectInput, Project, ProjectDeletionPreview,
         ProjectOverviewSummary, ProjectSourceDirectory, RemoveProjectSourceDirectoryInput,
-        RenameProjectInput, SetProjectDestinationInput, SetProjectSourceDirectoryEnabledInput,
+        RenameProjectInput, SetProjectCoverInput, SetProjectDestinationInput,
+        SetProjectSourceDirectoryEnabledInput,
     },
 };
 
@@ -28,10 +29,10 @@ pub async fn create(pool: &SqlitePool, input: CreateProjectInput) -> Result<Proj
 
     let project = sqlx::query_as::<_, Project>(
         r#"
-        INSERT INTO projects (id, name, description, cover_asset_id)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO projects (id, name, description, cover_asset_id, cover_capture_item_id)
+        VALUES (?, ?, ?, ?, NULL)
         RETURNING
-            id, name, description, cover_asset_id,
+            id, name, description, cover_asset_id, cover_capture_item_id,
             last_source_directory, last_destination_directory,
             destination_directory, created_at, updated_at
         "#,
@@ -67,7 +68,7 @@ pub async fn rename(pool: &SqlitePool, input: RenameProjectInput) -> Result<Proj
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
         RETURNING
-            id, name, description, cover_asset_id,
+            id, name, description, cover_asset_id, cover_capture_item_id,
             last_source_directory, last_destination_directory,
             destination_directory, created_at, updated_at
         "#,
@@ -197,7 +198,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, AppError> {
     let projects = sqlx::query_as::<_, Project>(
         r#"
         SELECT
-            id, name, description, cover_asset_id,
+            id, name, description, cover_asset_id, cover_capture_item_id,
             last_source_directory, last_destination_directory,
             destination_directory, created_at, updated_at
         FROM projects
@@ -244,6 +245,7 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
             p.id AS project_id,
             p.name,
             p.description,
+            p.cover_capture_item_id,
             p.created_at,
             COALESCE(src.source_count, 0) AS source_count,
             (p.destination_directory IS NOT NULL AND p.destination_directory <> '') AS destination_configured,
@@ -451,7 +453,7 @@ pub async fn set_destination_directory(
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
         RETURNING
-            id, name, description, cover_asset_id,
+            id, name, description, cover_asset_id, cover_capture_item_id,
             last_source_directory, last_destination_directory,
             destination_directory, created_at, updated_at
         "#,
@@ -462,6 +464,66 @@ pub async fn set_destination_directory(
     .fetch_optional(pool)
     .await?;
     project.ok_or_else(|| AppError::NotFound("project".to_owned()))
+}
+
+/// Pins (or clears) the project cover capture. Any classification can become
+/// a cover: person, scene, private and unclassified captures are all valid.
+/// The capture must belong to the project; NULL/empty clears the custom
+/// cover so Home falls back to the latest capture again.
+pub async fn set_cover(
+    pool: &SqlitePool,
+    input: SetProjectCoverInput,
+) -> Result<Project, AppError> {
+    let project_id = input.project_id.trim();
+    if project_id.is_empty() {
+        return Err(AppError::Validation(
+            "project id cannot be empty".to_owned(),
+        ));
+    }
+    let capture_item_id = input
+        .capture_item_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(capture_item_id) = capture_item_id {
+        let belongs_to_project: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM capture_items item
+                JOIN capture_sessions session ON session.id = item.session_id
+                WHERE item.id = ? AND session.project_id = ?
+            )
+            "#,
+        )
+        .bind(capture_item_id)
+        .bind(project_id)
+        .fetch_one(pool)
+        .await?;
+        if belongs_to_project == 0 {
+            return Err(AppError::NotFound(format!(
+                "capture {capture_item_id} in project {project_id}"
+            )));
+        }
+    }
+    let project = sqlx::query_as::<_, Project>(
+        r#"
+        UPDATE projects
+        SET cover_capture_item_id = ?,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ?
+        RETURNING
+            id, name, description, cover_asset_id, cover_capture_item_id,
+            last_source_directory, last_destination_directory,
+            destination_directory, created_at, updated_at
+        "#,
+    )
+    .bind(capture_item_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("project".to_owned()))?;
+    Ok(project)
 }
 
 async fn canonical_existing_directory(
@@ -613,6 +675,117 @@ mod tests {
         assert_eq!(empty_summary.capture_count, 0);
         assert_eq!(empty_summary.session_count, 0);
         assert!(empty_summary.latest_capture_item_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_cover_pins_and_clears_a_project_capture() {
+        let pool = db::test_pool().await;
+        let project = create(
+            &pool,
+            CreateProjectInput {
+                name: "Cover Project".to_owned(),
+                description: None,
+                cover_asset_id: None,
+            },
+        )
+        .await
+        .expect("create project");
+        let other = create(
+            &pool,
+            CreateProjectInput {
+                name: "Other Project".to_owned(),
+                description: None,
+                cover_asset_id: None,
+            },
+        )
+        .await
+        .expect("create other project");
+        sqlx::query("INSERT INTO capture_sessions (id, project_id, status) VALUES ('cover-session', ?, 'active')")
+            .bind(&project.id)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        for (id, classification) in [
+            ("cover-capture-person", "person"),
+            ("cover-capture-scene", "scene"),
+            ("cover-capture-private", "private"),
+            ("cover-capture-unclassified", "unclassified"),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO capture_items (
+                    id, project_id, session_id, source_path, classification, status, captured_at
+                ) VALUES (?, ?, 'cover-session', ?, ?, 'completed', '2026-08-08T01:00:00Z')
+                "#,
+            )
+            .bind(id)
+            .bind(&project.id)
+            .bind(format!("C:\\shots\\{id}.png"))
+            .bind(classification)
+            .execute(&pool)
+            .await
+            .expect("insert capture item");
+        }
+
+        // Any classification (including private and unclassified) can pin.
+        for capture_item_id in [
+            "cover-capture-person",
+            "cover-capture-scene",
+            "cover-capture-private",
+            "cover-capture-unclassified",
+        ] {
+            let pinned = set_cover(
+                &pool,
+                SetProjectCoverInput {
+                    project_id: project.id.clone(),
+                    capture_item_id: Some(capture_item_id.to_owned()),
+                },
+            )
+            .await
+            .expect("pin cover");
+            assert_eq!(
+                pinned.cover_capture_item_id.as_deref(),
+                Some(capture_item_id)
+            );
+        }
+
+        // The overview exposes the pinned cover.
+        let summaries = list_overviews(&pool).await.expect("list overviews");
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.project_id == project.id)
+            .expect("summary");
+        assert_eq!(
+            summary.cover_capture_item_id.as_deref(),
+            Some("cover-capture-unclassified")
+        );
+
+        // A capture from another project is rejected.
+        let error = set_cover(
+            &pool,
+            SetProjectCoverInput {
+                project_id: other.id.clone(),
+                capture_item_id: Some("cover-capture-person".to_owned()),
+            },
+        )
+        .await
+        .expect_err("cross-project capture must be rejected");
+        assert!(
+            matches!(error, AppError::NotFound(_)),
+            "expected not found, got {error:?}"
+        );
+
+        // Clearing restores the latest-capture fallback.
+        let cleared = set_cover(
+            &pool,
+            SetProjectCoverInput {
+                project_id: project.id,
+                capture_item_id: None,
+            },
+        )
+        .await
+        .expect("clear cover");
+        assert!(cleared.cover_capture_item_id.is_none());
     }
 
     #[tokio::test]

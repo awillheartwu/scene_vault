@@ -1817,6 +1817,15 @@ async fn migration_0013_cleans_polluted_face_data_and_backfills_primary_rows() {
             .execute(&mut *conn)
             .await
             .expect("apply 0018");
+        // 0019 only adds projects.cover_capture_item_id, which the project
+        // fixture now requires; it is likewise independent of 0013's
+        // cleanup assertions.
+        let migration_0019 =
+            std::fs::read_to_string("./migrations/0019_project_cover.sql").expect("read 0019");
+        sqlx::raw_sql(&migration_0019)
+            .execute(&mut *conn)
+            .await
+            .expect("apply 0019");
     }
 
     // Seed without label_capture: label-time verification would already

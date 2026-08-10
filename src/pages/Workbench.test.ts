@@ -23,6 +23,7 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     setCharacterAvatar: vi.fn(),
     retry: vi.fn(),
     refreshCaptureFaceFeature: vi.fn(),
+    setProjectCover: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
   },
@@ -53,6 +54,7 @@ const project = {
   name: "Love & Jealousy",
   description: null,
   coverAssetId: null,
+  coverCaptureItemId: null,
   lastSourceDirectory: null,
   lastDestinationDirectory: null,
   destinationDirectory: null,
@@ -188,6 +190,10 @@ beforeEach(() => {
   api.renameCharacter.mockResolvedValue({ ...characters[0], name: "Ava 2" });
   api.mergeCharacters.mockResolvedValue(characters[1]);
   api.refreshCaptureFaceFeature.mockResolvedValue(item);
+  api.setProjectCover.mockImplementation(async (_projectId, captureItemId) => ({
+    ...project,
+    coverCaptureItemId: captureItemId,
+  }));
   api.setCharacterAvatar.mockResolvedValue({
     ...characters[0],
     avatarAssetId: "asset-1",
@@ -670,6 +676,50 @@ describe("Workbench", () => {
     await flushPromises();
 
     expect(api.setFaceSampleFlagged).toHaveBeenCalledWith("sample-1", true);
+    wrapper.unmount();
+  });
+
+  it("sets the project cover from the correction card and can cancel it", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const setCover = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("设为项目封面"));
+    expect(setCover).toBeDefined();
+    expect(setCover!.attributes("disabled")).toBeUndefined();
+    await setCover!.trigger("click");
+    await flushPromises();
+
+    expect(api.setProjectCover).toHaveBeenCalledWith("project-1", "item-1");
+    const cancel = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("取消项目封面"));
+    expect(cancel).toBeDefined();
+    await cancel!.trigger("click");
+    await flushPromises();
+
+    expect(api.setProjectCover).toHaveBeenCalledWith("project-1", null);
+    wrapper.unmount();
+  });
+
+  it("keeps the project-cover action available for unclassified and scene categories", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    for (const tab of ["未分类", "游戏截图"]) {
+      const tabButton = wrapper
+        .findAll(".workbench-tabs button")
+        .find((button) => button.text().includes(tab));
+      expect(tabButton, `tab ${tab}`).toBeDefined();
+      await tabButton!.trigger("click");
+      await flushPromises();
+
+      const setCover = wrapper
+        .findAll("button")
+        .find((button) => button.text().includes("设为项目封面"));
+      expect(setCover, `cover action on ${tab}`).toBeDefined();
+    }
     wrapper.unmount();
   });
 

@@ -7,6 +7,7 @@ export interface Project {
   name: string;
   description: string | null;
   coverAssetId: string | null;
+  coverCaptureItemId: string | null;
   lastSourceDirectory: string | null;
   lastDestinationDirectory: string | null;
   destinationDirectory: string | null;
@@ -30,6 +31,7 @@ export interface ProjectOverviewSummary {
   failedCount: number;
   lastActivityAt: string;
   latestCaptureItemId: string | null;
+  coverCaptureItemId: string | null;
 }
 
 export interface ProjectDeletionPreview {
@@ -444,6 +446,10 @@ export const captureApi = {
   setProjectDestination: (projectId: string, directory: string) =>
     invoke<Project>("set_project_destination_directory", {
       input: { projectId, directory },
+    }),
+  setProjectCover: (projectId: string, captureItemId: string | null) =>
+    invoke<Project>("set_project_cover", {
+      input: { projectId, captureItemId },
     }),
   endSession: (sessionId: string) =>
     invoke<CaptureSession>("end_capture_session", {

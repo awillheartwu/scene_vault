@@ -98,6 +98,7 @@ pub fn run() {
             commands::project::remove_project_source_directory,
             commands::project::set_project_source_directory_enabled,
             commands::project::set_project_destination_directory,
+            commands::project::set_project_cover,
             commands::asset::create_asset,
             commands::character::create_character,
             commands::character::list_characters,

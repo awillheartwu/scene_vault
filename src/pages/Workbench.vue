@@ -122,6 +122,14 @@ const selectedItemSample = computed<FaceSample | null>(() => {
     ) ?? null
   );
 });
+const currentProject = computed(
+  () => projects.value.find((project) => project.id === projectId.value) ?? null,
+);
+const selectedIsProjectCover = computed(
+  () =>
+    selectedItem.value != null &&
+    currentProject.value?.coverCaptureItemId === selectedItem.value.id,
+);
 
 function characterName(id: string | null | undefined): string {
   if (!id) return "";
@@ -397,6 +405,17 @@ function toggleSampleFlagged(sample: FaceSample) {
         ? "已标记为可疑，这张样本不再参与匹配（可在修正卡恢复）。"
         : "已恢复参与匹配，这张样本重新参与相似度计算与建议。",
     );
+  });
+}
+
+function toggleProjectCover() {
+  const item = selectedItem.value;
+  if (!item || !projectId.value) return;
+  return runMutation(async () => {
+    const clear = selectedIsProjectCover.value;
+    const updated = await captureApi.setProjectCover(projectId.value, clear ? null : item.id);
+    projects.value = projects.value.map((project) => (project.id === updated.id ? updated : project));
+    toast.success(clear ? "已取消项目封面，首页恢复为最近截图。" : "已设为项目封面。");
   });
 }
 
@@ -1057,6 +1076,19 @@ onBeforeUnmount(() => {
                 @click="toggleSampleFlagged(selectedItemSample)"
               >
                 <Flag :size="16" />{{ selectedItemSample.flagged ? "恢复参与匹配" : "标记可疑" }}
+              </button>
+              <button
+                type="button"
+                class="secondary-action"
+                :disabled="busy"
+                :title="
+                  selectedIsProjectCover
+                    ? '清除自定义封面，首页恢复为最近截图'
+                    : '把当前截图设为项目封面（首页网格与列表都会使用这张图，人物/游戏截图/收藏图/未分类均可）'
+                "
+                @click="toggleProjectCover"
+              >
+                <Image :size="16" />{{ selectedIsProjectCover ? "取消项目封面" : "设为项目封面" }}
               </button>
             </div>
           </section>

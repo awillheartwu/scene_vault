@@ -42,6 +42,7 @@ const projects = [
     failedCount: 0,
     lastActivityAt: "2026-08-08T04:36:00Z",
     latestCaptureItemId: "capture-bad",
+    coverCaptureItemId: null,
   },
   {
     projectId: "project-summer",
@@ -59,6 +60,7 @@ const projects = [
     failedCount: 0,
     lastActivityAt: "2026-08-07T23:10:00Z",
     latestCaptureItemId: "capture-summer",
+    coverCaptureItemId: null,
   },
   {
     projectId: "project-eternum",
@@ -76,6 +78,7 @@ const projects = [
     failedCount: 0,
     lastActivityAt: "2026-08-06T12:00:00Z",
     latestCaptureItemId: null,
+    coverCaptureItemId: null,
   },
 ];
 
@@ -145,6 +148,29 @@ describe("Home project library", () => {
     expect(wrapper.get('[aria-label="列表视图"]').attributes("aria-pressed")).toBe("true");
     expect(localStorage.getItem("scene-vault.home.project-view")).toBe("list");
 
+    wrapper.unmount();
+  });
+
+  it("prefers the pinned project cover over the latest capture", async () => {
+    api.listProjectOverviews.mockResolvedValue([
+      { ...projects[0], coverCaptureItemId: "capture-cover" },
+    ]);
+    const wrapper = mount(Home, {
+      global: {
+        stubs: {
+          CaptureThumbnail: {
+            props: ["item", "alt"],
+            template: "<div class='thumb-stub' :data-item='item && item.id' :alt='alt' />",
+          },
+        },
+      },
+    });
+    await flushPromises();
+
+    const thumb = wrapper.find(".thumb-stub");
+    expect(thumb.exists()).toBe(true);
+    expect(thumb.attributes("data-item")).toBe("capture-cover");
+    expect(thumb.attributes("alt")).toContain("项目封面");
     wrapper.unmount();
   });
 

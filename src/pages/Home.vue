@@ -341,11 +341,11 @@ function setupLabel(project: ProjectOverviewSummary): string {
         <button type="button" class="project-card-main" @click="openProject(project.projectId)">
           <div class="project-cover">
             <CaptureThumbnail
-              v-if="project.latestCaptureItemId"
-              :item="thumbnailItem(project.latestCaptureItemId)"
+              v-if="project.coverCaptureItemId || project.latestCaptureItemId"
+              :item="thumbnailItem((project.coverCaptureItemId ?? project.latestCaptureItemId)!)"
               variant="source"
               fallback-variant="destination"
-              :alt="`${project.name} 最近截图`"
+              :alt="`${project.name} ${project.coverCaptureItemId ? '项目封面' : '最近截图'}`"
             />
             <div v-else class="project-cover-empty">
               <FolderKanban :size="32" aria-hidden="true" />
@@ -432,11 +432,11 @@ function setupLabel(project: ProjectOverviewSummary): string {
         <div class="row-project">
           <div class="row-cover">
             <CaptureThumbnail
-              v-if="project.latestCaptureItemId"
-              :item="thumbnailItem(project.latestCaptureItemId)"
+              v-if="project.coverCaptureItemId || project.latestCaptureItemId"
+              :item="thumbnailItem((project.coverCaptureItemId ?? project.latestCaptureItemId)!)"
               variant="source"
               fallback-variant="destination"
-              :alt="`${project.name} 最近截图`"
+              :alt="`${project.name} ${project.coverCaptureItemId ? '项目封面' : '最近截图'}`"
             />
             <FolderKanban v-else :size="23" aria-hidden="true" />
           </div>

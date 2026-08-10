@@ -7,6 +7,9 @@ pub struct Project {
     pub name: String,
     pub description: Option<String>,
     pub cover_asset_id: Option<String>,
+    /// Capture the user picked as the project cover, if any. Home shows it
+    /// instead of the latest capture until cleared.
+    pub cover_capture_item_id: Option<String>,
     /// Last capture source directory used for this project, if any.
     pub last_source_directory: Option<String>,
     /// Last capture destination (archive) directory used for this project, if any.
@@ -37,6 +40,7 @@ pub struct ProjectOverviewSummary {
     pub failed_count: i64,
     pub last_activity_at: String,
     pub latest_capture_item_id: Option<String>,
+    pub cover_capture_item_id: Option<String>,
 }
 
 /// One source directory in a project's authoritative capture list.
@@ -75,6 +79,15 @@ pub struct SetProjectSourceDirectoryEnabledInput {
 pub struct SetProjectDestinationInput {
     pub project_id: String,
     pub directory: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectCoverInput {
+    pub project_id: String,
+    /// NULL or empty clears the custom cover and falls back to the latest
+    /// capture. Otherwise the capture must belong to the project.
+    pub capture_item_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

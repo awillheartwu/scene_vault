@@ -6,7 +6,8 @@ use crate::{
     models::project::{
         AddProjectSourceDirectoryInput, CreateProjectInput, Project, ProjectDeletionPreview,
         ProjectOverviewSummary, ProjectSourceDirectory, RemoveProjectSourceDirectoryInput,
-        RenameProjectInput, SetProjectDestinationInput, SetProjectSourceDirectoryEnabledInput,
+        RenameProjectInput, SetProjectCoverInput, SetProjectDestinationInput,
+        SetProjectSourceDirectoryEnabledInput,
     },
     services::project_service,
 };
@@ -93,4 +94,12 @@ pub async fn set_project_destination_directory(
     input: SetProjectDestinationInput,
 ) -> Result<Project, AppError> {
     project_service::set_destination_directory(&state.pool, input).await
+}
+
+#[tauri::command]
+pub async fn set_project_cover(
+    state: State<'_, AppState>,
+    input: SetProjectCoverInput,
+) -> Result<Project, AppError> {
+    project_service::set_cover(&state.pool, input).await
 }
