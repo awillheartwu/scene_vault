@@ -85,7 +85,7 @@ describe("CaptureProgress", () => {
     wrapper.unmount();
   });
 
-  it("shows the remaining imported-recognition batch as a second row", async () => {
+  it("shows the remaining imported-recognition batch in the idle status line", async () => {
     api.runtimeStatus.mockResolvedValue({
       engineStatus: "configured",
       workerStatus: "idle",
@@ -101,12 +101,11 @@ describe("CaptureProgress", () => {
 
     const batch = wrapper.find('[data-state="batch-remaining"]');
     expect(batch.exists()).toBe(true);
-    expect(batch.text()).toContain("本批识别");
-    expect(batch.text()).toContain("剩余 17 张");
+    expect(wrapper.get(".capture-progress-text").text()).toContain("本批识别 剩余 17 张");
     wrapper.unmount();
   });
 
-  it("keeps the current image visible between serial batch items and clears when done", async () => {
+  it("shows the batch remaining next to the current image and clears when done", async () => {
     api.runtimeStatus.mockResolvedValue({
       engineStatus: "configured",
       workerStatus: "idle",
@@ -145,7 +144,8 @@ describe("CaptureProgress", () => {
     });
     await wrapper.vm.$nextTick();
     expect(wrapper.text()).toContain("screenshot0005.png");
-    expect(wrapper.text()).toContain("剩余 16 张");
+    expect(wrapper.get(".capture-progress-value").text()).toContain("40%");
+    expect(wrapper.get(".capture-progress-value").text()).toContain("剩余 16 张");
 
     // The last item finishes: the batch row hides and the bar idles.
     eventHandlers.get("capture:runtime-status")?.({

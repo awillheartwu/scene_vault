@@ -610,9 +610,7 @@
   .capture-progress-text svg { color: var(--accent); }
   .capture-progress-hint { display: inline-flex; min-width: 0; align-items: center; gap: 6px; color: var(--warn); font-weight: 600; }
   .capture-progress-hint svg { flex: none; color: var(--warn); }
-  .capture-progress-batch { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted-foreground); font-size: 11px; }
-  .capture-progress-batch span { color: var(--foreground); font-weight: 600; }
-  .capture-progress-batch strong { color: var(--accent); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .capture-progress-batch-text { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
   .capture-progress-track { height: 5px; overflow: hidden; border-radius: 99px; background: var(--muted); }
   .capture-progress-bar { height: 100%; border-radius: 99px; background: var(--accent-gradient, var(--accent)); transition: width .2s ease; }
   .capture-progress.idle .capture-progress-text span:first-child { color: var(--muted-foreground); }

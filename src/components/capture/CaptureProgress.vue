@@ -35,6 +35,7 @@ onMounted(() => void start());
         <span class="capture-progress-value">
           <strong>{{ Math.round(percent) }}%</strong>
           <template v-if="queuedCount > 0"> · 后续 {{ queuedCount }} 张</template>
+          <template v-if="prelabelPendingCount > 0"> · 剩余 {{ prelabelPendingCount }} 张</template>
         </span>
       </template>
       <template v-else>
@@ -45,16 +46,11 @@ onMounted(() => void start());
         <span v-else-if="deferredCount > 0" class="capture-progress-hint" data-state="deferred-import">
           已登记 {{ deferredCount }} 张截图，点击「开始识别导入截图」后逐张处理
         </span>
+        <span v-else-if="prelabelPendingCount > 0" class="capture-progress-batch-text" data-state="batch-remaining">
+          本批识别 剩余 {{ prelabelPendingCount }} 张
+        </span>
         <span v-else>{{ queuedCount > 0 ? `等待队列 ${queuedCount}` : "空闲" }}</span>
       </template>
-    </div>
-    <div
-      v-if="prelabelPendingCount > 0"
-      class="capture-progress-batch"
-      data-state="batch-remaining"
-    >
-      <span>本批识别</span>
-      <strong>剩余 {{ prelabelPendingCount }} 张</strong>
     </div>
     <div class="capture-progress-track">
       <div class="capture-progress-bar" :style="{ width: `${Math.min(100, Math.max(0, percent))}%` }" />
