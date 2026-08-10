@@ -1,6 +1,7 @@
 import { mount, flushPromises } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  installContextMenuGuard,
   isExcludedContextTarget,
   useContextMenu,
   type ContextMenuController,
@@ -82,6 +83,41 @@ describe("isExcludedContextTarget", () => {
   it("excludes non-element targets", () => {
     const event = new MouseEvent("contextmenu");
     expect(isExcludedContextTarget(event)).toBe(true);
+  });
+});
+
+describe("installContextMenuGuard", () => {
+  it("suppresses the native menu except on input-like controls", () => {
+    document.body.innerHTML = `
+      <div class="plain">text</div>
+      <input class="field" />
+      <textarea class="area"></textarea>
+      <select class="sel"><option>a</option></select>
+      <div class="editable" contenteditable="true">edit</div>
+    `;
+    const uninstall = installContextMenuGuard();
+    try {
+      const plain = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+      document.querySelector(".plain")!.dispatchEvent(plain);
+      expect(plain.defaultPrevented).toBe(true);
+
+      for (const selector of [".field", ".area", ".sel", ".editable"]) {
+        const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+        document.querySelector(selector)!.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(false);
+      }
+    } finally {
+      uninstall();
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("stops suppressing after uninstall", () => {
+    const uninstall = installContextMenuGuard();
+    uninstall();
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
   });
 });
 

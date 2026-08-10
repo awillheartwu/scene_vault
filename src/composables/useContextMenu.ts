@@ -52,6 +52,26 @@ export function isExcludedContextTarget(event: MouseEvent): boolean {
   return true;
 }
 
+/**
+ * Input-like controls keep the WebView native context menu (copy/paste and
+ * spellcheck). Everything else must not show the browser menu in a desktop
+ * app; custom per-item menus call `preventDefault` themselves and run before
+ * this document-level listener.
+ */
+const NATIVE_MENU_KEEP_SELECTOR = 'input, select, textarea, [contenteditable="true"]';
+
+/** Suppresses the WebView native context menu app-wide; returns the uninstaller. */
+export function installContextMenuGuard(): () => void {
+  const onContextMenu = (event: MouseEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(NATIVE_MENU_KEEP_SELECTOR)) return;
+    event.preventDefault();
+  };
+  document.addEventListener("contextmenu", onContextMenu);
+  return () => document.removeEventListener("contextmenu", onContextMenu);
+}
+
 export function useContextMenu() {
   const state = reactive<ContextMenuState>({ open: false, x: 0, y: 0, items: [] });
 

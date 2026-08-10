@@ -3,6 +3,7 @@ import { createPinia } from "pinia";
 
 import App from "./App.vue";
 import { router } from "./router";
+import { installContextMenuGuard } from "@/composables/useContextMenu";
 import { applyPersistedTheme, initThemeSync } from "@/lib/theme";
 
 import "./assets/main.css";
@@ -11,6 +12,10 @@ import "./assets/main.css";
 // (main app + popup workbench) in sync live.
 applyPersistedTheme();
 void initThemeSync();
+
+// The WebView native context menu must not appear in the desktop app; input
+// controls keep it for copy/paste. Custom per-item menus are unaffected.
+installContextMenuGuard();
 
 // The workbench popup is a separate always-on-top window that reuses the same
 // frontend bundle. Detect it by Tauri window label (or ?popup=workbench in

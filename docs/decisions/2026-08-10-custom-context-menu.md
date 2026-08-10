@@ -21,6 +21,9 @@
 - 命中判定：事件源落在 `button, input, select, textarea, [role="menuitem"],
   [role="option"], [data-tauri-drag-region]` 时不开菜单、不阻止默认行为，输入控件
   保留浏览器原生复制/粘贴菜单。右键事件不会触发 click，与现有左键逻辑天然隔离。
+- 全应用阻止 WebView 原生右键菜单：main.ts 挂载文档级监听，除
+  `input / select / textarea / [contenteditable]` 外一律 `preventDefault`；
+  无自定义菜单的区域右键变为无操作，自定义菜单区域不受影响。
 - 右键选中语义：History、Capture 等列表条目右键 = 先选中该条目再弹菜单（资源管理器
   习惯）；Home 项目卡片右键只弹菜单，不导航进项目。
 - 菜单项按页面声明式配置（id / 文本 / 禁用条件 / 动作），危险操作（删除项目等）
