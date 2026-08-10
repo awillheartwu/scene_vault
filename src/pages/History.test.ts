@@ -11,6 +11,7 @@ const { api } = vi.hoisted(() => ({
     readThumbnail: vi.fn(),
     readImage: vi.fn(),
     retry: vi.fn(),
+    revealPath: vi.fn(),
     listDebugLogs: vi.fn(),
     getLogStatus: vi.fn(),
   },
@@ -21,7 +22,7 @@ vi.mock("@/lib/capture-api", () => ({
   captureStatusLabel: (status: string) => status,
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
-  revealPath: vi.fn(),
+  revealPath: api.revealPath,
 }));
 
 import History from "./History.vue";
@@ -138,6 +139,84 @@ describe("History pagination", () => {
     await flushPromises();
     expect(api.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 0 }));
 
+    wrapper.unmount();
+  });
+});
+
+describe("History context menu", () => {
+  function menuItems() {
+    return Array.from(document.body.querySelectorAll('[role="menuitem"]')) as HTMLElement[];
+  }
+
+  it("selects the row on right-click and reveals the source image", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [
+        entry("1", "2026-08-01T00:00:00Z"),
+        entry("2", "2026-08-02T00:00:00Z"),
+      ],
+      total: 2,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+
+    const rows = wrapper.findAll(".history-row");
+    await rows[1].trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu).not.toBeNull();
+    expect(menu!.textContent).toContain("查看详情");
+    expect(menu!.textContent).toContain("显示原图");
+    expect(rows[1].classes()).toContain("selected");
+
+    const revealItem = menuItems().find((item) => item.textContent?.includes("显示原图"));
+    expect(revealItem).toBeDefined();
+    revealItem!.click();
+    await flushPromises();
+    expect(api.revealPath).toHaveBeenCalledWith("D:\\s\\2.png");
+    wrapper.unmount();
+  });
+
+  it("opens the detail panel from the context menu", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z")],
+      total: 1,
+    });
+    const wrapper = mount(History, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.find(".history-row").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    const detailItem = menuItems().find((item) => item.textContent?.includes("查看详情"));
+    detailItem!.click();
+    await flushPromises();
+
+    expect(wrapper.find(".detail-preview").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("offers reprocess for degraded person captures", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [
+        {
+          ...entry("9", "2026-08-09T00:00:00Z"),
+          classification: "person",
+          annotatedPath: null,
+        },
+      ],
+      total: 1,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+
+    await wrapper.find(".history-row").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).toContain("重新识别");
+
+    const reprocessItem = menuItems().find((item) => item.textContent?.includes("重新识别"));
+    reprocessItem!.click();
+    await flushPromises();
+    expect(api.retry).toHaveBeenCalledWith("9");
     wrapper.unmount();
   });
 });

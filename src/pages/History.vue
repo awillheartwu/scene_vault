@@ -6,7 +6,9 @@ import PaginationControls from "@/components/common/PaginationControls.vue";
 import DebugLogPanel from "@/components/history/DebugLogPanel.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import { ContextMenu } from "@/components/ui/context-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useContextMenu, type ContextMenuItem } from "@/composables/useContextMenu";
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 import {
   captureApi,
@@ -38,6 +40,7 @@ const loading = ref(false);
 const errorMessage = ref("");
 const showPrivate = ref(false);
 const activeView = ref<"captures" | "logs">("captures");
+const entryMenu = useContextMenu();
 
 const selected = computed(() => entries.value.find((entry) => entry.id === selectedId.value) ?? entries.value[0] ?? null);
 const filtered = computed(() => entries.value);
@@ -93,6 +96,45 @@ async function load() {
 function selectEntry(entry: CaptureHistoryEntry) {
   selectedId.value = entry.id;
   detailOpen.value = true;
+}
+
+function buildEntryItems(entry: CaptureHistoryEntry): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [
+    { id: "detail", label: "查看详情", icon: Eye, action: () => selectEntry(entry) },
+    { id: "source", label: "显示原图", icon: Image, action: () => reveal(entry.sourcePath) },
+  ];
+  if (entry.destinationPath) {
+    items.push({
+      id: "destination",
+      label: "显示归档图",
+      icon: Archive,
+      action: () => reveal(entry.destinationPath),
+    });
+  }
+  if (entry.destinationAvatarPath) {
+    items.push({
+      id: "avatar",
+      label: "显示头像",
+      icon: UserRound,
+      action: () => reveal(entry.destinationAvatarPath),
+    });
+  }
+  if (canReprocess(entry)) {
+    items.push({
+      id: "reprocess",
+      label: "重新识别",
+      icon: Sparkles,
+      separatorBefore: true,
+      action: () => reprocess(entry),
+    });
+  }
+  return items;
+}
+
+function onEntryContext(event: MouseEvent, entry: CaptureHistoryEntry) {
+  if (!entryMenu.open(event, buildEntryItems(entry))) return;
+  // Right-click selects the row without opening the detail panel.
+  selectedId.value = entry.id;
 }
 
 async function togglePrivate() {
@@ -216,6 +258,7 @@ onMounted(async () => {
             class="history-row"
             :class="{ selected: selected?.id === entry.id }"
             @click="selectEntry(entry)"
+            @contextmenu="onEntryContext($event, entry)"
           >
             <div class="history-thumb"><CaptureThumbnail :item="entry" /></div>
             <div class="history-main">
@@ -271,6 +314,7 @@ onMounted(async () => {
     </template>
 
     <DebugLogPanel v-else />
+    <ContextMenu :menu="entryMenu" />
   </section>
 </template>
 
