@@ -23,8 +23,10 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
+import { ContextMenu } from "@/components/ui/context-menu";
 import ProjectDeleteDialog from "@/components/project/ProjectDeleteDialog.vue";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
+import { useContextMenu } from "@/composables/useContextMenu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -81,6 +83,42 @@ const renameTarget = ref<ProjectOverviewSummary | null>(null);
 const deleteTarget = ref<ProjectOverviewSummary | null>(null);
 const page = ref(1);
 const pageSize = ref(50);
+const projectMenu = useContextMenu();
+
+function onProjectContext(event: MouseEvent, project: ProjectOverviewSummary) {
+  projectMenu.open(event, [
+    {
+      id: "open",
+      label: "打开项目",
+      icon: FolderKanban,
+      action: () => openProject(project.projectId),
+    },
+    {
+      id: "capture",
+      label: "继续捕获",
+      icon: Camera,
+      action: () => startCapture(project.projectId),
+    },
+    {
+      id: "rename",
+      label: "重命名…",
+      icon: Pencil,
+      separatorBefore: true,
+      action: () => {
+        renameTarget.value = project;
+      },
+    },
+    {
+      id: "delete",
+      label: "删除项目…",
+      icon: Trash2,
+      danger: true,
+      action: () => {
+        deleteTarget.value = project;
+      },
+    },
+  ]);
+}
 
 const pagedProjects = computed(() =>
   visibleProjects.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
@@ -337,8 +375,18 @@ function setupLabel(project: ProjectOverviewSummary): string {
     </div>
 
     <div v-else-if="viewMode === 'grid'" class="project-grid" aria-label="项目网格">
-      <article v-for="project in pagedProjects" :key="project.projectId" class="project-card">
-        <button type="button" class="project-card-main" @click="openProject(project.projectId)">
+      <article
+        v-for="project in pagedProjects"
+        :key="project.projectId"
+        class="project-card"
+        @contextmenu="onProjectContext($event, project)"
+      >
+        <button
+          type="button"
+          class="project-card-main"
+          data-context-allow
+          @click="openProject(project.projectId)"
+        >
           <div class="project-cover">
             <CaptureThumbnail
               v-if="project.coverCaptureItemId || project.latestCaptureItemId"
@@ -428,7 +476,12 @@ function setupLabel(project: ProjectOverviewSummary): string {
       <div class="project-list-head" aria-hidden="true">
         <span>项目与状态</span><span>最近活动</span>
       </div>
-      <article v-for="project in pagedProjects" :key="project.projectId" class="project-row">
+      <article
+        v-for="project in pagedProjects"
+        :key="project.projectId"
+        class="project-row"
+        @contextmenu="onProjectContext($event, project)"
+      >
         <div class="row-project">
           <div class="row-cover">
             <CaptureThumbnail
@@ -517,6 +570,7 @@ function setupLabel(project: ProjectOverviewSummary): string {
       @close="deleteTarget = null"
       @deleted="onProjectDeleted"
     />
+    <ContextMenu :menu="projectMenu" />
   </section>
 </template>
 

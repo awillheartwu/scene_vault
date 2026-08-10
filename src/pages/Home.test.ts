@@ -326,3 +326,93 @@ describe("Home project library", () => {
     wrapper.unmount();
   });
 });
+
+describe("Home project context menu", () => {
+  function menuItems() {
+    return Array.from(document.body.querySelectorAll('[role="menuitem"]')) as HTMLElement[];
+  }
+
+  function closeMenu() {
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+  }
+
+  it("opens on right-click over a card without navigating", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+
+    await wrapper.find(".project-card").trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu).not.toBeNull();
+    expect(menu!.textContent).toContain("打开项目");
+    expect(menu!.textContent).toContain("继续捕获");
+    expect(menu!.textContent).toContain("重命名…");
+    expect(menu!.textContent).toContain("删除项目…");
+    expect(push).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("allows the card main area but ignores footer buttons", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+
+    await wrapper.find(".project-card-main").trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull();
+    closeMenu();
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+
+    await wrapper.find(".capture-project-button").trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("opens the rename dialog from the context menu", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+
+    await wrapper.find(".project-card").trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+    const renameItem = menuItems().find((item) => item.textContent?.includes("重命名"));
+    renameItem!.click();
+    await flushPromises();
+
+    expect(document.body.querySelector('[role="dialog"][aria-label="重命名项目"]')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("opens the delete dialog from the context menu", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+
+    await wrapper.find(".project-card").trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+    const deleteItem = menuItems().find((item) => item.textContent?.includes("删除项目"));
+    deleteItem!.click();
+    await flushPromises();
+
+    expect(document.body.querySelector('[role="dialog"][aria-label="删除项目"]')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("opens from the list row but not from its action buttons", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+    await wrapper.get('[aria-label="列表视图"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.find(".project-row").trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull();
+    closeMenu();
+    await flushPromises();
+
+    await wrapper.get('.row-action-button[title="重命名"]').trigger("contextmenu", { clientX: 140, clientY: 80 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+    wrapper.unmount();
+  });
+});
