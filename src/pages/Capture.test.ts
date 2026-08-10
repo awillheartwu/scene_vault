@@ -338,7 +338,7 @@ describe("Capture quick-label flow", () => {
     await flushPromises();
 
     expect(api.importDirectoryCaptures).toHaveBeenCalledWith(session.id, [candidate.path]);
-    expect(api.listProjectRecentCaptures).toHaveBeenCalledTimes(recentCallsBeforeImport);
+    expect(api.listProjectRecentCaptures).toHaveBeenCalledTimes(recentCallsBeforeImport + 1);
     expect(api.listItems).not.toHaveBeenCalled();
     expect(api.readThumbnail).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("开始识别导入截图（43）");
@@ -350,6 +350,50 @@ describe("Capture quick-label flow", () => {
     await flushPromises();
     expect(api.startImportedRecognition).toHaveBeenCalledWith(session.id);
     expect(wrapper.text()).not.toContain("开始识别导入截图（43）");
+    wrapper.unmount();
+  });
+
+  it("keeps the list fresh after starting imported recognition", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([item()]);
+    api.deferredImportRecognitionCount.mockResolvedValue(3);
+    api.startImportedRecognition.mockResolvedValue(3);
+    const wrapper = mount(Capture);
+    await flushPromises();
+    const callsBeforeStart = api.listProjectRecentCaptures.mock.calls.length;
+
+    const startRecognition = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始识别导入截图"));
+    expect(startRecognition).toBeTruthy();
+    await startRecognition!.trigger("click");
+    await flushPromises();
+
+    expect(api.startImportedRecognition).toHaveBeenCalledWith(session.id);
+    expect(api.listProjectRecentCaptures).toHaveBeenCalledTimes(callsBeforeStart + 1);
+    expect(wrapper.text()).toContain("001.png");
+    wrapper.unmount();
+  });
+
+  it("disables imported-recognition start and explains why the AI engine is unconfigured", async () => {
+    api.runtimeStatus.mockResolvedValue({
+      engineStatus: "unconfigured",
+      workerStatus: "idle",
+      activeCaptureItemId: null,
+      queuedCount: 0,
+      archivePendingCount: 0,
+      lastError: null,
+    });
+    api.deferredImportRecognitionCount.mockResolvedValue(3);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("AI 未配置");
+    const startRecognition = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始识别导入截图"));
+    expect(startRecognition?.attributes("disabled")).toBeDefined();
+    expect(startRecognition?.attributes("title")).toContain("AI 未配置");
+    expect(api.startImportedRecognition).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

@@ -348,6 +348,9 @@ async function confirmImport() {
     importCandidates.value = null;
     deferredImportCount.value = await captureApi.deferredImportRecognitionCount(session.id);
     toast.success(`已登记 ${count} 张截图；尚未生成缩略图或开始识别。`);
+    // The backend also emits capture:item-created for each imported row;
+    // refreshing here keeps the list consistent even if an event is missed.
+    await refreshRecentCaptures();
   } catch (error) {
     toast.error(error instanceof Error ? error.message : String(error));
   } finally {
@@ -362,12 +365,27 @@ async function startImportedRecognition() {
   try {
     const count = await captureApi.startImportedRecognition(session.id);
     deferredImportCount.value = 0;
-    toast.success(`已开始逐张识别 ${count} 张导入截图。`);
+    // Without a configured engine the worker stays idle for awaiting-label
+    // items, so live events never populate the list on their own.
+    await refreshRecentCaptures();
+    if (runtime.value?.engineStatus === "unconfigured") {
+      toast.info(
+        `已解除识别等待（${count} 张）。AI 未配置，截图保留为待分类；配置 AI 后会在空闲时自动逐张识别。`,
+      );
+    } else {
+      toast.success(`已开始逐张识别 ${count} 张导入截图。`);
+    }
   } catch (error) {
     toast.error(error instanceof Error ? error.message : String(error));
   } finally {
     importBusy.value = false;
   }
+}
+
+async function refreshRecentCaptures() {
+  if (!projectId.value) return;
+  items.value = await captureApi.listProjectRecentCaptures(projectId.value, 100);
+  selectBestItem();
 }
 
 async function stopSession() {
@@ -751,7 +769,12 @@ onBeforeUnmount(() => {
               v-if="deferredImportCount"
               type="button"
               class="recognition-action"
-              :disabled="importBusy"
+              :disabled="importBusy || runtime?.engineStatus === 'unconfigured'"
+              :title="
+                runtime?.engineStatus === 'unconfigured'
+                  ? 'AI 未配置：先在设置中配置 Python 与模型，才能开始识别导入截图'
+                  : '逐张识别已导入截图'
+              "
               @click="startImportedRecognition"
             >
               <Sparkles :size="16" />开始识别导入截图（{{ deferredImportCount }}）
@@ -809,7 +832,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <CaptureProgress persistent class="stage-progress" />
+        <CaptureProgress persistent :deferred-count="deferredImportCount" class="stage-progress" />
 
         <div class="preview-shell" :class="{ empty: !selectedItem }">
           <img v-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />

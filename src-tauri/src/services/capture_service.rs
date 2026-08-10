@@ -1483,7 +1483,7 @@ pub async fn list_unimported_captures(
 pub async fn import_directory_captures(
     pool: &SqlitePool,
     input: ImportDirectoryCapturesInput,
-) -> Result<i64, AppError> {
+) -> Result<Vec<CaptureItem>, AppError> {
     let session_id = input.session_id.trim();
     if session_id.is_empty() {
         return Err(AppError::Validation(
@@ -1492,7 +1492,7 @@ pub async fn import_directory_captures(
     }
     let session = get_session(pool, session_id).await?;
     let session_dirs = session_directories(pool, &session).await?;
-    let mut imported = 0i64;
+    let mut imported = Vec::new();
     for raw in &input.paths {
         let Ok(canonical) = tokio::fs::canonicalize(Path::new(raw.trim())).await else {
             continue;
@@ -1529,9 +1529,9 @@ pub async fn import_directory_captures(
         .bind(&source_path)
         .execute(pool)
         .await?;
-        let (_, created) = register_discovered_path(pool, session_id, &canonical, true).await?;
+        let (item, created) = register_discovered_path(pool, session_id, &canonical, true).await?;
         if created {
-            imported += 1;
+            imported.push(item);
         }
     }
     Ok(imported)

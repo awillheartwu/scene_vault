@@ -1,8 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { eventHandlers } = vi.hoisted(() => ({
+const { eventHandlers, api } = vi.hoisted(() => ({
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
+  api: {
+    runtimeStatus: vi.fn(),
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -12,9 +15,24 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
+vi.mock("@/lib/capture-api", () => ({
+  captureApi: api,
+}));
+
 import CaptureProgress from "./CaptureProgress.vue";
 
-beforeEach(() => eventHandlers.clear());
+beforeEach(() => {
+  eventHandlers.clear();
+  api.runtimeStatus.mockResolvedValue({
+    engineStatus: "configured",
+    workerStatus: "idle",
+    activeCaptureItemId: null,
+    activeCaptureSourcePath: null,
+    queuedCount: 0,
+    archivePendingCount: 0,
+    lastError: null,
+  });
+});
 
 describe("CaptureProgress", () => {
   it("reserves a stable idle status area when persistent", async () => {
@@ -32,6 +50,37 @@ describe("CaptureProgress", () => {
     await flushPromises();
 
     expect(wrapper.find(".capture-progress").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("explains that imported screenshots await explicit start", async () => {
+    const wrapper = mount(CaptureProgress, {
+      props: { persistent: true, deferredCount: 43 },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('[data-state="deferred-import"]').text()).toContain("已登记 43 张截图");
+    wrapper.unmount();
+  });
+
+  it("warns that an unconfigured AI engine cannot recognize imports", async () => {
+    api.runtimeStatus.mockResolvedValue({
+      engineStatus: "unconfigured",
+      workerStatus: "idle",
+      activeCaptureItemId: null,
+      activeCaptureSourcePath: null,
+      queuedCount: 0,
+      archivePendingCount: 0,
+      lastError: null,
+    });
+    const wrapper = mount(CaptureProgress, {
+      props: { persistent: true, deferredCount: 43 },
+    });
+    await flushPromises();
+
+    const hint = wrapper.find('[data-state="engine-unconfigured"]');
+    expect(hint.exists()).toBe(true);
+    expect(hint.text()).toContain("AI 未配置");
     wrapper.unmount();
   });
 

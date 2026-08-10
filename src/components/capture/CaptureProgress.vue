@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
-import { Activity, LoaderCircle } from "@lucide/vue";
+import { Activity, AlertCircle, LoaderCircle } from "@lucide/vue";
 import { stageLabel, useCaptureProgress } from "@/lib/capture-progress";
 
-withDefaults(defineProps<{ persistent?: boolean }>(), { persistent: false });
+withDefaults(defineProps<{ persistent?: boolean; deferredCount?: number }>(), {
+  persistent: false,
+  deferredCount: 0,
+});
 
-const { start, activeItemId, activeSourcePath, stage, percent, queuedCount } = useCaptureProgress();
+const { start, activeItemId, activeSourcePath, stage, percent, queuedCount, engineStatus } =
+  useCaptureProgress();
 const activeFileName = computed(() => activeSourcePath.value?.split(/[\\/]/).pop() || "正在读取任务…");
+const engineUnconfigured = computed(() => engineStatus.value === "unconfigured");
 onMounted(() => void start());
 </script>
 
@@ -26,7 +31,13 @@ onMounted(() => void start());
       </template>
       <template v-else>
         <span><Activity :size="13" />图片处理状态</span>
-        <span>{{ queuedCount > 0 ? `等待队列 ${queuedCount}` : "空闲" }}</span>
+        <span v-if="engineUnconfigured" class="capture-progress-hint" data-state="engine-unconfigured">
+          <AlertCircle :size="13" />AI 未配置：导入截图不会自动识别，可人工分类，或到设置中配置后逐张处理
+        </span>
+        <span v-else-if="deferredCount > 0" class="capture-progress-hint" data-state="deferred-import">
+          已登记 {{ deferredCount }} 张截图，点击「开始识别导入截图」后逐张处理
+        </span>
+        <span v-else>{{ queuedCount > 0 ? `等待队列 ${queuedCount}` : "空闲" }}</span>
       </template>
     </div>
     <div class="capture-progress-track">

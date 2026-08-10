@@ -1564,7 +1564,7 @@ async fn lists_and_imports_pre_existing_directory_images() {
     )
     .await
     .expect("import");
-    assert_eq!(imported, 2);
+    assert_eq!(imported.len(), 2);
 
     let items = list_items(&pool, &session.id).await.expect("items");
     assert_eq!(items.len(), 2);
@@ -1621,7 +1621,7 @@ async fn lists_and_imports_pre_existing_directory_images() {
     )
     .await
     .expect("re-import");
-    assert_eq!(again, 0, "already-registered paths are skipped");
+    assert_eq!(again.len(), 0, "already-registered paths are skipped");
     let _ = workspace;
 }
 
@@ -1651,7 +1651,8 @@ async fn import_is_deduplicated_across_sessions() {
             },
         )
         .await
-        .expect("import"),
+        .expect("import")
+        .len(),
         2
     );
 
@@ -1676,7 +1677,8 @@ async fn import_is_deduplicated_across_sessions() {
             },
         )
         .await
-        .expect("import second session"),
+        .expect("import second session")
+        .len(),
         0,
         "cross-session re-import must be skipped"
     );

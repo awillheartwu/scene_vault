@@ -1,5 +1,6 @@
 import { onBeforeUnmount, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { captureApi } from "@/lib/capture-api";
 
 export interface ProgressPayload {
   captureItemId: string;
@@ -37,10 +38,21 @@ export function useCaptureProgress() {
   const stage = ref<string | null>(null);
   const percent = ref(0);
   const queuedCount = ref(0);
+  const engineStatus = ref<string | null>(null);
   let unlisteners: UnlistenFn[] = [];
 
   async function start() {
     try {
+      // Seed the engine state immediately; the worker only emits
+      // runtime-status when something changes, so an idle page would
+      // otherwise never learn that the AI engine is unconfigured.
+      try {
+        const status = await captureApi.runtimeStatus();
+        engineStatus.value = status.engineStatus;
+        queuedCount.value = status.queuedCount;
+      } catch {
+        // Browser previews do not expose the Tauri bridge.
+      }
       unlisteners.push(
         await listen<ProgressPayload>("capture:progress", (event) => {
           activeItemId.value = event.payload.captureItemId;
@@ -49,6 +61,7 @@ export function useCaptureProgress() {
           percent.value = event.payload.percent;
         }),
         await listen<RuntimeStatusPayload>("capture:runtime-status", (event) => {
+          engineStatus.value = event.payload.engineStatus;
           queuedCount.value = event.payload.queuedCount;
           const nextActiveItemId = event.payload.activeCaptureItemId;
           if (nextActiveItemId) {
@@ -77,7 +90,7 @@ export function useCaptureProgress() {
     unlisteners.forEach((unlisten) => unlisten());
   });
 
-  return { start, activeItemId, activeSourcePath, stage, percent, queuedCount };
+  return { start, activeItemId, activeSourcePath, stage, percent, queuedCount, engineStatus };
 }
 
 export function stageLabel(stage: string | null): string {

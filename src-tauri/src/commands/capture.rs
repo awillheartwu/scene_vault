@@ -147,10 +147,18 @@ pub async fn list_unimported_captures(
 
 #[tauri::command]
 pub async fn import_directory_captures(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: ImportDirectoryCapturesInput,
 ) -> Result<i64, AppError> {
-    capture_service::import_directory_captures(&state.pool, input).await
+    let items = capture_service::import_directory_captures(&state.pool, input).await?;
+    let count = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    for item in &items {
+        // Mirror live file discovery so the Capture page can show imported
+        // screenshots immediately without waiting for a reload.
+        let _ = app.emit("capture:item-created", item);
+    }
+    Ok(count)
 }
 
 #[tauri::command]
