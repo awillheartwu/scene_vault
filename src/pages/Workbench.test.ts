@@ -723,6 +723,18 @@ describe("Workbench", () => {
     wrapper.unmount();
   });
 
+  it("reloads the view when the face bank finishes rebuilding", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    const callsBefore = api.listProjectCharacterSummaries.mock.calls.length;
+
+    eventHandlers.get("capture:face-bank-rebuilt")?.({ payload: {} });
+    await flushPromises();
+
+    expect(api.listProjectCharacterSummaries.mock.calls.length).toBeGreaterThan(callsBefore);
+    wrapper.unmount();
+  });
+
   it("switches to the unclassified tab and loads category items", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();

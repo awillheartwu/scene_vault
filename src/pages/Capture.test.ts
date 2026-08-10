@@ -437,6 +437,42 @@ describe("Capture quick-label flow", () => {
     wrapper.unmount();
   });
 
+  it("re-runs the suggestion even when the local snapshot has no face count", async () => {
+    const base = { ...item(), faceCount: 0, suggestedCharacterId: null, reviewStatus: "none" };
+    api.listProjectRecentCaptures.mockResolvedValue([base]);
+    api.suggestForCapture.mockResolvedValue({
+      ...base,
+      faceCount: 1,
+      suggestedCharacterId: "char-1",
+      recognitionConfidence: 0.9,
+      reviewStatus: "pending",
+    });
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    const personButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("人物"));
+    await personButton!.trigger("click");
+    await flushPromises();
+
+    expect(api.suggestForCapture).toHaveBeenCalledWith("item-1");
+    expect(wrapper.text()).toContain("推荐：Mira");
+    wrapper.unmount();
+  });
+
+  it("refreshes recent captures when the face bank finishes rebuilding", async () => {
+    const wrapper = mount(Capture);
+    await flushPromises();
+    const callsBefore = api.listProjectRecentCaptures.mock.calls.length;
+
+    eventHandlers.get("capture:face-bank-rebuilt")?.({ payload: {} });
+    await flushPromises();
+
+    expect(api.listProjectRecentCaptures.mock.calls.length).toBeGreaterThan(callsBefore);
+    wrapper.unmount();
+  });
+
   it("starts a session and reports the projects it auto-stopped", async () => {
     api.listSessions.mockResolvedValue([]);
     api.listSourceDirectories.mockResolvedValue([

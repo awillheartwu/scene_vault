@@ -250,6 +250,11 @@ async fn process_awaiting_label_feature(
     )
     .await?;
     let _ = recognition_service::suggest_from_face_bank(pool, &item.id).await;
+    // Pages only learn about the stored feature/suggestion through
+    // item-updated; without it they keep the pre-feature snapshot (no face
+    // count, no recommendation) until a reload. Broadcast the fresh item.
+    let updated = capture_service::get_item(pool, &item.id).await?;
+    emit_item(app, &updated);
     Ok(true)
 }
 

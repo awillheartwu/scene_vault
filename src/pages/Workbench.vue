@@ -583,6 +583,11 @@ onMounted(async () => {
       await listen("capture:item-updated", () => {
         void loadCharacterData();
       }),
+      await listen("capture:face-bank-rebuilt", () => {
+        // A rebuild refreshed features and suggestions for many items; the
+        // completion event is the only signal, so reload the whole view.
+        void loadCharacterData();
+      }),
     );
     unlisteners.push(
       await listen<{ processed: number; total: number }>(

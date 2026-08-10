@@ -412,6 +412,11 @@ onMounted(async () => {
         // appear in the open popup immediately.
         void refreshItems();
       }),
+      await listen("capture:face-bank-rebuilt", () => {
+        // Suggestions were refreshed for many captures; reload the queue so
+        // pending recommendations show up without reopening the popup.
+        void refreshItems();
+      }),
     );
   } catch {
     // Browser previews do not expose the Tauri event bridge.

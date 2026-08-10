@@ -452,10 +452,12 @@ let suggestionRequestedFor: string | null = null;
 
 // Re-runs the face-bank comparison with the freshest samples whenever the
 // user is about to label a person capture, so a suggestion uses samples that
-// may have been enrolled earlier in the same batch.
+// may have been enrolled earlier in the same batch. The local item may be a
+// stale pre-feature snapshot, so the backend (which reads the real feature
+// state) decides whether a comparison is possible; no front-end guard here.
 async function refreshSuggestion() {
   const item = selectedItem.value;
-  if (!item || !item.faceCount || suggestionRequestedFor === item.id) return;
+  if (!item || suggestionRequestedFor === item.id) return;
   suggestionRequestedFor = item.id;
   try {
     upsertItem(await captureApi.suggestForCapture(item.id));
@@ -638,6 +640,7 @@ onMounted(async () => {
     unlisteners.push(
       await listen<CaptureItem>("capture:item-created", (event) => upsertItem(event.payload)),
       await listen<CaptureItem>("capture:item-updated", (event) => upsertItem(event.payload)),
+      await listen("capture:face-bank-rebuilt", () => void refreshRecentCaptures()),
       await listen<CaptureRuntimeStatus>("capture:runtime-status", (event) => {
         runtime.value = event.payload;
       }),
