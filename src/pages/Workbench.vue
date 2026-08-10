@@ -7,6 +7,7 @@ import {
   Check,
   ChevronsLeft,
   ChevronsRight,
+  Eye,
   ExternalLink,
   Flag,
   Image,
@@ -25,6 +26,8 @@ import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CharacterMergeDialog from "@/components/character/CharacterMergeDialog.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
+import { ContextMenu } from "@/components/ui/context-menu";
+import { useContextMenu, type ContextMenuItem } from "@/composables/useContextMenu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -76,6 +79,162 @@ type WorkbenchView = "characters" | "unclassified" | "scene" | "private";
 const view = ref<WorkbenchView>("characters");
 const panelCollapsed = ref(false);
 const showPrivate = ref(false);
+const characterMenu = useContextMenu();
+const itemMenu = useContextMenu();
+
+function onCharacterContext(event: MouseEvent, summary: CharacterSummary) {
+  if (!characterMenu.open(event, buildCharacterItems(summary))) return;
+  selectedCharacterId.value = summary.id;
+}
+
+function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
+  return [
+    {
+      id: "rename",
+      label: "重命名…",
+      icon: Pencil,
+      action: () => {
+        selectedCharacterId.value = summary.id;
+        openRename();
+      },
+    },
+    {
+      id: "merge",
+      label: "合并到其他角色…",
+      icon: Users,
+      disabled: summaries.value.length <= 1,
+      action: () => {
+        selectedCharacterId.value = summary.id;
+        mergeOpen.value = true;
+      },
+    },
+    {
+      id: "batch-reject",
+      label: "批量拒绝并登记",
+      icon: Ban,
+      separatorBefore: true,
+      disabled: summary.pendingReviewCount === 0,
+      action: () => {
+        selectedCharacterId.value = summary.id;
+        void batchRejectAndEnroll();
+      },
+    },
+    {
+      id: "reprocess",
+      label: "当前角色重新识别",
+      icon: Sparkles,
+      disabled: summary.degradedCount === 0,
+      action: () => {
+        selectedCharacterId.value = summary.id;
+        void batchReprocess(summary.id);
+      },
+    },
+  ];
+}
+
+function onItemContext(event: MouseEvent, item: CaptureItem) {
+  if (!itemMenu.open(event, buildItemItems(item))) return;
+  selectedItemId.value = item.id;
+}
+
+function buildItemItems(item: CaptureItem): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [
+    { id: "detail", label: "查看详情", icon: Eye, action: () => openItemDetail(item.id) },
+  ];
+  if ((view.value === "characters" || view.value === "unclassified") && item.reviewStatus === "pending") {
+    items.push(
+      {
+        id: "accept",
+        label: "确认建议",
+        icon: Check,
+        separatorBefore: true,
+        action: () => void acceptSuggestion(item),
+      },
+      {
+        id: "reject",
+        label: "拒绝建议",
+        icon: X,
+        action: () => void rejectSuggestion(item),
+      },
+      {
+        id: "reject-enroll",
+        label: "拒绝并登记",
+        icon: UserPlus,
+        action: () => void rejectAndEnroll(item),
+      },
+    );
+  }
+  if (canRefreshFaceFeature(item)) {
+    items.push({
+      id: "refresh-feature",
+      label: "重新提取人脸特征",
+      icon: RefreshCw,
+      separatorBefore: items.length > 1,
+      action: () => void refreshFaceFeature(item),
+    });
+  }
+  if (canReprocess(item)) {
+    items.push({
+      id: "reprocess",
+      label: "重新识别",
+      icon: Sparkles,
+      action: () => void reprocessDegraded(item),
+    });
+  }
+  if (
+    view.value === "characters" &&
+    item.characterId === selectedCharacterId.value &&
+    item.assetId &&
+    item.avatarPath &&
+    selectedCharacter.value?.avatarAssetId !== item.assetId
+  ) {
+    items.push({
+      id: "avatar",
+      label: "设为代表头像",
+      icon: UserRound,
+      separatorBefore: true,
+      action: () => setRepresentativeAvatar(item.assetId!),
+    });
+  }
+  const entrySample =
+    view.value === "characters"
+      ? (samples.value.find(
+          (entry) => entry.captureItemId === item.id && entry.status === "active",
+        ) ?? null)
+      : null;
+  if (entrySample) {
+    items.push({
+      id: "flag-sample",
+      label: entrySample.flagged ? "恢复参与匹配" : "标记可疑",
+      icon: Flag,
+      action: () => void toggleSampleFlagged(entrySample),
+    });
+  }
+  items.push(
+    {
+      id: "cover",
+      label: currentProject.value?.coverCaptureItemId === item.id ? "取消项目封面" : "设为项目封面",
+      icon: Image,
+      separatorBefore: true,
+      action: () => void toggleProjectCover(),
+    },
+    {
+      id: "reveal-source",
+      label: "显示原图",
+      icon: Image,
+      action: () => reveal(item.sourcePath),
+    },
+  );
+  if (item.destinationPath) {
+    items.push({
+      id: "reveal-destination",
+      label: "显示归档图",
+      icon: Archive,
+      action: () => reveal(item.destinationPath),
+    });
+  }
+  return items;
+}
 
 const selectedCharacter = computed(
   () => summaries.value.find((summary) => summary.id === selectedCharacterId.value) ?? null,
@@ -717,6 +876,7 @@ onBeforeUnmount(() => {
           class="character-card"
           :class="{ selected: selectedCharacterId === summary.id }"
           @click="selectedCharacterId = summary.id"
+          @contextmenu="onCharacterContext($event, summary)"
         >
           <span class="character-avatar">
             <CaptureThumbnail
@@ -842,6 +1002,7 @@ onBeforeUnmount(() => {
             class="workbench-cell"
             :class="{ selected: selectedItemId === item.id }"
             @click="openItemDetail(item.id)"
+            @contextmenu="onItemContext($event, item)"
           >
             <span class="workbench-cell-thumb">
               <CaptureThumbnail :item="item" :variant="item.destinationPath ? 'destination' : 'source'" />
@@ -1160,5 +1321,7 @@ onBeforeUnmount(() => {
         </form>
       </DialogContent>
     </Dialog>
+    <ContextMenu :menu="characterMenu" />
+    <ContextMenu :menu="itemMenu" />
   </section>
 </template>

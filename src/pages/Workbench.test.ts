@@ -17,6 +17,8 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     getAppSettings: vi.fn(),
     acceptRecognitionSuggestion: vi.fn(),
     reviewRecognitionSuggestion: vi.fn(),
+    rejectSuggestionAndEnroll: vi.fn(),
+    batchRejectAndEnroll: vi.fn(),
     relabel: vi.fn(),
     renameCharacter: vi.fn(),
     mergeCharacters: vi.fn(),
@@ -24,6 +26,7 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     retry: vi.fn(),
     refreshCaptureFaceFeature: vi.fn(),
     setProjectCover: vi.fn(),
+    revealPath: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
   },
@@ -44,7 +47,7 @@ vi.mock("@/lib/capture-api", () => ({
   captureStatusLabel: (status: string) => status,
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
-  revealPath: vi.fn(async () => {}),
+  revealPath: api.revealPath,
 }));
 
 import Workbench from "./Workbench.vue";
@@ -187,6 +190,8 @@ beforeEach(() => {
     reviewStatus: "none",
   });
   api.reviewRecognitionSuggestion.mockResolvedValue(item);
+  api.rejectSuggestionAndEnroll.mockResolvedValue(item);
+  api.batchRejectAndEnroll.mockResolvedValue(1);
   api.renameCharacter.mockResolvedValue({ ...characters[0], name: "Ava 2" });
   api.mergeCharacters.mockResolvedValue(characters[1]);
   api.refreshCaptureFaceFeature.mockResolvedValue(item);
@@ -769,5 +774,120 @@ describe("Workbench", () => {
       .findAll(".workbench-tabs button")
       .map((button) => button.text());
     expect(tabs).toContain("收藏图");
+  });
+});
+
+describe("Workbench context menus", () => {
+  function menuItems() {
+    return Array.from(document.body.querySelectorAll('[role="menuitem"]')) as HTMLElement[];
+  }
+
+  it("opens the rename dialog from a character card", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".character-card").trigger("contextmenu", { clientX: 80, clientY: 50 });
+    await flushPromises();
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu!.textContent).toContain("重命名…");
+    expect(menu!.textContent).toContain("合并到其他角色…");
+    expect(menu!.textContent).toContain("批量拒绝并登记");
+    expect(menu!.textContent).toContain("当前角色重新识别");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("重命名"))!
+      .click();
+    await flushPromises();
+    expect(document.body.querySelector('[role="dialog"][aria-label="重命名角色"]')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("opens the merge dialog from a character card", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".character-card").trigger("contextmenu", { clientX: 80, clientY: 50 });
+    await flushPromises();
+    menuItems()
+      .find((entry) => entry.textContent?.includes("合并到其他角色"))!
+      .click();
+    await flushPromises();
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("合并角色");
+    wrapper.unmount();
+  });
+
+  it("batch-rejects pending suggestions from a character card", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".character-card").trigger("contextmenu", { clientX: 80, clientY: 50 });
+    await flushPromises();
+    menuItems()
+      .find((entry) => entry.textContent?.includes("批量拒绝并登记"))!
+      .click();
+    await flushPromises();
+    expect(api.batchRejectAndEnroll).toHaveBeenCalledWith("project-1", "character-1");
+    wrapper.unmount();
+  });
+
+  it("accepts a pending suggestion and reveals the source image from an item cell", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".workbench-cell").trigger("contextmenu", { clientX: 90, clientY: 60 });
+    await flushPromises();
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu!.textContent).toContain("查看详情");
+    expect(menu!.textContent).toContain("确认建议");
+    expect(menu!.textContent).toContain("拒绝建议");
+    expect(menu!.textContent).toContain("拒绝并登记");
+    expect(menu!.textContent).toContain("设为项目封面");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("确认建议"))!
+      .click();
+    await flushPromises();
+    expect(api.acceptRecognitionSuggestion).toHaveBeenCalledWith("item-1");
+
+    await wrapper.find(".workbench-cell").trigger("contextmenu", { clientX: 90, clientY: 60 });
+    await flushPromises();
+    menuItems()
+      .find((entry) => entry.textContent?.includes("显示原图"))!
+      .click();
+    await flushPromises();
+    expect(api.revealPath).toHaveBeenCalledWith("C:\\shots\\one.png");
+    wrapper.unmount();
+  });
+
+  it("sets the project cover from an item cell", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".workbench-cell").trigger("contextmenu", { clientX: 90, clientY: 60 });
+    await flushPromises();
+    menuItems()
+      .find((entry) => entry.textContent?.includes("设为项目封面"))!
+      .click();
+    await flushPromises();
+    expect(api.setProjectCover).toHaveBeenCalledWith("project-1", "item-1");
+    wrapper.unmount();
+  });
+
+  it("hides suggestion actions in the scene view", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    const sceneTab = wrapper
+      .findAll('[role="tab"]')
+      .find((tab) => tab.text() === "游戏截图");
+    await sceneTab!.trigger("click");
+    await flushPromises();
+
+    await wrapper.find(".workbench-cell").trigger("contextmenu", { clientX: 90, clientY: 60 });
+    await flushPromises();
+    const menu = document.body.querySelector('[role="menu"]');
+    expect(menu!.textContent).toContain("显示原图");
+    expect(menu!.textContent).not.toContain("确认建议");
+    expect(menu!.textContent).not.toContain("设为代表头像");
+    wrapper.unmount();
   });
 });
