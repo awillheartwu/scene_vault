@@ -8,6 +8,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   ExternalLink,
+  Flag,
   Image,
   MoreHorizontal,
   Pencil,
@@ -110,6 +111,17 @@ const selectedItemIsRepresentativeAvatar = computed(() =>
 const activeSampleCaptureIds = computed(
   () => new Set(samples.value.filter((sample) => sample.status === "active").map((sample) => sample.captureItemId)),
 );
+// The enrolled sample of the selected capture, if any. Flagged samples are
+// excluded from matching until restored from the correction card.
+const selectedItemSample = computed<FaceSample | null>(() => {
+  const item = selectedItem.value;
+  if (!item) return null;
+  return (
+    samples.value.find(
+      (sample) => sample.captureItemId === item.id && sample.status === "active",
+    ) ?? null
+  );
+});
 
 function characterName(id: string | null | undefined): string {
   if (!id) return "";
@@ -375,6 +387,17 @@ function canRefreshFaceFeature(item: CaptureItem): boolean {
 
 function refreshFaceFeature(item: CaptureItem) {
   return runMutation(() => captureApi.refreshCaptureFaceFeature(item.id));
+}
+
+function toggleSampleFlagged(sample: FaceSample) {
+  return runMutation(async () => {
+    const updated = await captureApi.setFaceSampleFlagged(sample.id, !sample.flagged);
+    toast.success(
+      updated.flagged
+        ? "已标记为可疑，这张样本不再参与匹配（可在修正卡恢复）。"
+        : "已恢复参与匹配，这张样本重新参与相似度计算与建议。",
+    );
+  });
 }
 
 async function onRelabelCharacter(event: Event) {
@@ -1020,6 +1043,20 @@ onBeforeUnmount(() => {
                 @click="refreshFaceFeature(selectedItem)"
               >
                 <RefreshCw :size="16" />重新提取人脸特征
+              </button>
+              <button
+                v-if="selectedItemSample"
+                type="button"
+                class="secondary-action"
+                :disabled="busy"
+                :title="
+                  selectedItemSample.flagged
+                    ? '取消可疑标记，让这张样本重新参与匹配与相似度计算'
+                    : '把这张样本标记为可疑，不再参与匹配；确认无误后可在修正卡恢复'
+                "
+                @click="toggleSampleFlagged(selectedItemSample)"
+              >
+                <Flag :size="16" />{{ selectedItemSample.flagged ? "恢复参与匹配" : "标记可疑" }}
               </button>
             </div>
           </section>

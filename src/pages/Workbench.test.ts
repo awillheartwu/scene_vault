@@ -639,6 +639,40 @@ describe("Workbench", () => {
     expect(refresh?.attributes("disabled")).toBeDefined();
   });
 
+  it("restores a flagged sample to matching from the correction card", async () => {
+    api.listCharacterFaceSamples.mockResolvedValue([{ ...sample, flagged: 1 }]);
+    api.setFaceSampleFlagged.mockResolvedValue({ ...sample, flagged: 0 });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const restore = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("恢复参与匹配"));
+    expect(restore).toBeDefined();
+    expect(restore!.attributes("disabled")).toBeUndefined();
+    await restore!.trigger("click");
+    await flushPromises();
+
+    expect(api.setFaceSampleFlagged).toHaveBeenCalledWith("sample-1", false);
+    wrapper.unmount();
+  });
+
+  it("marks an active sample as suspicious from the correction card", async () => {
+    api.setFaceSampleFlagged.mockResolvedValue({ ...sample, flagged: 1 });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const mark = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("标记可疑"));
+    expect(mark).toBeDefined();
+    await mark!.trigger("click");
+    await flushPromises();
+
+    expect(api.setFaceSampleFlagged).toHaveBeenCalledWith("sample-1", true);
+    wrapper.unmount();
+  });
+
   it("switches to the unclassified tab and loads category items", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
