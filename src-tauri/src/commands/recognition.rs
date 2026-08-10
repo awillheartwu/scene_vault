@@ -48,6 +48,41 @@ pub async fn rebuild_face_bank(
     Ok(summary)
 }
 
+/// Re-extracts one capture's primary-face feature with the currently
+/// configured engine. Feature-only: no annotation/avatar output, no archive
+/// rerun, and the capture's classification/character_id never change. The
+/// command mirrors the worker's `capture:progress` events during extraction
+/// and emits `capture:item-updated` with the refreshed item when done.
+#[tauri::command]
+pub async fn refresh_capture_face_feature(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: CaptureItemIdInput,
+) -> Result<CaptureItem, AppError> {
+    let item = capture_service::get_item(&state.pool, &input.capture_item_id).await?;
+    let item_id_for_progress = item.id.clone();
+    let source_path_for_progress = item.source_path.clone();
+    let progress_app = app.clone();
+    let updated = recognition_service::refresh_capture_face_feature(
+        &state.pool,
+        &input.capture_item_id,
+        move |stage, percent| {
+            let _ = progress_app.emit(
+                "capture:progress",
+                json!({
+                    "captureItemId": item_id_for_progress,
+                    "sourcePath": source_path_for_progress,
+                    "stage": stage,
+                    "percent": percent,
+                }),
+            );
+        },
+    )
+    .await?;
+    let _ = app.emit("capture:item-updated", &updated);
+    Ok(updated)
+}
+
 /// Reports whether the project's Face Bank matches the configured
 /// recognizer, so the UI can show a rebuild hint instead of silent
 /// "no suggestions".

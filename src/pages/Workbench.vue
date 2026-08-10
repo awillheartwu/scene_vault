@@ -364,6 +364,19 @@ function reprocessDegraded(item: CaptureItem) {
   return runMutation(() => captureApi.retry(item.id));
 }
 
+function canRefreshFaceFeature(item: CaptureItem): boolean {
+  return (
+    (item.classification === "person" || item.classification === "unclassified") &&
+    item.status !== "queued" &&
+    item.status !== "processing" &&
+    item.status !== "archive_pending"
+  );
+}
+
+function refreshFaceFeature(item: CaptureItem) {
+  return runMutation(() => captureApi.refreshCaptureFaceFeature(item.id));
+}
+
 async function onRelabelCharacter(event: Event) {
   const item = selectedItem.value;
   if (!item) return;
@@ -702,71 +715,75 @@ onBeforeUnmount(() => {
 
       <div class="workbench-grid-column">
         <div class="workbench-grid-header">
-          <h2>
-            <button
-              type="button"
-              class="panel-toggle"
-              :title="panelCollapsed ? '展开左侧栏' : '折叠左侧栏'"
-              aria-label="折叠或展开左侧栏"
-              @click="panelCollapsed = !panelCollapsed"
-            >
-              <ChevronsRight v-if="panelCollapsed" :size="15" />
-              <ChevronsLeft v-else :size="15" />
-            </button>
-            {{ viewLabel }}
-            <button
-              v-if="view === 'characters' && selectedCharacter"
-              type="button"
-              class="rename-button"
-              :title="`重命名 ${selectedCharacter.name}`"
-              aria-label="重命名角色"
-              @click="openRename"
-            >
-              <Pencil :size="14" />
-            </button>
-          </h2>
-          <span class="grid-actions">
-            <button
-              v-if="view === 'characters' && selectedCharacter && summaries.length > 1"
-              ref="mergeButton"
-              type="button"
-              class="secondary-action"
-              :disabled="busy"
-              :title="`将 ${selectedCharacter.name} 合并到另一个角色`"
-              @click="mergeOpen = true"
-            >
-              <Users :size="14" />合并角色
-            </button>
-            <button
-              v-if="view === 'characters' && selectedCharacter"
-              type="button"
-              class="secondary-action compact-action"
-              :disabled="busy || selectedCharacter.pendingReviewCount === 0"
-              title="否决当前角色全部待确认建议，并把对应人脸登记进该角色样本库"
-              @click="batchRejectAndEnroll"
-            >
-              <Ban :size="14" />批量拒绝并登记 ({{ selectedCharacter.pendingReviewCount }})
-            </button>
-            <button
-              v-if="view === 'characters' && selectedCharacter"
-              type="button"
-              class="secondary-action compact-action"
-              :disabled="busy || selectedCharacter.degradedCount === 0"
-              @click="batchReprocess(selectedCharacter.id)"
-            >
-              <Sparkles :size="14" />当前角色重新识别 ({{ selectedCharacter.degradedCount }})
-            </button>
-            <button
-              v-if="view === 'characters' && selectedCharacter"
-              type="button"
-              class="secondary-action compact-action"
-              :disabled="busy || projectDegradedCount === 0"
-              @click="batchReprocess(null)"
-            >
-              <Sparkles :size="14" />全部重新识别 ({{ projectDegradedCount }})
-            </button>
-            <span>{{ items.length }} 张截图</span>
-          </span>
+          <div class="workbench-grid-header-title">
+            <h2>
+              <button
+                type="button"
+                class="panel-toggle"
+                :title="panelCollapsed ? '展开左侧栏' : '折叠左侧栏'"
+                aria-label="折叠或展开左侧栏"
+                @click="panelCollapsed = !panelCollapsed"
+              >
+                <ChevronsRight v-if="panelCollapsed" :size="15" />
+                <ChevronsLeft v-else :size="15" />
+              </button>
+              {{ viewLabel }}
+              <button
+                v-if="view === 'characters' && selectedCharacter"
+                type="button"
+                class="rename-button"
+                :title="`重命名 ${selectedCharacter.name}`"
+                aria-label="重命名角色"
+                @click="openRename"
+              >
+                <Pencil :size="14" />
+              </button>
+            </h2>
+            <span class="workbench-screenshot-count">{{ items.length }} 张截图</span>
+          </div>
+          <div v-if="view === 'characters' && selectedCharacter" class="workbench-grid-actions">
+            <div class="workbench-action-group">
+              <button
+                ref="mergeButton"
+                type="button"
+                class="secondary-action compact-action"
+                :disabled="busy || summaries.length <= 1"
+                :title="summaries.length > 1 ? `将 ${selectedCharacter.name} 合并到另一个角色` : '当前项目只有一个角色，无法合并'"
+                @click="mergeOpen = true"
+              >
+                <Users :size="14" />合并角色
+              </button>
+            </div>
+            <div class="workbench-action-group">
+              <button
+                type="button"
+                class="secondary-action compact-action"
+                :disabled="busy || selectedCharacter.pendingReviewCount === 0"
+                title="否决当前角色全部待确认建议，并把对应人脸登记进该角色样本库"
+                @click="batchRejectAndEnroll"
+              >
+                <Ban :size="14" />批量拒绝并登记 ({{ selectedCharacter.pendingReviewCount }})
+              </button>
+            </div>
+            <div class="workbench-action-group">
+              <button
+                type="button"
+                class="secondary-action compact-action"
+                :disabled="busy || selectedCharacter.degradedCount === 0"
+                @click="batchReprocess(selectedCharacter.id)"
+              >
+                <Sparkles :size="14" />当前角色重新识别 ({{ selectedCharacter.degradedCount }})
+              </button>
+              <button
+                type="button"
+                class="secondary-action compact-action"
+                :disabled="busy || projectDegradedCount === 0"
+                @click="batchReprocess(null)"
+              >
+                <Sparkles :size="14" />全部重新识别 ({{ projectDegradedCount }})
+              </button>
+            </div>
+          </div>
         </div>
         <CaptureProgress />
         <div class="workbench-grid" role="list" aria-label="角色截图网格">
@@ -836,15 +853,27 @@ onBeforeUnmount(() => {
             >
               <UserRound :size="15" />{{ selectedItemIsRepresentativeAvatar ? "当前代表头像" : "设为代表头像" }}
             </button>
-            <button
-              v-if="selectedCharacter.avatarAssetId"
-              type="button"
-              class="secondary-action compact-action"
-              :disabled="busy"
-              @click="setRepresentativeAvatar(null)"
-            >
-              <RotateCcw :size="15" />恢复自动头像
-            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
+                <button
+                  type="button"
+                  class="icon-action compact-icon-action"
+                  aria-label="更多头像操作"
+                  title="更多头像操作"
+                >
+                  <MoreHorizontal :size="16" aria-hidden="true" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="workbench-avatar-menu">
+                <DropdownMenuItem
+                  title="清除手工代表头像，改由最近一张完成归档的人物图自动担任"
+                  :disabled="busy || !selectedCharacter.avatarAssetId"
+                  @select="setRepresentativeAvatar(null)"
+                >
+                  <RotateCcw :size="15" aria-hidden="true" />恢复自动头像
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </section>
 
@@ -983,6 +1012,15 @@ onBeforeUnmount(() => {
                   <option value="private">收藏图</option>
                 </select>
               </label>
+              <button
+                type="button"
+                class="secondary-action"
+                :disabled="busy || !canRefreshFaceFeature(selectedItem)"
+                title="只重新提取这张截图的人脸特征：保留当前角色与分类，不生成标注/头像，也不重新归档；完成后按当前匹配参数刷新建议"
+                @click="refreshFaceFeature(selectedItem)"
+              >
+                <RefreshCw :size="16" />重新提取人脸特征
+              </button>
             </div>
           </section>
 

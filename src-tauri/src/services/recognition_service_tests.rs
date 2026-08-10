@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     db,
     models::{
-        capture::{LabelCaptureInput, RegisterCaptureInput},
+        capture::{LabelCaptureInput, RegisterCaptureInput, RelabelCaptureInput},
         character::CreateCharacterInput,
         project::CreateProjectInput,
         recognition::FACE_MODEL_ID,
@@ -1984,6 +1984,50 @@ async fn rebuild_face_bank_requires_configured_engine() {
         .await
         .expect_err("engine missing");
     assert!(matches!(error, AppError::Vision(_)));
+}
+
+#[tokio::test]
+async fn refresh_face_feature_rejects_scene_and_private_without_engine() {
+    let pool = db::test_pool().await;
+    let fixture = fixture(&pool).await;
+    let session_id: String =
+        sqlx::query_scalar("SELECT session_id FROM capture_items WHERE id = ?")
+            .bind(&fixture.item_id)
+            .fetch_one(&pool)
+            .await
+            .expect("session id");
+    let scene = register_item(&pool, &fixture._workspace, &session_id, "scene.png", None).await;
+    capture_service::relabel_capture_item(
+        &pool,
+        RelabelCaptureInput {
+            capture_item_id: scene.id.clone(),
+            character_id: None,
+            classification: Some("scene".to_owned()),
+        },
+    )
+    .await
+    .expect("relabel to scene");
+    let private = register_item(&pool, &fixture._workspace, &session_id, "private.png", None).await;
+    capture_service::relabel_capture_item(
+        &pool,
+        RelabelCaptureInput {
+            capture_item_id: private.id.clone(),
+            character_id: None,
+            classification: Some("private".to_owned()),
+        },
+    )
+    .await
+    .expect("relabel to private");
+
+    for capture_item_id in [&scene.id, &private.id] {
+        let error = refresh_capture_face_feature(&pool, capture_item_id, |_, _| {})
+            .await
+            .expect_err("scene/private must be rejected before any engine work");
+        assert!(
+            matches!(error, AppError::Validation(_)),
+            "expected validation error, got {error:?}"
+        );
+    }
 }
 
 #[tokio::test]

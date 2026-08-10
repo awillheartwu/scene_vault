@@ -483,6 +483,10 @@ export const captureApi = {
     }),
   retry: (captureItemId: string) =>
     invoke<CaptureItem>("retry_capture", { input: { captureItemId } }),
+  refreshCaptureFaceFeature: (captureItemId: string) =>
+    invoke<CaptureItem>("refresh_capture_face_feature", {
+      input: { captureItemId },
+    }),
   retryDegradedCaptures: (
     projectId: string,
     characterId: string | null,

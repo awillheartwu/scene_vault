@@ -98,6 +98,8 @@ margin 共同决定是否产生建议。建议不会直接改变主角色，必�
 角色。重建完成后，已有可用特征的待分类截图会按当前阈值和 margin 重新计算建议，旧的
 Face Bank 建议如果不再通过门槛会被清除。
 
+单张「重新提取人脸特征」沿用同一语义：只重算一张截图的特征，按当前角色重登记样本并刷新建议，不生成标注/头像、不重新归档，也不改变分类或角色绑定；处理中（queued/processing/archive_pending）以及 scene/private 截图会被拒绝。
+
 识别器可在 SFace 与 ArcFace 间切换。不同模型的 embedding 空间不可比较；切换模型后
 旧样本保持可追溯但不参与匹配，用户可在工作台重建 Face Bank。ArcFace 权重由用户
 自备，不随应用分发。阈值与效果以 [BENCHMARK.md](BENCHMARK.md) 为准。

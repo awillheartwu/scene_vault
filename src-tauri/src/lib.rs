@@ -146,6 +146,7 @@ pub fn run() {
             commands::recognition::verify_capture_identity,
             commands::recognition::suggest_for_capture,
             commands::recognition::rebuild_face_bank,
+            commands::recognition::refresh_capture_face_feature,
             commands::recognition::get_face_bank_model_status,
             commands::recognition::get_recognition_defaults,
             commands::vision::get_vision_settings,

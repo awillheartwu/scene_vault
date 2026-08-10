@@ -1143,6 +1143,99 @@ pub async fn rebuild_face_bank(
     })
 }
 
+/// Re-extracts one capture's primary-face feature with the currently
+/// configured engine. Feature-only: no annotation/avatar output, no archive
+/// rerun, and the capture's `classification`/`character_id` never change.
+/// Only `person` and `unclassified` captures can be refreshed; queued,
+/// processing and archive-pending items are rejected while the worker owns
+/// them. On success the new feature replaces the old row atomically, the
+/// current character's sample is re-enrolled, and the face-bank suggestion
+/// is recomputed from the fresh vector.
+pub async fn refresh_capture_face_feature(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    on_progress: impl FnMut(&str, f64) + Send + 'static,
+) -> Result<CaptureItem, AppError> {
+    let capture_item_id = capture_item_id.trim();
+    if capture_item_id.is_empty() {
+        return Err(AppError::Validation(
+            "capture item id cannot be empty".to_owned(),
+        ));
+    }
+    let item = capture_service::get_item(pool, capture_item_id).await?;
+    match item.classification.as_str() {
+        "person" | "unclassified" => {}
+        other => {
+            return Err(AppError::Validation(format!(
+                "only person or unclassified captures can refresh face features, got {other}"
+            )));
+        }
+    }
+    if matches!(
+        item.status.as_str(),
+        "queued" | "processing" | "archive_pending"
+    ) {
+        return Err(AppError::Conflict(format!(
+            "capture is {status}; wait until processing finishes before refreshing its face feature",
+            status = item.status
+        )));
+    }
+    let vision_settings = vision_settings_service::get(pool).await?;
+    if !vision_settings_service::is_configured(&vision_settings) {
+        return Err(AppError::Vision(
+            "vision engine is not configured; set the Python executable, module root and models before re-extracting face features"
+                .to_owned(),
+        ));
+    }
+    let processing_settings = processing_settings_service::get(pool).await?;
+    let source = std::path::PathBuf::from(&item.source_path);
+    if !tokio::fs::metadata(&source)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(AppError::NotFound(format!(
+            "source file for capture {capture_item_id}"
+        )));
+    }
+    let response = vision_engine_service::extract_face_feature(
+        &vision_settings,
+        &source,
+        &processing_settings,
+        Some(Box::new(on_progress)),
+    )
+    .await?;
+    let feature_json = match response.face_feature {
+        Some(feature) => serde_json::to_string(&feature)
+            .map_err(|error| AppError::Vision(format!("cannot encode face feature: {error}")))?,
+        None => "[]".to_owned(),
+    };
+    let face_box_json = response
+        .face_box
+        .map(|value| serde_json::to_string(&value))
+        .transpose()
+        .map_err(|error| AppError::Vision(format!("cannot encode face box: {error}")))?;
+    capture_service::store_face_feature(
+        pool,
+        capture_item_id,
+        capture_service::FaceFeatureWrite {
+            feature_json: Some(feature_json),
+            face_box_json,
+            model_id: response.face_feature_model_id,
+            model_version: response.face_feature_model_version,
+            face_count: response.face_count,
+            face_sharpness: response.face_sharpness,
+            face_area_ratio: response.face_area_ratio,
+        },
+    )
+    .await?;
+    // Re-enroll into the capture's current character (unclassified items
+    // have no sample to keep) and recompute the suggestion from the fresh
+    // vector; store_face_feature already cleared any stale suggestion.
+    enroll_face_sample(pool, capture_item_id).await?;
+    suggest_from_face_bank(pool, capture_item_id).await?;
+    capture_service::get_item(pool, capture_item_id).await
+}
+
 /// Dominant model identity of a project's active Face Bank samples versus
 /// the recognizer configured in the vision settings. `compatible` is true
 /// when the bank is empty or every sample matches the active recognizer.

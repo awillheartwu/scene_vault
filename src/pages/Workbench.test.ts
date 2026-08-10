@@ -22,6 +22,7 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     mergeCharacters: vi.fn(),
     setCharacterAvatar: vi.fn(),
     retry: vi.fn(),
+    refreshCaptureFaceFeature: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
   },
@@ -186,6 +187,7 @@ beforeEach(() => {
   api.reviewRecognitionSuggestion.mockResolvedValue(item);
   api.renameCharacter.mockResolvedValue({ ...characters[0], name: "Ava 2" });
   api.mergeCharacters.mockResolvedValue(characters[1]);
+  api.refreshCaptureFaceFeature.mockResolvedValue(item);
   api.setCharacterAvatar.mockResolvedValue({
     ...characters[0],
     avatarAssetId: "asset-1",
@@ -408,6 +410,25 @@ describe("Workbench", () => {
     ).toBe(true);
   });
 
+  it("keeps the sample summary in one row and hides avatar restore behind the more menu", async () => {
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], avatarAssetId: "asset-1", avatarCaptureItemId: "item-1" },
+      summaries[1],
+    ]);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const bar = wrapper.find(".sample-summary-bar");
+    expect(bar.exists()).toBe(true);
+    expect(bar.find(".sample-summary-copy").exists()).toBe(true);
+    expect(bar.find(".sample-summary-actions").exists()).toBe(true);
+    const directRestore = bar
+      .findAll("button")
+      .find((button) => button.text().includes("恢复自动头像"));
+    expect(directRestore).toBeUndefined();
+    expect(wrapper.find('button[aria-label="更多头像操作"]').exists()).toBe(true);
+  });
+
   it("disables avatar assignment for an unarchived capture and can clear an existing avatar", async () => {
     api.listProjectCharacterSummaries.mockResolvedValue([
       { ...summaries[0], avatarAssetId: "asset-1", avatarCaptureItemId: "item-1" },
@@ -417,13 +438,30 @@ describe("Workbench", () => {
       ...characters[0],
       avatarAssetId: null,
     });
-    const wrapper = mount(Workbench);
+    // reka-ui menus do not open in jsdom, so the dropdown shell is stubbed
+    // inline and the menu item is asserted to call the same handler the
+    // production MoreHorizontal menu invokes.
+    const wrapper = mount(Workbench, {
+      global: {
+        stubs: {
+          DropdownMenu: { template: "<div><slot /></div>" },
+          DropdownMenuTrigger: { template: "<div><slot /></div>" },
+          DropdownMenuContent: { template: "<div><slot /></div>" },
+          DropdownMenuItem: {
+            emits: ["select"],
+            template:
+              '<button type="button" @click="$emit(\'select\')"><slot /></button>',
+          },
+        },
+      },
+    });
     await flushPromises();
 
     const setAvatar = wrapper
       .findAll("button")
       .find((button) => button.text().includes("设为代表头像"));
     expect(setAvatar?.attributes("disabled")).toBeDefined();
+
     const clearAvatar = wrapper
       .findAll("button")
       .find((button) => button.text().includes("恢复自动头像"));
@@ -459,11 +497,32 @@ describe("Workbench", () => {
     expect(wrapper.find(".sample-strip-toggle").exists()).toBe(false);
   });
 
+  it("lays out the grid header as a title row plus grouped action row", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const titleRow = wrapper.find(".workbench-grid-header-title");
+    expect(titleRow.text()).toContain("Ava");
+    expect(titleRow.text()).toContain("1 张截图");
+    const groups = wrapper.findAll(".workbench-action-group");
+    expect(groups).toHaveLength(3);
+    expect(groups[0].text()).toContain("合并角色");
+    expect(groups[1].text()).toContain("批量拒绝并登记 (1)");
+    expect(groups[2].text()).toContain("当前角色重新识别 (0)");
+    expect(groups[2].text()).toContain("全部重新识别 (0)");
+    const actions = wrapper.findAll(".workbench-grid-actions button");
+    expect(actions).toHaveLength(4);
+    const current = actions.find((button) => button.text().includes("当前角色重新识别 (0)"));
+    const all = actions.find((button) => button.text().includes("全部重新识别 (0)"));
+    expect(current?.attributes("disabled")).toBeDefined();
+    expect(all?.attributes("disabled")).toBeDefined();
+  });
+
   it("shows all conditional character actions so their crowded state can be reviewed", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
 
-    const actions = wrapper.findAll(".grid-actions button");
+    const actions = wrapper.findAll(".workbench-grid-actions button");
     expect(actions.some((button) => button.text().includes("批量拒绝并登记 (1)"))).toBe(true);
     const current = actions.find((button) => button.text().includes("当前角色重新识别 (0)"));
     const all = actions.find((button) => button.text().includes("全部重新识别 (0)"));
@@ -542,6 +601,42 @@ describe("Workbench", () => {
     expect(useToasts().toasts.some((t) => t.message.includes("已重新排队 2 张"))).toBe(
       true,
     );
+  });
+
+  it("re-extracts the selected capture's face feature from the correction card", async () => {
+    api.listCharacterCaptureItems.mockResolvedValue([
+      {
+        ...item,
+        status: "completed",
+        suggestedCharacterId: null,
+        recognitionConfidence: null,
+        recognitionSource: null,
+        reviewStatus: "none",
+      },
+    ]);
+    api.listCharacterFaceSamples.mockResolvedValue([]);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const refresh = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("重新提取人脸特征"));
+    expect(refresh).toBeDefined();
+    expect(refresh!.attributes("disabled")).toBeUndefined();
+    await refresh!.trigger("click");
+    await flushPromises();
+
+    expect(api.refreshCaptureFaceFeature).toHaveBeenCalledWith("item-1");
+  });
+
+  it("disables single-image feature refresh while a capture is queued", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const refresh = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("重新提取人脸特征"));
+    expect(refresh?.attributes("disabled")).toBeDefined();
   });
 
   it("switches to the unclassified tab and loads category items", async () => {
