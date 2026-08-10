@@ -30,6 +30,7 @@ beforeEach(() => {
     activeCaptureSourcePath: null,
     queuedCount: 0,
     archivePendingCount: 0,
+    prelabelPendingCount: 0,
     lastError: null,
   });
 });
@@ -81,6 +82,87 @@ describe("CaptureProgress", () => {
     const hint = wrapper.find('[data-state="engine-unconfigured"]');
     expect(hint.exists()).toBe(true);
     expect(hint.text()).toContain("AI 未配置");
+    wrapper.unmount();
+  });
+
+  it("shows the remaining imported-recognition batch as a second row", async () => {
+    api.runtimeStatus.mockResolvedValue({
+      engineStatus: "configured",
+      workerStatus: "idle",
+      activeCaptureItemId: null,
+      activeCaptureSourcePath: null,
+      queuedCount: 0,
+      archivePendingCount: 0,
+      prelabelPendingCount: 17,
+      lastError: null,
+    });
+    const wrapper = mount(CaptureProgress, { props: { persistent: true } });
+    await flushPromises();
+
+    const batch = wrapper.find('[data-state="batch-remaining"]');
+    expect(batch.exists()).toBe(true);
+    expect(batch.text()).toContain("本批识别");
+    expect(batch.text()).toContain("剩余 17 张");
+    wrapper.unmount();
+  });
+
+  it("keeps the current image visible between serial batch items and clears when done", async () => {
+    api.runtimeStatus.mockResolvedValue({
+      engineStatus: "configured",
+      workerStatus: "idle",
+      activeCaptureItemId: null,
+      activeCaptureSourcePath: null,
+      queuedCount: 0,
+      archivePendingCount: 0,
+      prelabelPendingCount: 0,
+      lastError: null,
+    });
+    const wrapper = mount(CaptureProgress, { props: { persistent: true } });
+    await flushPromises();
+
+    // A batch item is in flight; a runtime-status between items must not
+    // blank the bar while the batch still has remaining images.
+    eventHandlers.get("capture:progress")?.({
+      payload: {
+        captureItemId: "item-5",
+        sourcePath: "D:\\Screenshots\\screenshot0005.png",
+        stage: "extract_feature",
+        percent: 40,
+      },
+    });
+    await wrapper.vm.$nextTick();
+    eventHandlers.get("capture:runtime-status")?.({
+      payload: {
+        engineStatus: "configured",
+        workerStatus: "idle",
+        activeCaptureItemId: null,
+        activeCaptureSourcePath: null,
+        queuedCount: 0,
+        archivePendingCount: 0,
+        prelabelPendingCount: 16,
+        lastError: null,
+      },
+    });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).toContain("screenshot0005.png");
+    expect(wrapper.text()).toContain("剩余 16 张");
+
+    // The last item finishes: the batch row hides and the bar idles.
+    eventHandlers.get("capture:runtime-status")?.({
+      payload: {
+        engineStatus: "configured",
+        workerStatus: "idle",
+        activeCaptureItemId: null,
+        activeCaptureSourcePath: null,
+        queuedCount: 0,
+        archivePendingCount: 0,
+        prelabelPendingCount: 0,
+        lastError: null,
+      },
+    });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-state="batch-remaining"]').exists()).toBe(false);
+    expect(wrapper.get(".capture-progress").classes()).toContain("idle");
     wrapper.unmount();
   });
 

@@ -8,8 +8,16 @@ withDefaults(defineProps<{ persistent?: boolean; deferredCount?: number }>(), {
   deferredCount: 0,
 });
 
-const { start, activeItemId, activeSourcePath, stage, percent, queuedCount, engineStatus } =
-  useCaptureProgress();
+const {
+  start,
+  activeItemId,
+  activeSourcePath,
+  stage,
+  percent,
+  queuedCount,
+  prelabelPendingCount,
+  engineStatus,
+} = useCaptureProgress();
 const activeFileName = computed(() => activeSourcePath.value?.split(/[\\/]/).pop() || "正在读取任务…");
 const engineUnconfigured = computed(() => engineStatus.value === "unconfigured");
 onMounted(() => void start());
@@ -39,6 +47,14 @@ onMounted(() => void start());
         </span>
         <span v-else>{{ queuedCount > 0 ? `等待队列 ${queuedCount}` : "空闲" }}</span>
       </template>
+    </div>
+    <div
+      v-if="prelabelPendingCount > 0"
+      class="capture-progress-batch"
+      data-state="batch-remaining"
+    >
+      <span>本批识别</span>
+      <strong>剩余 {{ prelabelPendingCount }} 张</strong>
     </div>
     <div class="capture-progress-track">
       <div class="capture-progress-bar" :style="{ width: `${Math.min(100, Math.max(0, percent))}%` }" />

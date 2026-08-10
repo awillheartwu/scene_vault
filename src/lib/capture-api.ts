@@ -332,6 +332,7 @@ export interface CaptureRuntimeStatus {
   activeCaptureSourcePath: string | null;
   queuedCount: number;
   archivePendingCount: number;
+  prelabelPendingCount: number;
   lastError: string | null;
 }
 

@@ -369,6 +369,23 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
         sqlx::query_scalar("SELECT COUNT(*) FROM capture_items WHERE status = 'archive_pending'")
             .fetch_one(pool)
             .await?;
+    let prelabel_pending_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM capture_items
+        WHERE status = 'awaiting_label'
+          AND recognition_deferred = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM capture_faces face
+              WHERE face.capture_item_id = capture_items.id
+                AND face.is_primary = 1
+                AND face.feature_json IS NOT NULL
+          )
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
     let last_error: Option<String> = sqlx::query_scalar(
         "SELECT error_message FROM capture_items WHERE error_message IS NOT NULL ORDER BY updated_at DESC LIMIT 1",
     )
@@ -389,6 +406,7 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
         active_capture_source_path,
         queued_count,
         archive_pending_count,
+        prelabel_pending_count,
         last_error,
     })
 }

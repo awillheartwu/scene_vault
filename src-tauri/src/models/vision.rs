@@ -106,6 +106,9 @@ pub struct CaptureRuntimeStatus {
     pub active_capture_source_path: Option<String>,
     pub queued_count: i64,
     pub archive_pending_count: i64,
+    /// Awaiting-label captures whose face feature has not been extracted yet
+    /// (the serial pre-label batch). Drives the "remaining in batch" hint.
+    pub prelabel_pending_count: i64,
     pub last_error: Option<String>,
 }
 
