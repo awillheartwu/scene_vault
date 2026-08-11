@@ -24,6 +24,7 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CharacterMergeDialog from "@/components/character/CharacterMergeDialog.vue";
+import PaginationControls from "@/components/common/PaginationControls.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
 import { ContextMenu } from "@/components/ui/context-menu";
@@ -92,6 +93,9 @@ type WorkbenchView = "characters" | "unclassified" | "scene" | "private";
 const view = ref<WorkbenchView>("characters");
 const panelCollapsed = ref(false);
 const showPrivate = ref(cachedWorkbench?.showPrivate ?? false);
+const itemPage = ref(cachedWorkbench?.itemPage ?? 1);
+const itemPageSize = ref(cachedWorkbench?.itemPageSize ?? 100);
+const itemTotal = ref(cachedWorkbench?.itemTotal ?? 0);
 const characterMenu = useContextMenu();
 const itemMenu = useContextMenu();
 
@@ -404,6 +408,7 @@ function openItemDetail(id: string) {
 async function selectCharacter(characterId: string) {
   if (selectedCharacterId.value === characterId) return;
   selectedCharacterId.value = characterId;
+  itemPage.value = 1;
   if (projectId.value) {
     localStorage.setItem(`scene-vault.workbench.character.${projectId.value}`, characterId);
   }
@@ -461,29 +466,74 @@ async function initialize() {
 interface LoadedWorkbenchItems {
   items: CaptureItem[];
   samples: FaceSample[];
+  total: number;
 }
 
 async function fetchWorkbenchItems(
   projectIdValue: string,
   viewValue: WorkbenchView,
   characterIdValue: string | null,
+  pageValue: number,
+  pageSizeValue: number,
 ): Promise<LoadedWorkbenchItems> {
   if (viewValue === "characters") {
-    if (!characterIdValue) return { items: [], samples: [] };
+    if (!characterIdValue) return { items: [], samples: [], total: 0 };
     const [nextItems, nextSamples] = await Promise.all([
-      captureApi.listCharacterCaptureItems({
+      captureApi.listCharacterCaptureItemsPage({
         projectId: projectIdValue,
         characterId: characterIdValue,
+        page: pageValue,
+        pageSize: pageSizeValue,
       }),
       captureApi.listCharacterFaceSamples(characterIdValue),
     ]);
-    return { items: nextItems, samples: nextSamples };
+    return { items: nextItems.items, samples: nextSamples, total: nextItems.total };
   }
-  const nextItems = await captureApi.listCategoryItems({
+  const nextItems = await captureApi.listCategoryItemsPage({
     projectId: projectIdValue,
     category: viewValue,
+    page: pageValue,
+    pageSize: pageSizeValue,
   });
-  return { items: nextItems, samples: [] };
+  return { items: nextItems.items, samples: [], total: nextItems.total };
+}
+
+async function applyClampedPage(
+  loaded: LoadedWorkbenchItems,
+  projectIdValue: string,
+  viewValue: WorkbenchView,
+  characterIdValue: string | null,
+): Promise<LoadedWorkbenchItems> {
+  const pageValue = itemPage.value;
+  const pageSizeValue = itemPageSize.value;
+  const maxPage = Math.max(1, Math.ceil(loaded.total / pageSizeValue));
+  if (pageValue > maxPage) {
+    itemPage.value = maxPage;
+    loaded = await fetchWorkbenchItems(
+      projectIdValue,
+      viewValue,
+      characterIdValue,
+      maxPage,
+      pageSizeValue,
+    );
+  }
+  itemTotal.value = loaded.total;
+  return loaded;
+}
+
+async function fetchAndApplyItems(
+  projectIdValue: string,
+  viewValue: WorkbenchView,
+  characterIdValue: string | null,
+): Promise<LoadedWorkbenchItems> {
+  const loaded = await fetchWorkbenchItems(
+    projectIdValue,
+    viewValue,
+    characterIdValue,
+    itemPage.value,
+    itemPageSize.value,
+  );
+  return applyClampedPage(loaded, projectIdValue, viewValue, characterIdValue);
 }
 
 function cacheCurrentWorkbench() {
@@ -499,6 +549,9 @@ function cacheCurrentWorkbench() {
     samples: samples.value,
     selectedItemId: selectedItemId.value,
     showPrivate: showPrivate.value,
+    itemPage: itemPage.value,
+    itemPageSize: itemPageSize.value,
+    itemTotal: itemTotal.value,
   });
 }
 
@@ -522,17 +575,31 @@ async function loadCharacterData(options: { manageLoading?: boolean } = {}) {
       captureApi.listCharacters(projectIdValue),
       (captureApi.getFaceBankModelStatus?.(projectIdValue) ??
         Promise.resolve(null)).catch(() => null),
-      fetchWorkbenchItems(projectIdValue, viewValue, requestedCharacterId),
+      fetchWorkbenchItems(
+        projectIdValue,
+        viewValue,
+        requestedCharacterId,
+        itemPage.value,
+        itemPageSize.value,
+      ),
     ]);
     if (projectId.value !== projectIdValue || view.value !== viewValue) return;
     const resolvedCharacterId =
       requestedCharacterId && nextSummaries.some((summary) => summary.id === requestedCharacterId)
         ? requestedCharacterId
         : nextSummaries[0]?.id ?? null;
-    const loadedItems =
-      viewValue === "characters" && resolvedCharacterId !== requestedCharacterId
-        ? await fetchWorkbenchItems(projectIdValue, viewValue, resolvedCharacterId)
-        : requestedItems;
+    let loadedItems = requestedItems;
+    if (viewValue === "characters" && resolvedCharacterId !== requestedCharacterId) {
+      itemPage.value = 1;
+      loadedItems = await fetchAndApplyItems(projectIdValue, viewValue, resolvedCharacterId);
+    } else {
+      loadedItems = await applyClampedPage(
+        requestedItems,
+        projectIdValue,
+        viewValue,
+        resolvedCharacterId,
+      );
+    }
     if (projectId.value !== projectIdValue || view.value !== viewValue) return;
 
     summaries.value = nextSummaries;
@@ -570,7 +637,7 @@ async function loadItems() {
   const characterIdValue = selectedCharacterId.value;
   loading.value = true;
   try {
-    const loaded = await fetchWorkbenchItems(projectIdValue, viewValue, characterIdValue);
+    const loaded = await fetchAndApplyItems(projectIdValue, viewValue, characterIdValue);
     if (
       projectId.value !== projectIdValue ||
       view.value !== viewValue ||
@@ -828,6 +895,7 @@ async function rebuildFaceBank() {
 
 watch(projectId, async () => {
   if (!initialized) return;
+  itemPage.value = 1;
   if (projectId.value) {
     localStorage.setItem("scene-vault.capture.project", projectId.value);
   }
@@ -843,11 +911,23 @@ watch(projectId, async () => {
 });
 watch(view, async () => {
   selectedItemId.value = null;
+  itemPage.value = 1;
   await loadItems();
 });
 watch(selectedItemId, () => {
   previewVariant.value = "source";
 });
+
+function onItemPageChange(page: number) {
+  itemPage.value = page;
+  void loadItems();
+}
+
+function onItemPageSizeChange(size: number) {
+  itemPageSize.value = size;
+  itemPage.value = 1;
+  void loadItems();
+}
 async function registerWorkbenchListeners() {
   // Listener registration crosses the Tauri bridge. It must never delay the
   // first data request, and all three registrations can run concurrently.
@@ -1052,7 +1132,7 @@ onBeforeUnmount(() => {
         </template>
         <div v-else class="workbench-category-note">
           <strong>{{ viewLabel }}</strong>
-          <span>{{ items.length }} 张截图</span>
+          <span>{{ itemTotal }} 张截图</span>
           <p v-if="view === 'unclassified'">等待分类的截图会出现在这里，可在右侧直接标记角色或分类。</p>
           <p v-else-if="view === 'scene'">标记为游戏截图的原图直存归档。</p>
           <p v-else>标记为收藏的截图默认隐藏，可在设置中开启本标签页。</p>
@@ -1085,7 +1165,7 @@ onBeforeUnmount(() => {
                 <Pencil :size="14" />
               </button>
             </h2>
-            <span class="workbench-screenshot-count">{{ loading && !items.length ? "—" : items.length }} 张截图</span>
+            <span class="workbench-screenshot-count">{{ loading && !itemTotal ? "—" : itemTotal }} 张截图</span>
           </div>
           <div v-if="view === 'characters' && selectedCharacter" class="workbench-grid-actions">
             <button
@@ -1187,6 +1267,15 @@ onBeforeUnmount(() => {
           <div v-if="!items.length && !loading" class="workbench-empty">该角色名下还没有截图。</div>
           </template>
         </div>
+
+        <PaginationControls
+          v-if="itemTotal > 0"
+          :page="itemPage"
+          :page-size="itemPageSize"
+          :total="itemTotal"
+          @update:page="onItemPageChange"
+          @update:page-size="onItemPageSizeChange"
+        />
       </div>
 
       <ResponsiveDetailPanel

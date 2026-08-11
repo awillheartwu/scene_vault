@@ -11,12 +11,14 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
     listProjectCharacterSummaries: vi.fn(),
     listCharacters: vi.fn(),
     listCharacterCaptureItems: vi.fn(),
+    listCharacterCaptureItemsPage: vi.fn(),
     listCharacterFaceSamples: vi.fn(),
     setFaceSampleStatus: vi.fn(),
     setFaceSampleFlagged: vi.fn(),
     retryDegradedCaptures: vi.fn(),
     getFaceBankModelStatus: vi.fn(),
     listCategoryItems: vi.fn(),
+    listCategoryItemsPage: vi.fn(),
     getAppSettings: vi.fn(),
     acceptRecognitionSuggestion: vi.fn(),
     reviewRecognitionSuggestion: vi.fn(),
@@ -160,6 +162,10 @@ const sample = {
   updatedAt: "2026-08-06T00:00:00Z",
 };
 
+function paged(items: unknown[], total?: number, page = 1, pageSize = 100) {
+  return { items, total: total ?? items.length, page, pageSize };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   listenMock.mockImplementation(
@@ -176,6 +182,12 @@ beforeEach(() => {
   api.listProjectCharacterSummaries.mockResolvedValue(summaries);
   api.listCharacters.mockResolvedValue(characters);
   api.listCharacterCaptureItems.mockResolvedValue([item]);
+  api.listCharacterCaptureItemsPage.mockResolvedValue({
+    items: [item],
+    total: 1,
+    page: 1,
+    pageSize: 100,
+  });
   api.listCharacterFaceSamples.mockResolvedValue([sample]);
   api.setFaceSampleStatus.mockResolvedValue({ ...sample, status: "revoked" });
   api.setFaceSampleFlagged.mockResolvedValue({ ...sample, flagged: 0 });
@@ -189,6 +201,12 @@ beforeEach(() => {
     compatible: true,
   });
   api.listCategoryItems.mockResolvedValue([item]);
+  api.listCategoryItemsPage.mockResolvedValue({
+    items: [item],
+    total: 1,
+    page: 1,
+    pageSize: 100,
+  });
   api.getAppSettings.mockResolvedValue({
     classifyShortcut: "Ctrl+Shift+S",
     noteShortcut: "Ctrl+Shift+N",
@@ -238,11 +256,13 @@ describe("Workbench", () => {
     expect(wrapper.text()).toContain("Bella");
     expect(api.listProjectCharacterSummaries).toHaveBeenCalledWith("project-1");
     expect(api.listProjectCharacterSummaries).toHaveBeenCalledTimes(1);
-    expect(api.listCharacterCaptureItems).toHaveBeenCalledWith({
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenCalledWith({
       projectId: "project-1",
       characterId: "character-1",
+      page: 1,
+      pageSize: 100,
     });
-    expect(api.listCharacterCaptureItems).toHaveBeenCalledTimes(1);
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenCalledTimes(1);
     expect(api.listCharacterFaceSamples).toHaveBeenCalledTimes(1);
     // The pending suggestion badge shows on Ava's card and the item grid
     // renders the queued capture with its suggestion chip.
@@ -316,9 +336,11 @@ describe("Workbench", () => {
 
     expect(api.listProjects).toHaveBeenCalledTimes(1);
     expect(api.listProjectCharacterSummaries).toHaveBeenCalledTimes(1);
-    expect(api.listCharacterCaptureItems).toHaveBeenCalledWith({
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenCalledWith({
       projectId: "project-1",
       characterId: "character-1",
+      page: 1,
+      pageSize: 100,
     });
     expect(api.listCharacterFaceSamples).toHaveBeenCalledWith("character-1");
 
@@ -400,7 +422,7 @@ describe("Workbench", () => {
       recognitionConfidence: null,
       recognitionSource: null,
     };
-    api.listCharacterCaptureItems.mockResolvedValue([archived]);
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([archived]));
     const wrapper = mount(Workbench);
     await flushPromises();
 
@@ -508,8 +530,9 @@ describe("Workbench", () => {
   });
 
   it("sets the selected archived face crop as the representative avatar", async () => {
-    api.listCharacterCaptureItems.mockResolvedValue([
-      {
+    api.listCharacterCaptureItemsPage.mockResolvedValue(
+      paged([
+        {
         ...item,
         assetId: "asset-1",
         avatarPath: "C:\\cache\\avatar.png",
@@ -517,8 +540,9 @@ describe("Workbench", () => {
         destinationAvatarPath: "C:\\archive\\avatar.png",
         status: "completed",
         reviewStatus: "none",
-      },
-    ]);
+        },
+      ]),
+    );
     const wrapper = mount(Workbench);
     await flushPromises();
 
@@ -670,7 +694,7 @@ describe("Workbench", () => {
   });
 
   it("explains a detected but low-quality face in Chinese and marks the card", async () => {
-    api.listCharacterCaptureItems.mockResolvedValue([{
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([{
       ...item,
       status: "completed",
       faceCount: 1,
@@ -679,7 +703,7 @@ describe("Workbench", () => {
       recognitionSource: null,
       reviewStatus: "none",
       processingWarningsJson: '["sample_not_enrolled_low_quality: sharpness 2.2 below 3"]',
-    }]);
+    }]));
     api.listCharacterFaceSamples.mockResolvedValue([]);
     const wrapper = mount(Workbench);
     await flushPromises();
@@ -689,7 +713,7 @@ describe("Workbench", () => {
   });
 
   it("marks and explains captures where no usable face was detected", async () => {
-    api.listCharacterCaptureItems.mockResolvedValue([{
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([{
       ...item,
       status: "completed",
       faceCount: 0,
@@ -697,7 +721,7 @@ describe("Workbench", () => {
       recognitionConfidence: null,
       recognitionSource: null,
       reviewStatus: "none",
-    }]);
+    }]));
     api.listCharacterFaceSamples.mockResolvedValue([]);
     const wrapper = mount(Workbench);
     await flushPromises();
@@ -709,14 +733,14 @@ describe("Workbench", () => {
   it("refreshes items when a capture changes while the worker runs", async () => {
     mount(Workbench);
     await flushPromises();
-    const callsBefore = api.listCharacterCaptureItems.mock.calls.length;
+    const callsBefore = api.listCharacterCaptureItemsPage.mock.calls.length;
 
     const handler = eventHandlers.get("capture:item-updated");
     expect(handler).toBeDefined();
     handler!({ payload: { id: "item-1" } });
     await flushPromises();
 
-    expect(api.listCharacterCaptureItems.mock.calls.length).toBeGreaterThan(
+    expect(api.listCharacterCaptureItemsPage.mock.calls.length).toBeGreaterThan(
       callsBefore,
     );
   });
@@ -743,16 +767,18 @@ describe("Workbench", () => {
   });
 
   it("re-extracts the selected capture's face feature from the correction card", async () => {
-    api.listCharacterCaptureItems.mockResolvedValue([
-      {
+    api.listCharacterCaptureItemsPage.mockResolvedValue(
+      paged([
+        {
         ...item,
         status: "completed",
         suggestedCharacterId: null,
         recognitionConfidence: null,
         recognitionSource: null,
         reviewStatus: "none",
-      },
-    ]);
+        },
+      ]),
+    );
     api.listCharacterFaceSamples.mockResolvedValue([]);
     const wrapper = mount(Workbench);
     await flushPromises();
@@ -879,11 +905,98 @@ describe("Workbench", () => {
     await unclassifiedTab!.trigger("click");
     await flushPromises();
 
-    expect(api.listCategoryItems).toHaveBeenCalledWith({
+    expect(api.listCategoryItemsPage).toHaveBeenCalledWith({
       projectId: "project-1",
       category: "unclassified",
+      page: 1,
+      pageSize: 100,
     });
     expect(wrapper.text()).toContain("等待分类的截图会出现在这里");
+  });
+
+  it("paginates the character grid and keeps the real total count", async () => {
+    const pageTwoItem = { ...item, id: "item-2", sourcePath: "C:\\shots\\two.png" };
+    api.listCharacterCaptureItemsPage
+      .mockResolvedValueOnce(paged([item], 250))
+      .mockResolvedValueOnce(paged([pageTwoItem], 250));
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(wrapper.find(".workbench-screenshot-count").text()).toBe("250 张截图");
+    expect(wrapper.find(".pagination").exists()).toBe(true);
+    expect(wrapper.text()).toContain("共 250 条");
+
+    const pageTwoButton = wrapper
+      .findAll(".pagination-button")
+      .find((button) => button.text() === "2");
+    expect(pageTwoButton).toBeDefined();
+    await pageTwoButton!.trigger("click");
+    await flushPromises();
+
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenLastCalledWith({
+      projectId: "project-1",
+      characterId: "character-1",
+      page: 2,
+      pageSize: 100,
+    });
+    expect(wrapper.text()).toContain("two.png");
+  });
+
+  it("paginates category tabs and resets to the first page on page-size change", async () => {
+    api.listCategoryItemsPage.mockResolvedValue(paged([item], 120));
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const unclassifiedTab = wrapper
+      .findAll(".workbench-tabs button")
+      .find((button) => button.text().includes("未分类"));
+    await unclassifiedTab!.trigger("click");
+    await flushPromises();
+
+    expect(api.listCategoryItemsPage).toHaveBeenLastCalledWith({
+      projectId: "project-1",
+      category: "unclassified",
+      page: 1,
+      pageSize: 100,
+    });
+    expect(wrapper.find(".workbench-category-note").text()).toContain("120 张截图");
+
+    await wrapper.find('.pagination-size select').setValue("200");
+    await flushPromises();
+
+    expect(api.listCategoryItemsPage).toHaveBeenLastCalledWith({
+      projectId: "project-1",
+      category: "unclassified",
+      page: 1,
+      pageSize: 200,
+    });
+  });
+
+  it("clamps back to the last valid page when the total shrinks", async () => {
+    const pageTwoItem = { ...item, id: "item-2" };
+    api.listCharacterCaptureItemsPage
+      .mockResolvedValueOnce(paged([item], 150))
+      .mockResolvedValueOnce(paged([pageTwoItem], 150))
+      .mockResolvedValueOnce(paged([item], 1));
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper
+      .findAll(".pagination-button")
+      .find((button) => button.text() === "2")!
+      .trigger("click");
+    await flushPromises();
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 2 }),
+    );
+
+    // A worker event reloads after items were deleted; the total drops to 1.
+    eventHandlers.get("capture:item-updated")?.({ payload: { id: "item-2" } });
+    await flushPromises();
+
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1 }),
+    );
   });
 
   it("shows the private tab only when enabled by settings", async () => {
@@ -1010,7 +1123,9 @@ describe("Workbench context menus", () => {
       splitPopupWindows: false,
       autoCloseEmptyPopup: false,
     });
-    api.listCategoryItems.mockResolvedValue([{ ...item, classification: "private" }]);
+    api.listCategoryItemsPage.mockResolvedValue(
+      paged([{ ...item, classification: "private" }]),
+    );
     const wrapper = mount(Workbench);
     await flushPromises();
 

@@ -248,6 +248,13 @@ export interface CaptureHistoryPage {
   total: number;
 }
 
+export interface CaptureItemPage {
+  items: CaptureItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export interface LogRecord {
@@ -655,6 +662,12 @@ export const captureApi = {
     projectId: string;
     category: "unclassified" | "scene" | "private";
   }) => invoke<CaptureItem[]>("list_category_items", { input }),
+  listCategoryItemsPage: (input: {
+    projectId: string;
+    category: "unclassified" | "scene" | "private";
+    page: number;
+    pageSize: number;
+  }) => invoke<CaptureItemPage>("list_category_items", { input }),
   listHistory: (input: {
     projectId: string;
     status?: string | null;
@@ -783,6 +796,12 @@ export const captureApi = {
     projectId: string;
     characterId: string;
   }) => invoke<CaptureItem[]>("list_character_capture_items", { input }),
+  listCharacterCaptureItemsPage: (input: {
+    projectId: string;
+    characterId: string;
+    page: number;
+    pageSize: number;
+  }) => invoke<CaptureItemPage>("list_character_capture_items", { input }),
   listCharacterFaceSamples: (characterId: string) =>
     invoke<FaceSample[]>("list_character_face_samples", { characterId }),
   setFaceSampleStatus: (

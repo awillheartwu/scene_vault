@@ -18,6 +18,9 @@ export interface WorkbenchSnapshot {
   samples: FaceSample[];
   selectedItemId: string | null;
   showPrivate: boolean;
+  itemPage: number;
+  itemPageSize: number;
+  itemTotal: number;
 }
 
 let snapshot: WorkbenchSnapshot | null = null;
