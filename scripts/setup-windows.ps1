@@ -77,7 +77,7 @@ if (-not (Test-Path $SfacePath)) {
 # app-local fonts directory; the settings UI lists them automatically and the
 # default annotation font is SmileySans.
 $FontPath = $null
-$FontsDir = Join-Path $env:LOCALAPPDATA "com.wuhaoli.scene_vault\fonts"
+$FontsDir = Join-Path $env:LOCALAPPDATA "com.wuhaoli.scene-vault\fonts"
 New-Item -ItemType Directory -Force -Path $FontsDir | Out-Null
 $SmileyZip = Join-Path $FontsDir "smiley-sans.zip"
 $SmileyFont = Join-Path $FontsDir "SmileySans-Oblique.ttf"
