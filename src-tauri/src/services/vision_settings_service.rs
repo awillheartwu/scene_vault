@@ -43,13 +43,6 @@ fn sidecar_executable_in(install_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The bundled resources directory (`resources/` next to the sidecar), which
-/// contains the models and the annotation font in the AI-enabled installer.
-pub fn bundled_resources_dir() -> Option<PathBuf> {
-    let sidecar = sidecar_executable()?;
-    Some(sidecar.parent()?.join("resources"))
-}
-
 /// The engine is usable when either the legacy Python settings are fully
 /// configured or the bundled sidecar is present.
 pub fn is_engine_available(settings: &VisionSettings) -> bool {
