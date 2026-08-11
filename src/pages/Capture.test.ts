@@ -476,6 +476,31 @@ describe("Capture quick-label flow", () => {
     wrapper.unmount();
   });
 
+  it("keeps the user's selected capture when another awaiting item is updated", async () => {
+    const first = { ...item(), id: "item-1", sourcePath: "D:\\shots\\one.png" };
+    const second = {
+      ...item(),
+      id: "item-2",
+      sourcePath: "D:\\shots\\two.png",
+      capturedAt: "2026-08-01T00:00:02Z",
+    };
+    api.listProjectRecentCaptures.mockResolvedValue([first, second]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    const cards = wrapper.findAll(".capture-card");
+    await cards[1].trigger("click");
+    expect(wrapper.find(".capture-card.selected").attributes("aria-label")).toContain("two.png");
+
+    eventHandlers.get("capture:item-updated")?.({
+      payload: { ...first, faceCount: 1, suggestedCharacterId: "char-1" },
+    });
+    await flushPromises();
+
+    expect(wrapper.find(".capture-card.selected").attributes("aria-label")).toContain("two.png");
+    wrapper.unmount();
+  });
+
   it("starts a session and reports the projects it auto-stopped", async () => {
     api.listSessions.mockResolvedValue([]);
     api.listSourceDirectories.mockResolvedValue([

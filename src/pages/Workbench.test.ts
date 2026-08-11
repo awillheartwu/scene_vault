@@ -873,6 +873,37 @@ describe("Workbench context menus", () => {
     wrapper.unmount();
   });
 
+  it("does not offer a private capture as the project cover", async () => {
+    api.getAppSettings.mockResolvedValue({
+      classifyShortcut: "Ctrl+Shift+S",
+      noteShortcut: "Ctrl+Shift+N",
+      showPrivateByDefault: true,
+      autoSaveNotes: true,
+      splitPopupWindows: false,
+      autoCloseEmptyPopup: false,
+    });
+    api.listCategoryItems.mockResolvedValue([{ ...item, classification: "private" }]);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const privateTab = wrapper
+      .findAll(".workbench-tabs button")
+      .find((button) => button.text() === "收藏图");
+    await privateTab!.trigger("click");
+    await flushPromises();
+
+    await wrapper.find(".workbench-cell").trigger("contextmenu", { clientX: 90, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).not.toContain("项目封面");
+
+    await wrapper.find(".workbench-cell").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.findAll("button").some((button) => button.text().includes("设为项目封面")),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
   it("hides suggestion actions in the scene view", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();

@@ -696,6 +696,8 @@ pub async fn label_capture(
         )
     })?;
 
+    clear_private_project_cover_tx(&mut transaction, capture_item_id, &classification).await?;
+
     transaction.commit().await?;
     // Closed-set verification: after a person label, compare the capture's
     // face against the selected character's samples, persist the result, and
@@ -924,6 +926,7 @@ async fn relabel_pending_capture(
         .bind(capture_item_id)
         .execute(&mut *transaction)
         .await?;
+    clear_private_project_cover_tx(&mut transaction, capture_item_id, classification).await?;
     transaction.commit().await?;
     Ok(item)
 }
@@ -990,8 +993,33 @@ async fn relabel_completed_capture(
         .bind(capture_item_id)
         .execute(&mut *transaction)
         .await?;
+    clear_private_project_cover_tx(&mut transaction, capture_item_id, classification).await?;
     transaction.commit().await?;
     Ok(item)
+}
+
+/// Private captures are hidden from Home by default, so changing a pinned
+/// cover to private must clear the project reference in the same transaction.
+async fn clear_private_project_cover_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    capture_item_id: &str,
+    classification: &str,
+) -> Result<(), AppError> {
+    if classification != "private" {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        UPDATE projects
+        SET cover_capture_item_id = NULL,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE cover_capture_item_id = ?
+        "#,
+    )
+    .bind(capture_item_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 pub async fn mark_processing(

@@ -2,7 +2,9 @@ use super::*;
 use crate::{
     db,
     models::{
-        capture::RelabelCaptureInput, character::CreateCharacterInput, project::CreateProjectInput,
+        capture::RelabelCaptureInput,
+        character::CreateCharacterInput,
+        project::{CreateProjectInput, SetProjectCoverInput},
         recognition::SetRecognitionSuggestionInput,
     },
     services::{character_service, project_service, recognition_service, test_support},
@@ -1142,6 +1144,101 @@ async fn relabel_updates_queued_item_directly_and_clears_suggestions() {
             .await
             .expect("sample count");
     assert_eq!(sample_count, 0, "relabel away from person drops the sample");
+    let _ = workspace;
+}
+
+#[tokio::test]
+async fn private_classification_clears_a_pinned_project_cover() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, source) = session_with_source(&pool, &proj.id).await;
+
+    let pending_path = source.join("pending-cover.png");
+    tokio::fs::write(&pending_path, b"pending")
+        .await
+        .expect("pending source");
+    let pending = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id.clone(),
+            source_path: path_to_string(&pending_path),
+        },
+    )
+    .await
+    .expect("register pending cover");
+    project_service::set_cover(
+        &pool,
+        SetProjectCoverInput {
+            project_id: proj.id.clone(),
+            capture_item_id: Some(pending.id.clone()),
+        },
+    )
+    .await
+    .expect("pin pending cover");
+    label_capture(
+        &pool,
+        LabelCaptureInput {
+            capture_item_id: pending.id,
+            character_id: None,
+            classification: Some("private".to_owned()),
+        },
+    )
+    .await
+    .expect("label private");
+    let cover_after_label: Option<String> =
+        sqlx::query_scalar("SELECT cover_capture_item_id FROM projects WHERE id = ?")
+            .bind(&proj.id)
+            .fetch_one(&pool)
+            .await
+            .expect("cover after label");
+    assert!(cover_after_label.is_none());
+
+    let completed_path = source.join("completed-cover.png");
+    tokio::fs::write(&completed_path, b"completed")
+        .await
+        .expect("completed source");
+    let completed = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id,
+            source_path: path_to_string(&completed_path),
+        },
+    )
+    .await
+    .expect("register completed cover");
+    sqlx::query(
+        "UPDATE capture_items SET classification = 'scene', status = 'completed' WHERE id = ?",
+    )
+    .bind(&completed.id)
+    .execute(&pool)
+    .await
+    .expect("complete capture");
+    project_service::set_cover(
+        &pool,
+        SetProjectCoverInput {
+            project_id: proj.id.clone(),
+            capture_item_id: Some(completed.id.clone()),
+        },
+    )
+    .await
+    .expect("pin completed cover");
+    relabel_capture_item(
+        &pool,
+        RelabelCaptureInput {
+            capture_item_id: completed.id,
+            character_id: None,
+            classification: Some("private".to_owned()),
+        },
+    )
+    .await
+    .expect("relabel completed cover private");
+    let cover_after_relabel: Option<String> =
+        sqlx::query_scalar("SELECT cover_capture_item_id FROM projects WHERE id = ?")
+            .bind(proj.id)
+            .fetch_one(&pool)
+            .await
+            .expect("cover after relabel");
+    assert!(cover_after_relabel.is_none());
     let _ = workspace;
 }
 

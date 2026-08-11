@@ -1356,6 +1356,66 @@ async fn flagged_samples_are_excluded_and_restorable() {
 }
 
 #[tokio::test]
+async fn manually_flagged_sample_stays_flagged_when_reenrolled() {
+    let pool = db::test_pool().await;
+    let fixture = fixture(&pool).await;
+    set_item_feature(&pool, &fixture.item_id, "[1.0, 0.0, 0.0]").await;
+    enroll_face_sample(&pool, &fixture.item_id)
+        .await
+        .expect("initial enrollment");
+    let sample_id: String =
+        sqlx::query_scalar("SELECT id FROM character_face_samples WHERE capture_item_id = ?")
+            .bind(&fixture.item_id)
+            .fetch_one(&pool)
+            .await
+            .expect("sample id");
+
+    set_face_sample_flagged(
+        &pool,
+        SetFaceSampleFlaggedInput {
+            sample_id: sample_id.clone(),
+            flagged: true,
+        },
+    )
+    .await
+    .expect("mark suspicious");
+    enroll_face_sample(&pool, &fixture.item_id)
+        .await
+        .expect("reenroll after feature refresh");
+
+    let flagged: i64 =
+        sqlx::query_scalar("SELECT flagged FROM character_face_samples WHERE id = ?")
+            .bind(&sample_id)
+            .fetch_one(&pool)
+            .await
+            .expect("flagged state");
+    assert_eq!(
+        flagged, 1,
+        "feature refresh or Face Bank rebuild must preserve a manual suspicious flag"
+    );
+
+    set_face_sample_flagged(
+        &pool,
+        SetFaceSampleFlaggedInput {
+            sample_id: sample_id.clone(),
+            flagged: false,
+        },
+    )
+    .await
+    .expect("restore sample");
+    enroll_face_sample(&pool, &fixture.item_id)
+        .await
+        .expect("reenroll restored sample");
+    let restored: i64 =
+        sqlx::query_scalar("SELECT flagged FROM character_face_samples WHERE id = ?")
+            .bind(sample_id)
+            .fetch_one(&pool)
+            .await
+            .expect("restored state");
+    assert_eq!(restored, 0, "explicit restore must remain effective");
+}
+
+#[tokio::test]
 async fn suggestion_ignores_samples_from_other_models() {
     let pool = db::test_pool().await;
     let fixture = fixture(&pool).await;

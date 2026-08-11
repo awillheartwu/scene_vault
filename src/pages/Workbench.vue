@@ -210,21 +210,21 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       action: () => void toggleSampleFlagged(entrySample),
     });
   }
-  items.push(
-    {
+  if (item.classification !== "private") {
+    items.push({
       id: "cover",
       label: currentProject.value?.coverCaptureItemId === item.id ? "取消项目封面" : "设为项目封面",
       icon: Image,
       separatorBefore: true,
       action: () => void toggleProjectCover(),
-    },
-    {
-      id: "reveal-source",
-      label: "显示原图",
-      icon: Image,
-      action: () => reveal(item.sourcePath),
-    },
-  );
+    });
+  }
+  items.push({
+    id: "reveal-source",
+    label: "显示原图",
+    icon: Image,
+    action: () => reveal(item.sourcePath),
+  });
   if (item.destinationPath) {
     items.push({
       id: "reveal-destination",
@@ -1244,13 +1244,14 @@ onBeforeUnmount(() => {
                 <Flag :size="16" />{{ selectedItemSample.flagged ? "恢复参与匹配" : "标记可疑" }}
               </button>
               <button
+                v-if="selectedItem.classification !== 'private'"
                 type="button"
                 class="secondary-action"
                 :disabled="busy"
                 :title="
                   selectedIsProjectCover
                     ? '清除自定义封面，首页恢复为最近截图'
-                    : '把当前截图设为项目封面（首页网格与列表都会使用这张图，人物/游戏截图/收藏图/未分类均可）'
+                    : '把当前截图设为项目封面（首页网格与列表都会使用这张图；收藏图不会作为封面）'
                 "
                 @click="toggleProjectCover"
               >

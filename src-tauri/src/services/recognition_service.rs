@@ -749,7 +749,13 @@ pub async fn enroll_face_sample(
             feature_json = excluded.feature_json,
             confidence = excluded.confidence,
             status = 'active',
-            flagged = excluded.flagged,
+            -- A user-marked suspicious sample stays excluded until the user
+            -- explicitly restores it. Automatic verification may add a flag,
+            -- but feature refresh/rebuild must never silently remove one.
+            flagged = CASE
+                WHEN character_face_samples.flagged = 1 OR excluded.flagged = 1 THEN 1
+                ELSE 0
+            END,
             model_id = excluded.model_id,
             model_version = excluded.model_version,
             embedding_dim = excluded.embedding_dim,

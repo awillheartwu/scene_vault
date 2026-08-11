@@ -115,7 +115,7 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
       action: () => void revealPath(item.destinationPath!),
     });
   }
-  if (projectId.value && item.destinationPath) {
+  if (projectId.value && item.destinationPath && item.classification !== "private") {
     items.push({
       id: "set-cover",
       label: "设为项目封面",
@@ -553,7 +553,10 @@ function upsertItem(item: CaptureItem) {
   if (index === -1) items.value.unshift(item);
   else items.value[index] = item;
   items.value = [...items.value].sort((left, right) => right.capturedAt.localeCompare(left.capturedAt));
-  if (!selectedItemId.value || item.status === "awaiting_label") selectedItemId.value = item.id;
+  // Background feature/suggestion updates also arrive as item-updated while
+  // the capture remains awaiting_label. Never let those events steal the
+  // user's current selection in the middle of classification.
+  if (!selectedItemId.value) selectedItemId.value = item.id;
 }
 
 function selectNextWaiting(afterId?: string) {

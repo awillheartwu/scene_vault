@@ -245,7 +245,16 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
             p.id AS project_id,
             p.name,
             p.description,
-            p.cover_capture_item_id,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM capture_items cover
+                    WHERE cover.id = p.cover_capture_item_id
+                      AND cover.project_id = p.id
+                      AND cover.classification <> 'private'
+                ) THEN p.cover_capture_item_id
+                ELSE NULL
+            END AS cover_capture_item_id,
             p.created_at,
             COALESCE(src.source_count, 0) AS source_count,
             (p.destination_directory IS NOT NULL AND p.destination_directory <> '') AS destination_configured,
@@ -466,10 +475,10 @@ pub async fn set_destination_directory(
     project.ok_or_else(|| AppError::NotFound("project".to_owned()))
 }
 
-/// Pins (or clears) the project cover capture. Any classification can become
-/// a cover: person, scene, private and unclassified captures are all valid.
-/// The capture must belong to the project; NULL/empty clears the custom
-/// cover so Home falls back to the latest capture again.
+/// Pins (or clears) the project cover capture. Person, scene and unclassified
+/// captures are valid; private captures are rejected because Home hides that
+/// category by default. The capture must belong to the project; NULL/empty
+/// clears the custom cover so Home falls back to the latest capture again.
 pub async fn set_cover(
     pool: &SqlitePool,
     input: SetProjectCoverInput,
@@ -486,24 +495,25 @@ pub async fn set_cover(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     if let Some(capture_item_id) = capture_item_id {
-        let belongs_to_project: i64 = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM capture_items item
-                JOIN capture_sessions session ON session.id = item.session_id
-                WHERE item.id = ? AND session.project_id = ?
-            )
-            "#,
-        )
-        .bind(capture_item_id)
-        .bind(project_id)
-        .fetch_one(pool)
-        .await?;
-        if belongs_to_project == 0 {
+        let candidate: Option<(String, String)> =
+            sqlx::query_as("SELECT project_id, classification FROM capture_items WHERE id = ?")
+                .bind(capture_item_id)
+                .fetch_optional(pool)
+                .await?;
+        let Some((candidate_project_id, classification)) = candidate else {
             return Err(AppError::NotFound(format!(
                 "capture {capture_item_id} in project {project_id}"
             )));
+        };
+        if candidate_project_id != project_id {
+            return Err(AppError::NotFound(format!(
+                "capture {capture_item_id} in project {project_id}"
+            )));
+        }
+        if classification == "private" {
+            return Err(AppError::Validation(
+                "private captures cannot be used as a project cover".to_owned(),
+            ));
         }
     }
     let project = sqlx::query_as::<_, Project>(
@@ -727,11 +737,10 @@ mod tests {
             .expect("insert capture item");
         }
 
-        // Any classification (including private and unclassified) can pin.
+        // Every Home-visible classification can pin.
         for capture_item_id in [
             "cover-capture-person",
             "cover-capture-scene",
-            "cover-capture-private",
             "cover-capture-unclassified",
         ] {
             let pinned = set_cover(
@@ -759,6 +768,33 @@ mod tests {
             summary.cover_capture_item_id.as_deref(),
             Some("cover-capture-unclassified")
         );
+
+        let error = set_cover(
+            &pool,
+            SetProjectCoverInput {
+                project_id: project.id.clone(),
+                capture_item_id: Some("cover-capture-private".to_owned()),
+            },
+        )
+        .await
+        .expect_err("private capture must not become a Home cover");
+        assert!(matches!(error, AppError::Validation(_)));
+
+        // Defense in depth for older/stale databases: even if a private cover
+        // id is present, the Home overview must never expose it.
+        sqlx::query(
+            "UPDATE projects SET cover_capture_item_id = 'cover-capture-private' WHERE id = ?",
+        )
+        .bind(&project.id)
+        .execute(&pool)
+        .await
+        .expect("seed stale private cover");
+        let summaries = list_overviews(&pool).await.expect("list overviews");
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.project_id == project.id)
+            .expect("summary");
+        assert!(summary.cover_capture_item_id.is_none());
 
         // A capture from another project is rejected.
         let error = set_cover(
