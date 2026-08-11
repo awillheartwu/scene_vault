@@ -33,6 +33,8 @@ python/.venv/
 /src-tauri/binaries/
 /src-tauri/resources/models/
 /dist-release/
+/build/
+/*.spec
 
 # User-provided face benchmark datasets (game screenshots, never committed)
 python/tests/fixtures/face_eval/
