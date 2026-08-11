@@ -18,10 +18,21 @@ use crate::{
 const DEFAULT_STABILITY_DELAY_MS: u64 = 250;
 const MAX_STABILITY_DELAY_MS: u64 = 2_000;
 const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// A completed source scan slower than this is surfaced as a slow-scan
+/// warning. The 1.0 scale commitment (a 10,000-entry source directory, see
+/// `scripts/scale-benchmark`) scans in well under a second, so the elapsed
+/// duration alone drives the warning: a large-but-fast scan is the expected
+/// steady state, not noise.
+const SLOW_SCAN_WARNING_THRESHOLD_MS: u64 = 1_000;
 /// Filesystems with coarse timestamps (FAT/exFAT, some network shares) round
 /// modification times down by up to two seconds. A live capture written just
 /// after the session started must not look like a backfill.
 const BACKFILL_MTIME_TOLERANCE: Duration = Duration::from_secs(2);
+
+/// Whether a completed scan should be surfaced as a slow-scan warning.
+pub(crate) fn should_warn_slow_scan(scan_duration_ms: u64) -> bool {
+    scan_duration_ms >= SLOW_SCAN_WARNING_THRESHOLD_MS
+}
 
 #[derive(Debug)]
 struct Candidate {
@@ -222,10 +233,12 @@ async fn poll_active_sessions_once(
         .await
         {
             Ok(result) => {
-                // Observability only: a scan crossing the poll interval or a
-                // directory growing large shows up here before polling needs any
-                // architectural change (notify/reconciliation is a later option).
-                if result.scan_duration_ms >= 1_000 || result.entries_scanned >= 1_000 {
+                // Observability only: scans that take longer than expected
+                // surface here before polling needs any architectural change
+                // (notify/reconciliation is a later option). Entry count alone
+                // never warns: at the committed 1.0 scale (10k entries) a full
+                // scan completes in ~100ms and must not warn on every poll.
+                if should_warn_slow_scan(result.scan_duration_ms) {
                     log_service::record_event(LogRecord {
                         level: LogLevel::Warn,
                         module: "capture.discovery".to_owned(),
@@ -269,6 +282,17 @@ mod tests {
         models::capture::EndCaptureSessionInput,
         services::{capture_service, test_support},
     };
+
+    #[test]
+    fn slow_scan_warning_is_duration_based_and_quiet_at_the_10k_commitment() {
+        // The 1.0 fixture scans 10,000 entries in ~100ms; a large-but-fast
+        // scan must not warn on every 2s poll.
+        assert!(!should_warn_slow_scan(0));
+        assert!(!should_warn_slow_scan(100));
+        assert!(!should_warn_slow_scan(999));
+        assert!(should_warn_slow_scan(1_000));
+        assert!(should_warn_slow_scan(2_500));
+    }
 
     async fn session_fixture(
         pool: &SqlitePool,
