@@ -3,6 +3,7 @@ pub mod archive_naming;
 pub mod asset;
 pub mod capture;
 pub mod character;
+pub mod data_maintenance;
 pub mod diagnostics;
 pub mod project;
 pub mod project_note;

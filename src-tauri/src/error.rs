@@ -8,6 +8,9 @@ pub enum AppError {
     #[error("database migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
+    #[error("database maintenance error: {0}")]
+    DataMaintenance(#[from] crate::models::data_maintenance::DataMaintenanceError),
+
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
 

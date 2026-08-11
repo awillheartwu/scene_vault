@@ -5,8 +5,99 @@ mod models;
 mod services;
 
 use db::AppState;
-use services::shortcuts::{CLASSIFY_POPUP_LABEL, NOTE_POPUP_LABEL};
+use services::{
+    data_maintenance_service::DataMaintenanceService,
+    shortcuts::{CLASSIFY_POPUP_LABEL, NOTE_POPUP_LABEL},
+};
 use tauri::Manager;
+
+async fn prune_automatic_backups(
+    backup_directory: &std::path::Path,
+) -> Result<(), error::AppError> {
+    let mut entries = tokio::fs::read_dir(backup_directory).await?;
+    let mut backups = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("scene-vault-backup-") && name.ends_with(".sqlite") {
+            backups.push((name, entry.path()));
+        }
+    }
+    backups.sort_by(|left, right| right.0.cmp(&left.0));
+    for (_, path) in backups.into_iter().skip(3) {
+        let _ = tokio::fs::remove_file(&path).await;
+        let manifest = std::path::PathBuf::from(format!(
+            "{}.{}",
+            path.display(),
+            models::data_maintenance::BACKUP_MANIFEST_EXTENSION
+        ));
+        let _ = tokio::fs::remove_file(manifest).await;
+    }
+    Ok(())
+}
+
+async fn open_and_prepare_database(
+    database_path: &std::path::Path,
+    backup_directory: &std::path::Path,
+) -> Result<(sqlx::SqlitePool, u64), error::AppError> {
+    let database_existed = database_path
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() > 0);
+    let pool = db::connect(database_path, true).await?;
+    let latest = db::latest_schema_version();
+    let migrations_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let applied_version = if migrations_table_exists > 0 {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await?
+            .unwrap_or_default()
+    } else {
+        0
+    };
+
+    if database_existed && applied_version < latest {
+        tokio::fs::create_dir_all(backup_directory).await?;
+        let maintenance = DataMaintenanceService::new(
+            database_path.to_path_buf(),
+            env!("CARGO_PKG_VERSION"),
+            latest,
+        );
+        if let Err(error) = maintenance.create_backup(backup_directory).await {
+            pool.close().await;
+            return Err(error.into());
+        }
+        prune_automatic_backups(backup_directory).await?;
+    }
+
+    if let Err(error) = db::migrate(&pool).await {
+        pool.close().await;
+        return Err(error);
+    }
+    let maintenance = DataMaintenanceService::new(
+        database_path.to_path_buf(),
+        env!("CARGO_PKG_VERSION"),
+        latest,
+    );
+    let report = maintenance.preflight().await?;
+    if !report.ok {
+        pool.close().await;
+        return Err(error::AppError::Conflict(format!(
+            "database preflight failed: {}",
+            report
+                .quick_check
+                .into_iter()
+                .chain(report.foreign_key_issues)
+                .chain(report.migration_issues)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    let recovered = services::capture_service::recover_interrupted_processing(&pool).await?;
+    Ok((pool, recovered))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -41,13 +132,92 @@ pub fn run() {
             );
             let app_handle = app.handle().clone();
             let cache_root = app.path().app_cache_dir()?.join("capture-output");
-            let (pool, recovered_items) = tauri::async_runtime::block_on(async {
-                let pool = db::initialize(app.handle()).await?;
-                let recovered =
-                    services::capture_service::recover_interrupted_processing(&pool).await?;
-                Ok::<_, error::AppError>((pool, recovered))
+            let database_path = db::database_path(app.handle())?;
+            let app_data_directory = app.path().app_data_dir()?;
+            let backup_directory = app_data_directory.join("backups");
+            let recovery_directory = app_data_directory.join("recovery");
+            std::fs::create_dir_all(&backup_directory)?;
+            std::fs::create_dir_all(&recovery_directory)?;
+            let latest_schema_version = db::latest_schema_version();
+            let startup = tauri::async_runtime::block_on(async {
+                let maintenance = DataMaintenanceService::new(
+                    database_path.clone(),
+                    env!("CARGO_PKG_VERSION"),
+                    latest_schema_version,
+                );
+                let mut restored_on_startup = false;
+                let mut restore_was_applied = false;
+                if maintenance.has_pending_restore(&recovery_directory).await {
+                    match maintenance.apply_pending_restore(&recovery_directory).await {
+                        Ok(_) => restore_was_applied = true,
+                        Err(error) => services::log_service::error(
+                            "data.maintenance",
+                            format!("staged database restore failed: {error}"),
+                        ),
+                    }
+                }
+
+                match open_and_prepare_database(&database_path, &backup_directory).await {
+                    Ok((pool, recovered)) => {
+                        if restore_was_applied {
+                            maintenance
+                                .discard_pre_restore_snapshot(&recovery_directory)
+                                .await?;
+                            restored_on_startup = true;
+                        }
+                        Ok::<_, error::AppError>((pool, recovered, None, restored_on_startup))
+                    }
+                    Err(restore_error) if restore_was_applied => {
+                        maintenance.rollback_restore(&recovery_directory).await?;
+                        match open_and_prepare_database(&database_path, &backup_directory).await {
+                            Ok((pool, recovered)) => {
+                                services::log_service::error(
+                                    "data.maintenance",
+                                    format!(
+                                        "restored database was rejected; previous database recovered: {restore_error}"
+                                    ),
+                                );
+                                Ok((pool, recovered, None, false))
+                            }
+                            Err(rollback_error) => {
+                                let fallback = db::recovery_pool().await?;
+                                Ok((
+                                    fallback,
+                                    0,
+                                    Some(format!(
+                                        "restored database failed ({restore_error}); previous database could not reopen ({rollback_error})"
+                                    )),
+                                    false,
+                                ))
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let fallback = db::recovery_pool().await?;
+                        Ok((fallback, 0, Some(error.to_string()), false))
+                    }
+                }
             })?;
+            let (pool, recovered_items, database_error, restored_on_startup) = startup;
+            let normal_mode = database_error.is_none();
             app.manage(AppState { pool: pool.clone() });
+            app.manage(db::StartupState {
+                database_path,
+                backup_directory,
+                recovery_directory,
+                database_error: database_error.clone(),
+                restored_on_startup,
+            });
+            if !normal_mode {
+                services::log_service::error(
+                    "data.maintenance",
+                    format!(
+                        "database unavailable; entering recovery mode: {}",
+                        database_error.as_deref().unwrap_or("unknown database error")
+                    ),
+                );
+                return Ok(());
+            }
             {
                 let settings =
                     tauri::async_runtime::block_on(services::log_settings_service::get(&pool))?;
@@ -103,6 +273,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::data_maintenance::get_database_startup_status,
+            commands::data_maintenance::preflight_database,
+            commands::data_maintenance::create_database_backup,
+            commands::data_maintenance::stage_database_restore,
+            commands::data_maintenance::cancel_pending_database_restore,
+            commands::data_maintenance::rebuild_database_indexes,
+            commands::data_maintenance::restart_after_database_restore,
             commands::project::create_project,
             commands::project::list_projects,
             commands::project::list_project_overviews,

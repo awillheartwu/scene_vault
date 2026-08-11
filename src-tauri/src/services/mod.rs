@@ -7,6 +7,7 @@ pub mod capture_discovery_service;
 pub mod capture_service;
 pub mod capture_worker_service;
 pub mod character_service;
+pub mod data_maintenance_service;
 pub mod font_service;
 pub mod log_service;
 pub mod log_settings_service;

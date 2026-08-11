@@ -1,6 +1,7 @@
 pub mod asset;
 pub mod capture;
 pub mod character;
+pub mod data_maintenance;
 pub mod diagnostics;
 pub mod notes;
 pub mod project;
