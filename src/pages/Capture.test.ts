@@ -401,6 +401,27 @@ describe("Capture quick-label flow", () => {
     wrapper.unmount();
   });
 
+  it("shows the bundled sidecar engine as ready and enables imported recognition", async () => {
+    api.runtimeStatus.mockResolvedValue({
+      engineStatus: "sidecar",
+      workerStatus: "idle",
+      activeCaptureItemId: null,
+      queuedCount: 0,
+      archivePendingCount: 0,
+      lastError: null,
+    });
+    api.deferredImportRecognitionCount.mockResolvedValue(3);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("内置引擎");
+    const startRecognition = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始识别导入截图"));
+    expect(startRecognition?.attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("shows every pending capture in the strip without a small cap", async () => {
     const many = Array.from({ length: 30 }, (_, index) => ({
       ...item(),
