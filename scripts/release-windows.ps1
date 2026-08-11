@@ -30,7 +30,12 @@ param(
     [string]$Version = "1.0.0",
     [switch]$SkipAI,
     [string]$SignCertificatePath = "",
-    [string]$TimestampServer = "http://timestamp.digicert.com"
+    [string]$TimestampServer = "http://timestamp.digicert.com",
+    # CPU 0-3 (P-core threads) only: this build machine is a 13900K that has
+    # shown instability under all-core load, so every child process is pinned
+    # to these four logical CPUs. Change to 0xFF for four full P-cores if the
+    # machine's stability profile allows it.
+    [int]$AffinityMask = 0xF
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,9 +48,34 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw "This release script must run on Windows (PyInstaller and NSIS require it)."
 }
 
-function Assert-Tool([string]$Name) {
-    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "Required tool '$Name' was not found on PATH."
+function Find-Tool([string]$Name, [string[]]$Fallbacks) {
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($candidate in $Fallbacks) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    throw "Required tool '$Name' was not found on PATH or in standard locations."
+}
+
+# Quote arguments that contain spaces so they survive the Start-Process
+# ArgumentList round-trip.
+function Quote-Arg([string]$Arg) {
+    if ($Arg -match " ") { return '"' + $Arg + '"' }
+    return $Arg
+}
+
+# Runs a native command through Start-Process and enforces a zero exit code.
+# Output stays on the console (no redirects): in PowerShell 5.1, redirecting
+# switches the child to the parent environment, whose PATH is unreliable under
+# WSL-launched PowerShell, while a plain Start-Process inherits the full
+# registry PATH (node/pnpm/cargo/python are all there on this machine).
+# CPU affinity is inherited by every child from this PowerShell process (set
+# below), so cargo -> rustc and node -> cmd chains stay on $AffinityMask.
+function Run-Native([string]$FilePath, [string[]]$Arguments, [string]$LogBase) {
+    $quoted = @($Arguments | ForEach-Object { Quote-Arg $_ })
+    $process = Start-Process -FilePath $FilePath -ArgumentList $quoted -NoNewWindow -PassThru -Wait
+    if ($process.ExitCode -ne 0) {
+        throw "Command failed (exit $($process.ExitCode)): $FilePath $($Arguments -join ' ')"
     }
 }
 
@@ -54,14 +84,37 @@ function Get-JsonValue([string]$Path, [string]$Key) {
     return $json.$Key
 }
 
+# Waits for a build artifact to appear instead of relying on Start-Process
+# -Wait: under WSL-launched PowerShell the process object sometimes never
+# reports completion even though the child already finished and produced its
+# output. Polls every 10 seconds, stops the leftover process once the artifact
+# exists (or after the timeout) and reports whether it was found.
+function Wait-ForArtifact(
+    [System.Diagnostics.Process]$Process,
+    [string]$ArtifactPath,
+    [int]$TimeoutMinutes
+) {
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 10
+        if (Test-Path $ArtifactPath) {
+            if (-not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue }
+            return $true
+        }
+        if ($Process.HasExited) { return $false }
+    }
+    if (-not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue }
+    return $false
+}
+
 # ---------------------------------------------------------------------------
 # 1. Version consistency (app 1.0.0 must be unified everywhere)
 # ---------------------------------------------------------------------------
 $Expected = @{
-    "package.json"             = (Get-JsonValue "package.json" "version")
-    "src-tauri/Cargo.toml"     = ((Get-Content "src-tauri/Cargo.toml" | Select-String '^version = "([^"]+)"').Matches[0].Groups[1].Value)
+    "package.json"              = (Get-JsonValue "package.json" "version")
+    "src-tauri/Cargo.toml"      = ((Get-Content "src-tauri/Cargo.toml" | Select-String '^version = "([^"]+)"').Matches[0].Groups[1].Value)
     "src-tauri/tauri.conf.json" = (Get-JsonValue "src-tauri/tauri.conf.json" "version")
-    "python/pyproject.toml"    = ((Get-Content "python/pyproject.toml" | Select-String '^version = "([^"]+)"').Matches[0].Groups[1].Value)
+    "python/pyproject.toml"     = ((Get-Content "python/pyproject.toml" | Select-String '^version = "([^"]+)"').Matches[0].Groups[1].Value)
 }
 foreach ($entry in $Expected.GetEnumerator()) {
     if ($entry.Value -ne $Version) {
@@ -70,14 +123,43 @@ foreach ($entry in $Expected.GetEnumerator()) {
 }
 Write-Host "[1/6] Versions unified at $Version"
 
+$LogDir = Join-Path $RepoRoot "dist-release"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+# Tools are discovered from PATH first, then from standard install locations,
+# so the script runs on a plain machine without manual PATH setup. pnpm is
+# invoked through its JS entry point (node pnpm.cjs) because npm-style .cmd
+# shims break under WSL-launched PowerShell.
+$Node = Find-Tool "node" @("C:\Program Files\nodejs\node.exe")
+$PnpmJs = Join-Path (Split-Path -Parent (Find-Tool "pnpm" @("C:\Users\WuHaoli\AppData\Roaming\npm\pnpm.cmd"))) "node_modules/pnpm/bin/pnpm.cjs"
+$Cargo = Find-Tool "cargo" @("C:\Users\WuHaoli\.cargo\bin\cargo.exe")
+if (-not (Test-Path $PnpmJs)) { throw "pnpm.js not found at $PnpmJs" }
+$NpmGlobal = Split-Path -Parent (Split-Path -Parent $PnpmJs)
+$env:Path = "$(Split-Path -Parent $Node);$NpmGlobal;$(Split-Path -Parent $Cargo);" + $env:Path
+# Cargo parallelism is capped to the pinned core count (rustc is sequential
+# per job, and the affinity mask above already limits actual execution).
+$env:CARGO_BUILD_JOBS = "4"
+# Pin this PowerShell process (and therefore every child it spawns, which
+# inherit the mask) to the allowed CPUs before any heavy work starts.
+try {
+    (Get-Process -Id $PID).ProcessorAffinity = $AffinityMask
+} catch {
+    Write-Host "  WARNING: could not pin CPU affinity (0x$('{0:X}' -f $AffinityMask)): $_"
+}
+Write-Host "[0/6] CPU affinity 0x$('{0:X}' -f $AffinityMask) (CPU 0-3), CARGO_BUILD_JOBS=4"
+
 # ---------------------------------------------------------------------------
 # 2. Frontend production build
 # ---------------------------------------------------------------------------
-Assert-Tool "pnpm"
+# Tools are invoked through their JS entry points with node directly. pnpm's
+# lifecycle shell (cmd/sh) is unreliable in some environments (e.g. WSL-
+# launched PowerShell), so `pnpm build` / `pnpm tauri build` are replaced by
+# the equivalent node invocations. `pnpm install` still resolves the store.
 Write-Host "[2/6] Building frontend"
 $env:CI = "true"
-pnpm install
-pnpm build
+Run-Native $Node @($PnpmJs, "install") (Join-Path $LogDir "pnpm-install")
+Run-Native $Node @("node_modules/vue-tsc/bin/vue-tsc.js", "--noEmit") (Join-Path $LogDir "vue-tsc")
+Run-Native $Node @("node_modules/vite/bin/vite.js", "build") (Join-Path $LogDir "vite-build")
 
 # ---------------------------------------------------------------------------
 # 3. Bundled font (shipped in every installer; refresh from the official zip)
@@ -103,7 +185,10 @@ if (-not (Test-Path (Join-Path $FontsDir "OFL.txt"))) {
 # ---------------------------------------------------------------------------
 $SidecarExe = Join-Path $RepoRoot "src-tauri/binaries/scene-vault-ai-x86_64-pc-windows-msvc.exe"
 if (-not $SkipAI) {
-    Assert-Tool "python"
+    $Python = Find-Tool "python" @(
+        "C:\Users\WuHaoli\AppData\Local\Programs\Python\Python312\python.exe",
+        "C:\Users\WuHaoli\AppData\Local\Programs\Python\Python311\python.exe"
+    )
     Write-Host "[3/6] Building AI sidecar (PyInstaller)"
 
     $ModelsDir = Join-Path $RepoRoot "src-tauri/resources/models"
@@ -121,18 +206,24 @@ if (-not $SkipAI) {
     }
 
     $BuildVenv = Join-Path $env:TEMP "sv-ai-build-venv"
-    if (-not (Test-Path (Join-Path $BuildVenv "Scripts/python.exe"))) {
-        python -m venv $BuildVenv
+    $VenvPython = Join-Path $BuildVenv "Scripts/python.exe"
+    if (-not (Test-Path $VenvPython)) {
+        Run-Native $Python @("-m", "venv", $BuildVenv) (Join-Path $LogDir "venv-create")
     }
-    & (Join-Path $BuildVenv "Scripts/python.exe") -m pip install --quiet --upgrade pip
-    & (Join-Path $BuildVenv "Scripts/python.exe") -m pip install --quiet -e "./python[vision,packaging]"
+    Run-Native $VenvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") (Join-Path $LogDir "pip-upgrade")
+    Run-Native $VenvPython @("-m", "pip", "install", "--quiet", "-e", "./python[vision,packaging]") (Join-Path $LogDir "pip-install")
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SidecarExe) | Out-Null
-    & (Join-Path $BuildVenv "Scripts/pyinstaller.exe") --noconfirm --clean `
-        --onefile --name scene-vault-ai `
-        --distpath (Join-Path $env:TEMP "sv-ai-dist") `
-        python/sidecar.py
-    Copy-Item -Force (Join-Path $env:TEMP "sv-ai-dist/scene-vault-ai.exe") $SidecarExe
+    $DistPath = Join-Path $env:TEMP "sv-ai-dist"
+    $sidecarProcess = Start-Process -FilePath $VenvPython -NoNewWindow -PassThru -ArgumentList @(
+        "-m", "PyInstaller", "--noconfirm", "--clean",
+        "--onefile", "--name", "scene-vault-ai",
+        "--distpath", $DistPath,
+        "python/sidecar.py"
+    )
+    $sidecarBuilt = Wait-ForArtifact $sidecarProcess (Join-Path $DistPath "scene-vault-ai.exe") 30
+    if (-not $sidecarBuilt) { throw "PyInstaller did not produce scene-vault-ai.exe within 30 minutes" }
+    Copy-Item -Force (Join-Path $DistPath "scene-vault-ai.exe") $SidecarExe
     Write-Host "  Sidecar -> $SidecarExe"
 } else {
     Write-Host "[3/6] Skipping AI sidecar and models (-SkipAI)"
@@ -142,19 +233,29 @@ if (-not $SkipAI) {
 # 5. Tauri builds (NSIS) - small package, then AI variant via config merge
 # ---------------------------------------------------------------------------
 function Build-Installer([string]$ConfigArg, [string]$OutputName) {
+    # beforeBuildCommand is empty in tauri.conf.json: PATH resolution is
+    # unreliable in some environments (WSL-launched PowerShell), so the
+    # frontend is built explicitly in step 2 and cargo is passed by absolute
+    # path through --runner.
+    $arguments = @("node_modules/@tauri-apps/cli/tauri.js", "build", "--bundles", "nsis", "--runner", $Cargo)
+    if ($ConfigArg) { $arguments += @("--config", $ConfigArg) }
     Write-Host "[4/6] tauri build $ConfigArg"
-    if ($ConfigArg) {
-        pnpm tauri build --bundles nsis --config $ConfigArg
-    } else {
-        pnpm tauri build --bundles nsis
-    }
+    $tauriProcess = Start-Process -FilePath $Node -ArgumentList $arguments -NoNewWindow -PassThru
+
     $nsis = Join-Path $RepoRoot "src-tauri/target/release/bundle/nsis"
-    $installer = Get-ChildItem $nsis -Filter "*setup.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $deadline = (Get-Date).AddMinutes(60)
+    $installer = $null
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 10
+        $installer = Get-ChildItem $nsis -Filter "*setup.exe" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($installer) { break }
+        if ($tauriProcess.HasExited) { break }
+    }
+    if (-not $tauriProcess.HasExited) { Stop-Process -Id $tauriProcess.Id -Force -ErrorAction SilentlyContinue }
     if (-not $installer) { throw "NSIS installer not found under $nsis" }
 
-    $ReleaseDir = Join-Path $RepoRoot "dist-release"
-    New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
-    $output = Join-Path $ReleaseDir $OutputName
+    $output = Join-Path $LogDir $OutputName
     Copy-Item -Force $installer.FullName $output
     Write-Host "  $OutputName ($([math]::Round($installer.Length / 1MB, 1)) MB)"
     return $output
@@ -170,24 +271,27 @@ if (-not $SkipAI) {
 # 6. Optional code signing (only when a certificate is provided)
 # ---------------------------------------------------------------------------
 if ($SignCertificatePath) {
-    Assert-Tool "signtool"
+    $Signtool = Find-Tool "signtool" @(
+        (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName)
+    )
     $Password = $env:SIGN_CERT_PASSWORD
-    $Common = @("/fd", "SHA256", "/f", $SignCertificatePath, "/tr", $TimestampServer, "/td", "SHA256")
+    $Common = @("sign", "/fd", "SHA256", "/f", $SignCertificatePath, "/tr", $TimestampServer, "/td", "SHA256")
     if ($Password) { $Common += @("/p", $Password) }
     foreach ($file in @($SmallInstaller, $AiInstaller)) {
         if ($file -and (Test-Path $file)) {
-            & signtool sign @Common $file
+            Run-Native $Signtool ($Common + $file) (Join-Path $LogDir "sign")
         }
     }
     if (-not $SkipAI) {
-        & signtool sign @Common $SidecarExe
+        Run-Native $Signtool ($Common + $SidecarExe) (Join-Path $LogDir "sign-sidecar")
         $MainExe = Join-Path $RepoRoot "src-tauri/target/release/scene_vault.exe"
-        if (Test-Path $MainExe) { & signtool sign @Common $MainExe }
+        if (Test-Path $MainExe) { Run-Native $Signtool ($Common + $MainExe) (Join-Path $LogDir "sign-main") }
     }
 }
 
 Write-Host "[5/6] Done. Artifacts:"
-Get-ChildItem (Join-Path $RepoRoot "dist-release") | ForEach-Object {
+Get-ChildItem $LogDir -Filter "scene-vault-*-setup.exe" | ForEach-Object {
     Write-Host ("  {0}  {1} MB" -f $_.Name, [math]::Round($_.Length / 1MB, 1))
 }
 Write-Host "[6/6] Next: install on a clean Windows machine and run the acceptance checklist (see docs/decisions/2026-08-11-windows-delivery.md)."
