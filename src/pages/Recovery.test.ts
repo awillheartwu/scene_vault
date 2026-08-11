@@ -39,7 +39,7 @@ const restoreRequest = {
   stagedPath: "C:\\AppData\\SceneVault\\recovery\\scene-vault.db.restore-pending",
   manifestPath: "C:\\AppData\\SceneVault\\recovery\\scene-vault.db.restore-pending.manifest.json",
   sha256: "a".repeat(64),
-  appVersion: "0.1.0",
+  appVersion: "1.0.0",
   schemaVersion: 19,
   requestedAtUtc: "2026-08-11T08:05:00Z",
 };

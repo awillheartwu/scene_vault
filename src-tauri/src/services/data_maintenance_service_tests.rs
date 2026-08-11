@@ -17,7 +17,7 @@ use crate::models::data_maintenance::{
     PENDING_RESTORE_MANIFEST_FILE, PRE_RESTORE_FILE, RESTORE_REQUEST_FILE,
 };
 
-const APP_VERSION: &str = "0.1.0";
+const APP_VERSION: &str = "1.0.0";
 const SCHEMA_VERSION: i64 = 19;
 
 async fn open_pool(path: &Path) -> SqlitePool {

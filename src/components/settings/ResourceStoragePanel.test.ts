@@ -104,7 +104,7 @@ const backupResult = {
     contentScope: "index-and-metadata-only",
     excludesSourceImages: true,
     backupFile: "scene-vault-backup-20260811-120000.sqlite",
-    appVersion: "0.1.0",
+    appVersion: "1.0.0",
     schemaVersion: 19,
     sqliteVersion: "3.46.0",
     createdAtUtc: "2026-08-11T08:00:00Z",
@@ -120,7 +120,7 @@ const restoreRequest = {
   stagedPath: "C:\\AppData\\SceneVault\\recovery\\scene-vault.db.restore-pending",
   manifestPath: "C:\\AppData\\SceneVault\\recovery\\scene-vault.db.restore-pending.manifest.json",
   sha256: "a".repeat(64),
-  appVersion: "0.1.0",
+    appVersion: "1.0.0",
   schemaVersion: 19,
   requestedAtUtc: "2026-08-11T08:05:00Z",
 };
