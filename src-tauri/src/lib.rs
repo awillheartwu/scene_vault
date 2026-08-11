@@ -260,6 +260,22 @@ pub fn run() {
                     (app_settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024),
                 );
             }
+            {
+                // AI-enabled installs ship a PyInstaller sidecar plus bundled
+                // models and the annotation font. Fill the missing settings
+                // once so the engine works without any manual configuration.
+                if let Err(error) = tauri::async_runtime::block_on(
+                    services::vision_settings_service::autoconfigure_bundled(
+                        &pool,
+                        &app.path().app_local_data_dir()?,
+                    ),
+                ) {
+                    services::log_service::error(
+                        "vision.settings",
+                        format!("bundled vision autoconfigure failed: {error}"),
+                    );
+                }
+            }
             tauri::async_runtime::spawn(
                 services::capture_discovery_service::run_background_polling(
                     pool.clone(),

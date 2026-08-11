@@ -1095,9 +1095,9 @@ pub async fn rebuild_face_bank(
         return Err(AppError::NotFound("project".to_owned()));
     }
     let vision_settings = vision_settings_service::get(pool).await?;
-    if !vision_settings_service::is_configured(&vision_settings) {
+    if !vision_settings_service::is_engine_available(&vision_settings) {
         return Err(AppError::Vision(
-            "vision engine is not configured; set the Python executable, module root and models before rebuilding the face bank".to_owned(),
+            "vision engine is not configured; configure Python and models or install the AI-enabled package before rebuilding the face bank".to_owned(),
         ));
     }
     let processing_settings = processing_settings_service::get(pool).await?;
@@ -1269,10 +1269,9 @@ pub async fn refresh_capture_face_feature(
         )));
     }
     let vision_settings = vision_settings_service::get(pool).await?;
-    if !vision_settings_service::is_configured(&vision_settings) {
+    if !vision_settings_service::is_engine_available(&vision_settings) {
         return Err(AppError::Vision(
-            "vision engine is not configured; set the Python executable, module root and models before re-extracting face features"
-                .to_owned(),
+            "vision engine is not configured; configure Python and models or install the AI-enabled package before re-extracting face features".to_owned(),
         ));
     }
     let processing_settings = processing_settings_service::get(pool).await?;

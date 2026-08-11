@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
@@ -8,6 +8,131 @@ use crate::{
 };
 
 const SETTINGS_KEY: &str = "capture.vision";
+const BUNDLED_MODELS_REL: &str = "models";
+const BUNDLED_FONTS_REL: &str = "fonts";
+
+/// How the AI engine is launched. The PyInstaller sidecar ships next to the
+/// main executable and embeds its own Python interpreter; the legacy mode
+/// runs a configured system/venv Python with `-m scene_vault_ai`.
+#[derive(Debug, Clone)]
+pub enum EngineRuntime {
+    Python {
+        executable: PathBuf,
+        module_root: PathBuf,
+    },
+    Sidecar {
+        path: PathBuf,
+    },
+}
+
+/// The bundled sidecar next to the current executable, if any. Tauri places
+/// `externalBin` binaries in the same directory as the main app binary, so
+/// `current_exe()`'s parent is the install directory on Windows.
+pub fn sidecar_executable() -> Option<PathBuf> {
+    let install_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    sidecar_executable_in(&install_dir)
+}
+
+fn sidecar_executable_in(install_dir: &Path) -> Option<PathBuf> {
+    for name in ["scene-vault-ai.exe", "scene-vault-ai"] {
+        let candidate = install_dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The bundled resources directory (`resources/` next to the sidecar), which
+/// contains the models and the annotation font in the AI-enabled installer.
+pub fn bundled_resources_dir() -> Option<PathBuf> {
+    let sidecar = sidecar_executable()?;
+    Some(sidecar.parent()?.join("resources"))
+}
+
+/// The engine is usable when either the legacy Python settings are fully
+/// configured or the bundled sidecar is present.
+pub fn is_engine_available(settings: &VisionSettings) -> bool {
+    is_configured(settings) || sidecar_executable().is_some()
+}
+
+/// Resolves how the engine should be spawned: the bundled sidecar wins over a
+/// configured Python executable so a clean AI installer works without any
+/// system Python.
+pub fn engine_runtime(settings: &VisionSettings) -> Option<EngineRuntime> {
+    engine_runtime_with(settings, sidecar_executable().as_deref())
+}
+
+fn engine_runtime_with(settings: &VisionSettings, sidecar: Option<&Path>) -> Option<EngineRuntime> {
+    if let Some(path) = sidecar {
+        return Some(EngineRuntime::Sidecar {
+            path: path.to_path_buf(),
+        });
+    }
+    let executable = settings.python_executable_path.as_ref()?;
+    let module_root = settings.python_module_root.as_ref()?;
+    Some(EngineRuntime::Python {
+        executable: PathBuf::from(executable),
+        module_root: PathBuf::from(module_root),
+    })
+}
+
+/// First-run convenience for the AI-enabled installer: when the bundled
+/// sidecar exists, fill any missing model/font settings from the bundled
+/// resources. Existing user-configured values are never overwritten. The font
+/// is copied into the app-local fonts directory so the settings UI lists it.
+pub async fn autoconfigure_bundled(
+    pool: &SqlitePool,
+    app_local_dir: &Path,
+) -> Result<(), AppError> {
+    let Some(sidecar) = sidecar_executable() else {
+        return Ok(());
+    };
+    autoconfigure_bundled_with(pool, app_local_dir, &sidecar).await
+}
+
+async fn autoconfigure_bundled_with(
+    pool: &SqlitePool,
+    app_local_dir: &Path,
+    sidecar: &Path,
+) -> Result<(), AppError> {
+    let resources = sidecar.parent().unwrap_or_else(|| Path::new("")).join("resources");
+    let mut settings = get(pool).await?;
+    let mut changed = false;
+
+    let yunet = resources.join(BUNDLED_MODELS_REL).join("face_detection_yunet_2023mar.onnx");
+    if settings.yunet_model_path.is_none() && yunet.is_file() {
+        settings.yunet_model_path = Some(yunet.to_string_lossy().into_owned());
+        changed = true;
+    }
+    let sface = resources.join(BUNDLED_MODELS_REL).join("face_recognition_sface_2021dec.onnx");
+    if settings.sface_model_path.is_none() && sface.is_file() {
+        settings.sface_model_path = Some(sface.to_string_lossy().into_owned());
+        changed = true;
+    }
+    if settings.font_path.is_none() {
+        let bundled_font = resources.join(BUNDLED_FONTS_REL).join("SmileySans-Oblique.ttf");
+        if bundled_font.is_file() {
+            std::fs::create_dir_all(app_local_dir.join("fonts"))?;
+            let target = app_local_dir.join("fonts").join("SmileySans-Oblique.ttf");
+            if !target.is_file() {
+                std::fs::copy(&bundled_font, &target)?;
+            }
+            settings.font_path = Some(target.to_string_lossy().into_owned());
+            changed = true;
+        }
+    }
+    if changed {
+        update(
+            pool,
+            UpdateVisionSettingsInput {
+                settings: settings.clone(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
 
 pub async fn get(pool: &SqlitePool) -> Result<VisionSettings, AppError> {
     let value: Option<String> = sqlx::query_scalar("SELECT value_json FROM settings WHERE key = ?")
@@ -167,6 +292,112 @@ mod tests {
         assert_eq!(
             get(&pool).await.expect("read").yunet_model_path,
             saved.yunet_model_path
+        );
+    }
+
+    #[test]
+    fn sidecar_resolution_prefers_the_bundled_executable() {
+        let install = tempdir().expect("tempdir");
+        let sidecar = install.path().join("scene-vault-ai.exe");
+        std::fs::write(&sidecar, b"exe").expect("sidecar");
+
+        assert_eq!(
+            sidecar_executable_in(install.path()),
+            Some(sidecar.clone())
+        );
+
+        let settings = VisionSettings {
+            python_executable_path: Some("C:\\python.exe".to_owned()),
+            python_module_root: Some("C:\\src".to_owned()),
+            yunet_model_path: None,
+            sface_model_path: None,
+            recognizer: None,
+            arcface_model_path: None,
+            font_path: None,
+        };
+        // The sidecar wins over a configured Python executable.
+        assert!(matches!(
+            engine_runtime_with(&settings, Some(&sidecar)),
+            Some(EngineRuntime::Sidecar { .. })
+        ));
+        // Without a sidecar the configured Python is used.
+        assert!(matches!(
+            engine_runtime_with(&settings, None),
+            Some(EngineRuntime::Python { .. })
+        ));
+        // Neither present: no runtime.
+        let empty = VisionSettings::default();
+        assert!(engine_runtime_with(&empty, None).is_none());
+    }
+
+    #[test]
+    fn sidecar_is_not_found_when_absent() {
+        let install = tempdir().expect("tempdir");
+        assert!(sidecar_executable_in(install.path()).is_none());
+    }
+
+    #[tokio::test]
+    async fn autoconfigure_fills_bundled_models_and_font_without_overwriting() {
+        let pool = db::test_pool().await;
+        let install = tempdir().expect("install dir");
+        let app_local = tempdir().expect("app local dir");
+
+        let sidecar = install.path().join("scene-vault-ai.exe");
+        std::fs::write(&sidecar, b"exe").expect("sidecar");
+        let models = install.path().join("resources/models");
+        let fonts = install.path().join("resources/fonts");
+        std::fs::create_dir_all(&models).expect("models dir");
+        std::fs::create_dir_all(&fonts).expect("fonts dir");
+        let yunet = models.join("face_detection_yunet_2023mar.onnx");
+        let sface = models.join("face_recognition_sface_2021dec.onnx");
+        let font = fonts.join("SmileySans-Oblique.ttf");
+        std::fs::write(&yunet, b"yunet").expect("yunet");
+        std::fs::write(&sface, b"sface").expect("sface");
+        std::fs::write(&font, b"font").expect("font");
+
+        // First run: everything missing is filled from the bundle.
+        autoconfigure_bundled_with(&pool, app_local.path(), &sidecar)
+            .await
+            .expect("autoconfigure");
+        let settings = get(&pool).await.expect("read");
+        assert_eq!(settings.yunet_model_path, Some(yunet.to_string_lossy().into_owned()));
+        assert_eq!(settings.sface_model_path, Some(sface.to_string_lossy().into_owned()));
+        assert!(settings.font_path.is_some());
+        assert!(app_local.path().join("fonts/SmileySans-Oblique.ttf").is_file());
+
+        // User-configured values are never overwritten.
+        let custom_yunet = install.path().join("custom-yunet.onnx");
+        std::fs::write(&custom_yunet, b"custom").expect("custom yunet");
+        let custom_python = install.path().join("custom-python.exe");
+        std::fs::write(&custom_python, b"python").expect("custom python");
+        std::fs::create_dir_all(install.path().join("custom-src")).expect("custom src");
+        let custom = VisionSettings {
+            python_executable_path: Some(custom_python.to_string_lossy().into_owned()),
+            python_module_root: Some(
+                install.path().join("custom-src").to_string_lossy().into_owned(),
+            ),
+            yunet_model_path: Some(custom_yunet.to_string_lossy().into_owned()),
+            sface_model_path: None,
+            recognizer: Some("sface".to_owned()),
+            arcface_model_path: None,
+            font_path: None,
+        };
+        update(
+            &pool,
+            UpdateVisionSettingsInput {
+                settings: custom.clone(),
+            },
+        )
+        .await
+        .expect("save custom");
+        autoconfigure_bundled_with(&pool, app_local.path(), &sidecar)
+            .await
+            .expect("autoconfigure again");
+        let settings = get(&pool).await.expect("read again");
+        assert_eq!(settings.yunet_model_path, custom.yunet_model_path);
+        assert_eq!(
+            settings.sface_model_path,
+            Some(sface.to_string_lossy().into_owned())
         );
     }
 }
