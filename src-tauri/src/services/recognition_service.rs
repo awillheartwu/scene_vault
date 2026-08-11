@@ -1,4 +1,5 @@
 use sqlx::SqlitePool;
+use std::path::{Path, PathBuf};
 
 use crate::{
     error::AppError,
@@ -1277,10 +1278,19 @@ pub async fn face_bank_model_status(
     .fetch_all(pool)
     .await?;
     let vision = vision_settings_service::get(pool).await?;
-    let (active_model_id, active_model_version) = match vision.recognizer.as_deref() {
-        Some("arcface") => ("arcface-r50".to_owned(), "w600k-r50".to_owned()),
-        _ => (FACE_MODEL_ID.to_owned(), FACE_MODEL_VERSION.to_owned()),
+    let (active_model_id, base_version, model_path) = match vision.recognizer.as_deref() {
+        Some("arcface") => (
+            "arcface-r50".to_owned(),
+            "w600k-r50",
+            vision.arcface_model_path.as_deref(),
+        ),
+        _ => (
+            FACE_MODEL_ID.to_owned(),
+            FACE_MODEL_VERSION,
+            vision.sface_model_path.as_deref(),
+        ),
     };
+    let active_model_version = model_version_with_fingerprint(base_version, model_path).await;
     let sample_count = rows.iter().map(|(_, _, count)| *count).sum();
     let incompatible_sample_count = rows
         .iter()
@@ -1312,4 +1322,34 @@ pub async fn face_bank_model_status(
         compatible,
         model_counts,
     })
+}
+
+async fn model_version_with_fingerprint(base_version: &str, model_path: Option<&str>) -> String {
+    let Some(model_path) = model_path.map(PathBuf::from) else {
+        return base_version.to_owned();
+    };
+    let base_version = base_version.to_owned();
+    tokio::task::spawn_blocking(move || sha256_prefix(&model_path))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|fingerprint| format!("{base_version}+sha256:{fingerprint}"))
+        .unwrap_or(base_version)
+}
+
+fn sha256_prefix(path: &Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize())[..16].to_owned())
 }

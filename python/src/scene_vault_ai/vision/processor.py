@@ -217,6 +217,37 @@ class ScreenshotProcessor:
             if face_box is not None
             else None
         )
+        warnings: list[str] = []
+        if self.request.detect_face and face_box is None:
+            warnings.append("face_not_detected")
+        if self.request.crop_avatar and face_box is None:
+            warnings.append("avatar_not_generated")
+        face_feature: list[float] | None = None
+        feature_ms = 0.0
+        if face_box is not None:
+            if self.extractor_error is not None:
+                warnings.append(self.extractor_error)
+            elif self.feature_extractor is not None:
+                self._progress("extract_feature", 45.0)
+                phase_started = perf_counter()
+                try:
+                    face_feature = self.feature_extractor.extract(image_bgr, face_box)
+                    model_id = type(self.feature_extractor).MODEL_ID
+                    model_version = getattr(
+                        self.feature_extractor,
+                        "model_version",
+                        type(self.feature_extractor).MODEL_VERSION,
+                    )
+                except Exception as error:
+                    # Optional feature extraction must never fail the whole
+                    # screenshot processing pipeline.
+                    warnings.append(f"feature_failed: {error}")
+                    self._discard_failed_extractor()
+                    face_feature = None
+                    model_id = None
+                    model_version = None
+                feature_ms = _elapsed_ms(phase_started)
+
         outputs: list[tuple[Any, Path]] = []
         annotate_ms = 0.0
         crop_ms = 0.0
@@ -256,33 +287,6 @@ class ScreenshotProcessor:
         _save_images_atomically(outputs)
         write_ms = _elapsed_ms(phase_started)
         self._progress("done", 100.0)
-
-        warnings: list[str] = []
-        if self.request.detect_face and face_box is None:
-            warnings.append("face_not_detected")
-        if self.request.crop_avatar and face_box is None:
-            warnings.append("avatar_not_generated")
-        face_feature: list[float] | None = None
-        feature_ms = 0.0
-        if face_box is not None:
-            if self.extractor_error is not None:
-                warnings.append(self.extractor_error)
-            elif self.feature_extractor is not None:
-                self._progress("extract_feature", 45.0)
-                phase_started = perf_counter()
-                try:
-                    face_feature = self.feature_extractor.extract(image_bgr, face_box)
-                    model_id = type(self.feature_extractor).MODEL_ID
-                    model_version = type(self.feature_extractor).MODEL_VERSION
-                except Exception as error:
-                    # Optional feature extraction must never fail the whole
-                    # screenshot processing pipeline.
-                    warnings.append(f"feature_failed: {error}")
-                    self._discard_failed_extractor()
-                    face_feature = None
-                    model_id = None
-                    model_version = None
-                feature_ms = _elapsed_ms(phase_started)
 
         return ProcessingResult(
             input_path=self.request.input_path,

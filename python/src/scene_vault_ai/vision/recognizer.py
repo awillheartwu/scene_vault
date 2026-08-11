@@ -7,6 +7,7 @@ Rust side, so this module never holds per-character state.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,10 @@ class SfaceFeatureExtractor:
                 },
             )
         self.recognizer = factory(str(config.model_path), "")
+        self.model_version = _fingerprinted_version(
+            self.MODEL_VERSION,
+            config.model_path,
+        )
 
     def extract(self, image_bgr: Any, face: FaceBox) -> list[float]:
         """Aligns the primary face and returns the SFace feature vector."""
@@ -115,6 +120,10 @@ class ArcfaceFeatureExtractor:
         import cv2
 
         self._net = cv2.dnn.readNetFromONNX(str(config.model_path))
+        self.model_version = _fingerprinted_version(
+            self.MODEL_VERSION,
+            config.model_path,
+        )
 
     def extract(self, image_bgr: Any, face: FaceBox) -> list[float]:
         """Aligns the face with its five landmarks and returns the 512-d
@@ -149,3 +158,11 @@ class ArcfaceFeatureExtractor:
         self._net.setInput(blob)
         embedding = self._net.forward()
         return [float(value) for value in embedding.reshape(-1)]
+
+
+def _fingerprinted_version(version: str, model_path: Path) -> str:
+    digest = hashlib.sha256()
+    with model_path.open("rb") as model_file:
+        for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"{version}+sha256:{digest.hexdigest()[:16]}"

@@ -1771,6 +1771,20 @@ async fn model_status_reports_every_group_and_mixed_bank_as_incompatible() {
 }
 
 #[tokio::test]
+async fn configured_model_version_uses_the_same_content_fingerprint_as_python() {
+    let temporary = tempdir().expect("temporary model directory");
+    let model_path = temporary.path().join("sface.onnx");
+    std::fs::write(&model_path, b"first-model").expect("write model");
+
+    let first = model_version_with_fingerprint(FACE_MODEL_VERSION, model_path.to_str()).await;
+    std::fs::write(&model_path, b"second-model").expect("replace model");
+    let second = model_version_with_fingerprint(FACE_MODEL_VERSION, model_path.to_str()).await;
+
+    assert!(first.starts_with("2021dec+sha256:"));
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
 async fn tiny_background_faces_are_not_enrolled_and_warn() {
     let pool = db::test_pool().await;
     let fixture = fixture(&pool).await;

@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt},
     process::Command,
+    task::JoinHandle,
 };
 
 use crate::{
@@ -334,11 +335,12 @@ pub(super) async fn invoke_process(
                     truncate(&worker_error.to_string().replace(['\r', '\n'], " | "), 500)
                 ),
             );
-            let stdin = serde_json::to_vec(&request).map_err(|error| {
+            let remaining = remaining_timeout(request_started, PROCESS_TIMEOUT)?;
+            let fallback_request = legacy_oneshot_request(&request);
+            let stdin = serde_json::to_vec(&fallback_request).map_err(|error| {
                 AppError::Vision(format!("cannot encode vision request: {error}"))
             })?;
-            match invoke_with_progress(settings, "request", Some(&stdin), PROCESS_TIMEOUT, progress)
-                .await
+            match invoke_with_progress(settings, "request", Some(&stdin), remaining, progress).await
             {
                 Ok((response, invocation)) => (
                     response,
@@ -482,10 +484,10 @@ async fn invoke_with_progress(
     // Stream SVPROGRESS lines from stderr while stdout keeps the single JSON
     // response contract. Old Python versions never write progress lines, so
     // this degrades gracefully to no progress events.
-    if progress.is_some() {
+    let stderr_task = if progress.is_some() {
         if let Some(stderr) = child.stderr.take() {
             let mut callback = progress.take().expect("progress checked above");
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Some((stage, percent)) = parse_progress_line(&line) {
@@ -497,29 +499,68 @@ async fn invoke_with_progress(
                         );
                     }
                 }
-            });
+            }))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(bytes) = stdin {
+        let Some(mut child_stdin) = child.stdin.take() else {
+            abort_stderr_task(stderr_task).await;
+            return Err(AppError::Vision("cannot open Python stdin".to_owned()));
+        };
+        let remaining = match remaining_timeout(invocation_started, timeout) {
+            Ok(remaining) => remaining,
+            Err(error) => {
+                abort_stderr_task(stderr_task).await;
+                return Err(error);
+            }
+        };
+        let write_result = tokio::time::timeout(remaining, async {
+            child_stdin.write_all(bytes).await.map_err(|error| {
+                AppError::Vision(format!("cannot write Python request: {error}"))
+            })?;
+            child_stdin
+                .shutdown()
+                .await
+                .map_err(|error| AppError::Vision(format!("cannot close Python stdin: {error}")))
+        })
+        .await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                abort_stderr_task(stderr_task).await;
+                return Err(error);
+            }
+            Err(_) => {
+                abort_stderr_task(stderr_task).await;
+                return Err(AppError::Vision("Python request timed out".to_owned()));
+            }
         }
     }
 
-    if let Some(bytes) = stdin {
-        let mut child_stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AppError::Vision("cannot open Python stdin".to_owned()))?;
-        child_stdin
-            .write_all(bytes)
-            .await
-            .map_err(|error| AppError::Vision(format!("cannot write Python request: {error}")))?;
-        child_stdin
-            .shutdown()
-            .await
-            .map_err(|error| AppError::Vision(format!("cannot close Python stdin: {error}")))?;
-    }
-
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| AppError::Vision("Python request timed out".to_owned()))?
-        .map_err(|error| AppError::Vision(format!("Python process failed: {error}")))?;
+    let remaining = match remaining_timeout(invocation_started, timeout) {
+        Ok(remaining) => remaining,
+        Err(error) => {
+            abort_stderr_task(stderr_task).await;
+            return Err(error);
+        }
+    };
+    let output = match tokio::time::timeout(remaining, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            abort_stderr_task(stderr_task).await;
+            return Err(AppError::Vision(format!("Python process failed: {error}")));
+        }
+        Err(_) => {
+            abort_stderr_task(stderr_task).await;
+            return Err(AppError::Vision("Python request timed out".to_owned()));
+        }
+    };
+    finish_stderr_task(stderr_task).await;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if !stderr.is_empty() {
         log_service::debug(
@@ -558,6 +599,40 @@ async fn invoke_with_progress(
             total_ms: elapsed_ms(invocation_started),
         },
     ))
+}
+
+async fn abort_stderr_task(task: Option<JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+async fn finish_stderr_task(task: Option<JoinHandle<()>>) {
+    if let Some(mut task) = task {
+        if tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+fn legacy_oneshot_request(request: &Value) -> Value {
+    let mut request = request.clone();
+    if let Some(object) = request.as_object_mut() {
+        object.remove("requestId");
+    }
+    request
+}
+
+fn remaining_timeout(started: Instant, total: Duration) -> Result<Duration, AppError> {
+    total
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| AppError::Vision("Python request timed out".to_owned()))
 }
 
 /// Parses one `SVPROGRESS {"stage": "...", "percent": N}` line. Lines without
@@ -780,6 +855,31 @@ mod tests {
         assert_eq!(timings.detect_ms, Some(34.25));
         assert_eq!(timings.service_total_ms, Some(50.0));
         assert_eq!(timings.read_ms, None);
+    }
+
+    #[test]
+    fn legacy_oneshot_fallback_omits_worker_request_id() {
+        let request = json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "requestId": "worker-only-id",
+            "action": "processScreenshot",
+            "payload": {"inputPath": "C:\\input.png"}
+        });
+
+        let fallback = legacy_oneshot_request(&request);
+
+        assert!(fallback.get("requestId").is_none());
+        assert_eq!(fallback["action"], "processScreenshot");
+        assert_eq!(fallback["payload"], request["payload"]);
+    }
+
+    #[test]
+    fn exhausted_request_budget_returns_timeout() {
+        let started = Instant::now() - Duration::from_millis(10);
+        let error = remaining_timeout(started, Duration::from_millis(1))
+            .expect_err("exhausted budget should time out");
+
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[test]

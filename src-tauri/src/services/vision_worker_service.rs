@@ -87,15 +87,18 @@ pub(super) async fn invoke(
     timeout: Duration,
     progress: &mut Option<ProgressCallback>,
 ) -> Result<WorkerInvocation, AppError> {
+    let started = Instant::now();
     if is_shutdown_requested() {
         return Err(AppError::Vision(
             "Python worker shutdown is in progress".to_owned(),
         ));
     }
-    manager()
-        .lock()
+    let mut manager = tokio::time::timeout(timeout, manager().lock())
         .await
-        .invoke(settings, request, request_id, timeout, progress)
+        .map_err(|_| AppError::Vision("Python worker request timed out".to_owned()))?;
+    let remaining = remaining_timeout(started, timeout)?;
+    manager
+        .invoke(settings, request, request_id, remaining, progress)
         .await
 }
 
@@ -131,6 +134,7 @@ impl VisionWorkerManager {
         timeout: Duration,
         progress: &mut Option<ProgressCallback>,
     ) -> Result<WorkerInvocation, AppError> {
+        let invocation_started = Instant::now();
         if is_shutdown_requested() {
             return Err(AppError::Vision(
                 "Python worker shutdown is in progress".to_owned(),
@@ -156,7 +160,9 @@ impl VisionWorkerManager {
                 ));
             }
             let started = Instant::now();
-            match WorkerProcess::start(settings).await {
+            let startup_timeout =
+                remaining_timeout(invocation_started, timeout)?.min(START_TIMEOUT);
+            match WorkerProcess::start(settings, startup_timeout).await {
                 Ok(worker) => {
                     let startup_elapsed_ms = elapsed_ms(started);
                     log_service::info(
@@ -182,18 +188,24 @@ impl VisionWorkerManager {
             }
         }
 
-        let started = Instant::now();
+        let remaining = remaining_timeout(invocation_started, timeout)?;
         let result = self
             .worker
             .as_mut()
             .expect("worker initialized above")
-            .call(request, request_id, "processScreenshot", timeout, progress)
+            .call(
+                request,
+                request_id,
+                "processScreenshot",
+                remaining,
+                progress,
+            )
             .await;
         match result {
             Ok(response) => Ok(WorkerInvocation {
                 response,
                 startup_ms,
-                total_ms: elapsed_ms(started),
+                total_ms: elapsed_ms(invocation_started),
             }),
             Err(error) => {
                 log_service::warn(
@@ -213,7 +225,11 @@ impl VisionWorkerManager {
 }
 
 impl WorkerProcess {
-    async fn start(settings: &VisionSettings) -> Result<Self, AppError> {
+    async fn start(
+        settings: &VisionSettings,
+        handshake_timeout: Duration,
+    ) -> Result<Self, AppError> {
+        let started = Instant::now();
         let executable = settings
             .python_executable_path
             .as_deref()
@@ -261,12 +277,13 @@ impl WorkerProcess {
             "payload": {}
         });
         let mut progress = None;
+        let handshake_timeout = remaining_timeout(started, handshake_timeout)?;
         let response = worker
             .call(
                 &request,
                 &request_id,
                 "health",
-                START_TIMEOUT,
+                handshake_timeout,
                 &mut progress,
             )
             .await?;
@@ -286,6 +303,7 @@ impl WorkerProcess {
         timeout: Duration,
         progress: &mut Option<ProgressCallback>,
     ) -> Result<EngineResponse, AppError> {
+        let started = Instant::now();
         if let Some(status) = self
             .child
             .try_wait()
@@ -298,14 +316,19 @@ impl WorkerProcess {
         let mut bytes = serde_json::to_vec(request)
             .map_err(|error| AppError::Vision(format!("cannot encode worker request: {error}")))?;
         bytes.push(b'\n');
-        self.stdin.write_all(&bytes).await.map_err(|error| {
-            AppError::Vision(format!("cannot write Python worker request: {error}"))
-        })?;
-        self.stdin.flush().await.map_err(|error| {
-            AppError::Vision(format!("cannot flush Python worker request: {error}"))
-        })?;
+        tokio::time::timeout(timeout, async {
+            self.stdin.write_all(&bytes).await.map_err(|error| {
+                AppError::Vision(format!("cannot write Python worker request: {error}"))
+            })?;
+            self.stdin.flush().await.map_err(|error| {
+                AppError::Vision(format!("cannot flush Python worker request: {error}"))
+            })
+        })
+        .await
+        .map_err(|_| AppError::Vision("Python worker request timed out".to_owned()))??;
 
-        let response = self.read_response(request_id, timeout, progress).await?;
+        let remaining = remaining_timeout(started, timeout)?;
+        let response = self.read_response(request_id, remaining, progress).await?;
         validate_response(&response, request_id, expected_action)?;
         if expected_action == "processScreenshot" && response.ok {
             let data = response.data.as_ref().ok_or_else(|| {
@@ -479,6 +502,13 @@ fn shutdown_notify() -> &'static Notify {
 
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn remaining_timeout(started: Instant, total: Duration) -> Result<Duration, AppError> {
+    total
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| AppError::Vision("Python worker request timed out".to_owned()))
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -695,6 +725,8 @@ if sys.argv[1] == "worker":
     raise SystemExit(3)
 
 request = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+if "requestId" in request:
+    raise SystemExit("legacy one-shot protocol rejects requestId")
 write_response(request, "processScreenshot", {
     "annotatedPath": None,
     "avatarPath": None,

@@ -417,7 +417,9 @@ mod tests {
         // on wall-clock gaps: coarse filesystems round mtimes down, which
         // would otherwise make this test timing-dependent.
         let old = std::time::UNIX_EPOCH + Duration::from_secs(1);
-        std::fs::File::open(&image)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
             .expect("open image")
             .set_times(std::fs::FileTimes::new().set_modified(old))
             .expect("pin mtime");

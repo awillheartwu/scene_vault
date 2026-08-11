@@ -20,6 +20,25 @@ SfaceFactory = Callable[[SfaceConfig], SfaceFeatureExtractor]
 ArcfaceFactory = Callable[[ArcfaceConfig], ArcfaceFeatureExtractor]
 
 
+@dataclass(frozen=True, slots=True)
+class ModelFileIdentity:
+    path: Path
+    size: int
+    modified_ns: int
+
+    @classmethod
+    def read(cls, path: Path) -> "ModelFileIdentity | None":
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return cls(
+            path=path,
+            size=stat.st_size,
+            modified_ns=stat.st_mtime_ns,
+        )
+
+
 @dataclass(slots=True)
 class VisionModelCache:
     """Caches one active instance per model type.
@@ -34,41 +53,51 @@ class VisionModelCache:
     detector_factory: DetectorFactory = YuNetFaceDetector
     sface_factory: SfaceFactory = SfaceFeatureExtractor
     arcface_factory: ArcfaceFactory = ArcfaceFeatureExtractor
-    _detector: tuple[YuNetConfig, FaceDetector] | None = field(
+    _detector: tuple[YuNetConfig, ModelFileIdentity, FaceDetector] | None = field(
         default=None,
         init=False,
         repr=False,
     )
-    _sface: tuple[Path, SfaceFeatureExtractor] | None = field(
+    _sface: tuple[ModelFileIdentity, SfaceFeatureExtractor] | None = field(
         default=None,
         init=False,
         repr=False,
     )
-    _arcface: tuple[Path, ArcfaceFeatureExtractor] | None = field(
+    _arcface: tuple[ModelFileIdentity, ArcfaceFeatureExtractor] | None = field(
         default=None,
         init=False,
         repr=False,
     )
 
     def get_detector(self, config: YuNetConfig) -> FaceDetector:
-        if self._detector is not None and self._detector[0] == config:
-            return self._detector[1]
+        identity = ModelFileIdentity.read(config.model_path)
+        if (
+            identity is not None
+            and self._detector is not None
+            and self._detector[:2] == (config, identity)
+        ):
+            return self._detector[2]
         detector = self.detector_factory(config)
-        self._detector = (config, detector)
+        identity = ModelFileIdentity.read(config.model_path)
+        self._detector = (config, identity, detector) if identity is not None else None
         return detector
 
     def get_sface(self, model_path: Path) -> SfaceFeatureExtractor:
-        if self._sface is not None and self._sface[0] == model_path:
+        identity = ModelFileIdentity.read(model_path)
+        if identity is not None and self._sface is not None and self._sface[0] == identity:
             return self._sface[1]
         extractor = self.sface_factory(SfaceConfig(model_path))
-        self._sface = (model_path, extractor)
+        identity = ModelFileIdentity.read(model_path)
+        self._sface = (identity, extractor) if identity is not None else None
         return extractor
 
     def get_arcface(self, model_path: Path) -> ArcfaceFeatureExtractor:
-        if self._arcface is not None and self._arcface[0] == model_path:
+        identity = ModelFileIdentity.read(model_path)
+        if identity is not None and self._arcface is not None and self._arcface[0] == identity:
             return self._arcface[1]
         extractor = self.arcface_factory(ArcfaceConfig(model_path))
-        self._arcface = (model_path, extractor)
+        identity = ModelFileIdentity.read(model_path)
+        self._arcface = (identity, extractor) if identity is not None else None
         return extractor
 
     def discard_detector(self, config: YuNetConfig) -> None:
@@ -76,11 +105,11 @@ class VisionModelCache:
             self._detector = None
 
     def discard_sface(self, model_path: Path) -> None:
-        if self._sface is not None and self._sface[0] == model_path:
+        if self._sface is not None and self._sface[0].path == model_path:
             self._sface = None
 
     def discard_arcface(self, model_path: Path) -> None:
-        if self._arcface is not None and self._arcface[0] == model_path:
+        if self._arcface is not None and self._arcface[0].path == model_path:
             self._arcface = None
 
     def clear(self) -> None:

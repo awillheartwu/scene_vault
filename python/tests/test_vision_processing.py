@@ -13,6 +13,7 @@ from scene_vault_ai.vision.config import AnnotationConfig, CropConfig, YuNetConf
 from scene_vault_ai.vision.recognizer import (
     ArcfaceConfig,
     ArcfaceFeatureExtractor,
+    _fingerprinted_version,
 )
 from scene_vault_ai.vision.processor import dependencies_available
 from scene_vault_ai.vision.types import FaceBox
@@ -75,6 +76,17 @@ class ArcfaceIdentityTests(unittest.TestCase):
             ArcfaceFeatureExtractor(
                 ArcfaceConfig(Path("missing-arcface.onnx"))
             )
+
+    def test_model_version_fingerprint_changes_with_model_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_path = Path(temporary_directory) / "model.onnx"
+            model_path.write_bytes(b"first-model")
+            first = _fingerprinted_version("v1", model_path)
+            model_path.write_bytes(b"second-model")
+            second = _fingerprinted_version("v1", model_path)
+
+        self.assertTrue(first.startswith("v1+sha256:"))
+        self.assertNotEqual(first, second)
 
 
 @unittest.skipUnless(
@@ -314,24 +326,40 @@ class VisionProcessingTests(unittest.TestCase):
             )
 
     def test_reports_stage_progress_in_order(self) -> None:
+        from unittest.mock import patch
+
         from PIL import Image
+
+        from scene_vault_ai.vision import processor as processor_module
+
+        class FakeSfaceExtractor:
+            MODEL_ID = "opencv-sface"
+            MODEL_VERSION = "2021dec"
+
+            def __init__(self, _config: object) -> None:
+                self.model_version = "2021dec+sha256:test"
+
+            def extract(self, _image_bgr: object, _face: object) -> list[float]:
+                return [0.25, 0.5, 0.75]
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             Image.new("RGB", (480, 270), color=(20, 30, 40)).save(root / "输入.png")
+            (root / "sface.onnx").write_bytes(b"model")
             events: list[tuple[str, float]] = []
-            processor = ScreenshotProcessor(
-                self._request(root, sface_model_path=None),
-                detector_factory=lambda _config: FixedFaceDetector(
-                    FaceBox(x=10, y=10, width=60, height=60)
-                ),
-                progress=lambda stage, percent: events.append((stage, percent)),
-            )
-            processor.process()
+            with patch.object(processor_module, "SfaceFeatureExtractor", FakeSfaceExtractor):
+                processor = ScreenshotProcessor(
+                    self._request(root, sface_model_path=root / "sface.onnx"),
+                    detector_factory=lambda _config: FixedFaceDetector(
+                        FaceBox(x=10, y=10, width=60, height=60)
+                    ),
+                    progress=lambda stage, percent: events.append((stage, percent)),
+                )
+                processor.process()
             stages = [stage for stage, _ in events]
             self.assertEqual(
                 stages,
-                ["read", "detect_face", "annotate", "done"],
+                ["read", "detect_face", "extract_feature", "annotate", "done"],
             )
             self.assertEqual(events[-1], ("done", 100.0))
             percents = [percent for _, percent in events]
