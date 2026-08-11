@@ -164,7 +164,7 @@ pub async fn process_screenshot(
     processing_settings: &ProcessingSettings,
     progress: Option<ProgressCallback>,
 ) -> Result<VisionProcessData, AppError> {
-    if !vision_settings_service::is_configured(settings) {
+    if !vision_settings_service::is_engine_available(settings) {
         return Err(AppError::Vision(
             "vision engine is not configured".to_owned(),
         ));
@@ -205,7 +205,7 @@ pub async fn extract_face_feature(
     processing_settings: &ProcessingSettings,
     progress: Option<ProgressCallback>,
 ) -> Result<VisionProcessData, AppError> {
-    if !vision_settings_service::is_configured(settings) {
+    if !vision_settings_service::is_engine_available(settings) {
         return Err(AppError::Vision(
             "vision engine is not configured".to_owned(),
         ));
