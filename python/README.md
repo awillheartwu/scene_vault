@@ -4,7 +4,7 @@
 Python 只处理 Rust 指定的一张本地图片，不扫描目录、不操作 SQLite，也不直接写入
 NAS。
 
-当前引擎版本为 `0.4.0`，协议版本为 `1`，已提供：
+当前引擎版本为 `0.5.0`，协议版本为 `1`，已提供：
 
 - 严格的 JSON 请求校验和机器可读错误；
 - Windows Unicode 路径图片读取；
@@ -40,9 +40,33 @@ python -m scene_vault_ai health
 ```
 
 `request` 从标准输入读取一个 JSON object。标准输出始终只有一行 JSON；日志只写入
-标准错误。成功退出码为 `0`，协议、配置或处理错误的退出码为 `1`。当前命令每次处理
+标准错误。成功退出码为 `0`，协议、配置或处理错误的退出码为 `1`。`request` 每次处理
 一个请求后退出；常驻 worker 的分阶段方案见
 [常驻 Python 视觉 Worker 决策](../docs/decisions/2026-08-11-persistent-python-worker.md)。
+
+## 常驻 worker
+
+`worker` 在同一个进程内从 stdin 逐行读取 JSON，并为每行向 stdout 写出一行响应：
+
+```powershell
+$requests = @(
+  '{"protocolVersion":1,"requestId":"health-1","action":"health","payload":{}}',
+  '{"protocolVersion":1,"requestId":"health-2","action":"health","payload":{}}'
+) -join "`n"
+$requests | python -m scene_vault_ai worker
+```
+
+- 输入输出均为 UTF-8 JSON Lines；空行忽略，单行最大 1 MiB。
+- 单个请求的 JSON、协议或处理错误只返回该请求的错误响应，不终止 worker。
+- stdin 到达 EOF 时正常退出；桌面端后续负责超时、崩溃重启与关闭生命周期。
+- 请求串行执行。YuNet 按完整检测配置缓存，SFace / ArcFace 按模型路径分别缓存；配置
+  或路径变化会替换对应旧实例，加载失败不会进入缓存，推理异常会淘汰对应实例以便
+  下一请求重新加载。
+- 进度继续写 stderr，格式为 `SVPROGRESS` JSON，并在请求提供 ID 时包含
+  `requestId`。stdout 不允许写日志或非协议内容。
+
+当前 Rust 主程序尚未切换到 `worker`，仍使用 `request` 作为稳定路径。这样可以先独立
+验证 Python 多请求与缓存语义，再在下一阶段接入 Rust Worker Manager。
 
 ## processScreenshot
 

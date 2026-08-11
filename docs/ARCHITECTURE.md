@@ -52,8 +52,11 @@ queued ──► processing ──► archive_pending ──► completed
 
 ## Python AI 协议
 
-Rust 通过版本化 JSON 请求启动 Python 单图任务。标准输出只能包含机器可读响应，日志
-和带 `SVPROGRESS` 前缀的阶段进度写入标准错误；Rust 将进度转发为 Tauri 事件。
+Rust 当前通过版本化 JSON 请求启动 Python 单图任务。Python 同时提供常驻 `worker`
+命令，以 JSON Lines 串行处理多个请求并复用 YuNet、SFace 和 ArcFace 模型实例；Rust
+Worker Manager 接入前，桌面端仍默认使用一次性 `request`。两种模式的标准输出都只能
+包含机器可读响应，日志和带 `SVPROGRESS` 前缀的阶段进度写入标准错误；Rust 将进度
+转发为 Tauri 事件。
 
 ```text
 Rust AI Service

@@ -395,20 +395,82 @@ class VisionProcessingTests(unittest.TestCase):
 
             process = subprocess.run(
                 [sys.executable, "-m", "scene_vault_ai", "request"],
-                input=json.dumps(request, ensure_ascii=False),
+                input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
                 check=False,
                 capture_output=True,
-                text=True,
             )
-            response = json.loads(process.stdout)
+            stdout = process.stdout.decode("utf-8")
+            stderr = process.stderr.decode("utf-8")
+            response = json.loads(stdout)
 
-            self.assertEqual(process.returncode, 0, process.stderr)
-            self.assertIn("SVPROGRESS", process.stderr)
-            self.assertIn('"stage":"done"', process.stderr)
-            self.assertEqual(len(process.stdout.strip().splitlines()), 1)
+            self.assertEqual(
+                process.returncode,
+                0,
+                stderr or stdout,
+            )
+            self.assertIn("SVPROGRESS", stderr)
+            self.assertIn('"stage":"done"', stderr)
+            self.assertEqual(len(stdout.strip().splitlines()), 1)
             self.assertTrue(response["ok"])
             self.assertEqual(response["data"]["annotatedPath"], str(output_path))
             self.assertTrue(output_path.is_file())
+
+    def test_cli_worker_processes_multiple_images_in_one_process(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory(prefix="worker-截图-") as temporary_directory:
+            root = Path(temporary_directory)
+            requests = []
+            output_paths = []
+            for index in range(2):
+                source_path = root / f"输入-{index}.png"
+                output_path = root / f"输出-{index}.png"
+                Image.new(
+                    "RGB",
+                    (320, 180),
+                    color=(40 + index, 50, 60),
+                ).save(source_path)
+                output_paths.append(output_path)
+                requests.append(
+                    {
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "requestId": f"worker-image-{index}",
+                        "action": "processScreenshot",
+                        "payload": {
+                            "inputPath": str(source_path),
+                            "annotatedOutputPath": str(output_path),
+                            "characterName": "星见",
+                            "detectFace": False,
+                            "annotate": True,
+                            "cropAvatar": False,
+                        },
+                    }
+                )
+            stdin = b"\n".join(
+                json.dumps(request, ensure_ascii=False).encode("utf-8")
+                for request in requests
+            ) + b"\n"
+
+            process = subprocess.run(
+                [sys.executable, "-m", "scene_vault_ai", "worker"],
+                input=stdin,
+                check=False,
+                capture_output=True,
+            )
+            stdout = process.stdout.decode("utf-8")
+            stderr = process.stderr.decode("utf-8")
+            responses = [json.loads(line) for line in stdout.splitlines()]
+
+            self.assertEqual(process.returncode, 0, stderr or stdout)
+            self.assertEqual(len(responses), 2)
+            self.assertTrue(all(response["ok"] for response in responses))
+            self.assertEqual(
+                [response["requestId"] for response in responses],
+                ["worker-image-0", "worker-image-1"],
+            )
+            self.assertTrue(all(path.is_file() for path in output_paths))
+            self.assertIn('"requestId":"worker-image-0"', stderr)
+            self.assertIn('"requestId":"worker-image-1"', stderr)
 
     def test_no_face_is_a_successful_degradation(self) -> None:
         from PIL import Image

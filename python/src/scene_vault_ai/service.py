@@ -18,7 +18,7 @@ from .errors import (
 )
 from .protocol import PROTOCOL_VERSION, Request, Response
 from .providers import AiProvider
-from .vision import ProcessingRequest, ScreenshotProcessor
+from .vision import ProcessingRequest, ScreenshotProcessor, VisionModelCache
 from .vision.processor import dependency_status
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class AiService:
     providers: dict[str, AiProvider] = field(default_factory=dict)
+    model_cache: VisionModelCache = field(default_factory=VisionModelCache)
 
     def handle(
         self,
@@ -70,6 +71,7 @@ class AiService:
                 processor_started = perf_counter()
                 processor = ScreenshotProcessor(
                     processing_request,
+                    model_cache=self.model_cache,
                     progress=progress,
                 )
                 processor_init_ms = _elapsed_ms(processor_started)

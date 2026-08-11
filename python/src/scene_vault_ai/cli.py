@@ -15,6 +15,7 @@ from .protocol import PROTOCOL_VERSION, Request, Response
 from .service import AiService
 
 logger = logging.getLogger(__name__)
+MAX_REQUEST_BYTES = 1024 * 1024
 
 
 def _write_response(response: Response) -> None:
@@ -42,19 +43,65 @@ def _health(service: AiService) -> int:
 
 
 def _request(service: AiService) -> int:
+    response = _handle_request_bytes(service, sys.stdin.buffer.read())
+    _write_response(response)
+    return 0 if response.ok else 1
+
+
+def _worker(service: AiService) -> int:
+    """Handles newline-delimited requests until stdin reaches EOF.
+
+    Each malformed or failed request produces one error response and leaves
+    the worker available for the next line. The host owns process timeout and
+    restart policy; this loop stays deliberately serial.
+    """
+
+    while raw_request := sys.stdin.buffer.readline(MAX_REQUEST_BYTES + 1):
+        if len(raw_request) > MAX_REQUEST_BYTES:
+            if not raw_request.endswith(b"\n"):
+                _discard_line_remainder()
+            response = _error_response(
+                InvalidRequestError(
+                    "request exceeds the worker line size limit",
+                    details={"maxBytes": MAX_REQUEST_BYTES},
+                )
+            )
+        elif not raw_request.strip():
+            continue
+        else:
+            response = _handle_request_bytes(service, raw_request)
+        _write_response(response)
+    return 0
+
+
+def _handle_request_bytes(service: AiService, raw_bytes: bytes) -> Response:
     try:
         # The Rust host always writes UTF-8; on Windows the default text-mode
         # stdin decodes with the ANSI codepage (e.g. GBK), which corrupts CJK
         # character names. Read the raw bytes and decode UTF-8 explicitly.
         raw_request = json.loads(
-            sys.stdin.buffer.read().decode("utf-8"),
+            raw_bytes.decode("utf-8"),
             object_pairs_hook=_unique_object,
             parse_constant=_reject_json_constant,
         )
         if not isinstance(raw_request, dict):
             raise InvalidRequestError("request must be a JSON object")
         request = Request.from_dict(raw_request)
-        response = service.handle(request, progress=_stderr_progress)
+        response = service.handle(
+            request,
+            progress=lambda stage, percent: _stderr_progress(
+                stage,
+                percent,
+                request_id=request.request_id,
+            ),
+        )
+    except UnicodeDecodeError as error:
+        response = _error_response(
+            InvalidJsonError(
+                "request is not valid UTF-8",
+                details={"offset": error.start},
+            )
+        )
     except json.JSONDecodeError as error:
         response = _error_response(
             InvalidJsonError(
@@ -78,26 +125,39 @@ def _request(service: AiService) -> int:
             ),
         )
 
-    _write_response(response)
-    return 0 if response.ok else 1
+    return response
 
 
-def _stderr_progress(stage: str, percent: float) -> None:
+def _stderr_progress(
+    stage: str,
+    percent: float,
+    *,
+    request_id: str | None = None,
+) -> None:
     """Streams one SVPROGRESS line per processing stage on stderr.
 
     The Rust host reads these lines incrementally and forwards them as
     progress events; stdout keeps the single-response contract untouched.
     """
 
+    payload: dict[str, str | float] = {"stage": stage, "percent": percent}
+    if request_id is not None:
+        payload["requestId"] = request_id
     print(
         "SVPROGRESS "
         + json.dumps(
-            {"stage": stage, "percent": percent},
+            payload,
             separators=(",", ":"),
         ),
         file=sys.stderr,
         flush=True,
     )
+
+
+def _discard_line_remainder() -> None:
+    while chunk := sys.stdin.buffer.readline(MAX_REQUEST_BYTES + 1):
+        if chunk.endswith(b"\n"):
+            return
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -144,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=str(PROTOCOL_VERSION),
     )
-    parser.add_argument("command", choices=("health", "request"))
+    parser.add_argument("command", choices=("health", "request", "worker"))
     return parser
 
 
@@ -155,4 +215,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "health":
         return _health(service)
+    if args.command == "worker":
+        return _worker(service)
     return _request(service)

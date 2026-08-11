@@ -1,6 +1,7 @@
 """Single-image processing extracted from the original batch workflow."""
 
 from .config import ProcessingRequest
+from .cache import VisionModelCache
 from .processor import (
     ProcessingResult,
     ProcessingTimings,
@@ -16,6 +17,7 @@ __all__ = [
     "ProcessingResult",
     "ProcessingTimings",
     "ScreenshotProcessor",
+    "VisionModelCache",
     "dependencies_available",
     "dependency_status",
 ]

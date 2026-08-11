@@ -21,6 +21,7 @@ from ..errors import (
     SceneVaultAiError,
 )
 from .annotator import ImageAnnotator
+from .cache import VisionModelCache
 from .config import ProcessingRequest, YuNetConfig
 from .cropper import AvatarCropper
 from .detector import FaceDetector, YuNetFaceDetector, select_primary_face
@@ -132,6 +133,7 @@ class ScreenshotProcessor:
         request: ProcessingRequest,
         *,
         detector_factory: DetectorFactory | None = None,
+        model_cache: VisionModelCache | None = None,
         progress: ProgressCallback | None = None,
     ) -> None:
         status = dependency_status()
@@ -152,21 +154,28 @@ class ScreenshotProcessor:
             )
         self.request = request
         self.detector_factory = detector_factory or YuNetFaceDetector
+        self.model_cache = model_cache if detector_factory is None else None
         self.progress = progress
         self.feature_extractor: SfaceFeatureExtractor | ArcfaceFeatureExtractor | None = None
         self.extractor_error: str | None = None
         if request.recognizer == "arcface":
             assert request.arcface_model_path is not None
             try:
-                self.feature_extractor = ArcfaceFeatureExtractor(
-                    ArcfaceConfig(request.arcface_model_path)
+                self.feature_extractor = (
+                    self.model_cache.get_arcface(request.arcface_model_path)
+                    if self.model_cache is not None
+                    else ArcfaceFeatureExtractor(
+                        ArcfaceConfig(request.arcface_model_path)
+                    )
                 )
             except Exception as error:
                 self.extractor_error = f"arcface_feature_failed: {error}"
         elif request.sface_model_path is not None:
             try:
-                self.feature_extractor = SfaceFeatureExtractor(
-                    SfaceConfig(request.sface_model_path)
+                self.feature_extractor = (
+                    self.model_cache.get_sface(request.sface_model_path)
+                    if self.model_cache is not None
+                    else SfaceFeatureExtractor(SfaceConfig(request.sface_model_path))
                 )
             except Exception as error:
                 self.extractor_error = f"sface_feature_failed: {error}"
@@ -183,17 +192,21 @@ class ScreenshotProcessor:
         phase_started = perf_counter()
         faces, sharpness_values, face_count = self._detect_faces(image_bgr)
         detect_ms = _elapsed_ms(phase_started)
-        face_box = (
-            select_primary_face(
+        if faces:
+            yunet_config = self.request.yunet
+            if yunet_config is None:
+                raise RuntimeError(
+                    "face detection returned results without configuration"
+                )
+            face_box = select_primary_face(
                 faces,
                 image_width=image_width,
                 image_height=image_height,
-                config=self.request.yunet,
+                config=yunet_config,
                 sharpness_values=sharpness_values,
             )
-            if faces
-            else None
-        )
+        else:
+            face_box = None
         face_sharpness = (
             sharpness_values[faces.index(face_box)]
             if face_box is not None and faces
@@ -265,6 +278,7 @@ class ScreenshotProcessor:
                     # Optional feature extraction must never fail the whole
                     # screenshot processing pipeline.
                     warnings.append(f"feature_failed: {error}")
+                    self._discard_failed_extractor()
                     face_feature = None
                     model_id = None
                     model_version = None
@@ -300,6 +314,15 @@ class ScreenshotProcessor:
     def _progress(self, stage: str, percent: float) -> None:
         if self.progress is not None:
             self.progress(stage, percent)
+
+    def _discard_failed_extractor(self) -> None:
+        if self.model_cache is None:
+            return
+        if self.request.recognizer == "arcface":
+            assert self.request.arcface_model_path is not None
+            self.model_cache.discard_arcface(self.request.arcface_model_path)
+        elif self.request.sface_model_path is not None:
+            self.model_cache.discard_sface(self.request.sface_model_path)
 
     def _load_image(self) -> tuple[Any, Any]:
         try:
@@ -352,12 +375,27 @@ class ScreenshotProcessor:
             raise RuntimeError("validated face-detection request became incomplete")
 
         try:
-            detector = self.detector_factory(self.request.yunet)
-            faces, sharpness_values = detector.detect_faces(image_bgr)
-            return faces, sharpness_values, len(faces)
+            detector = (
+                self.model_cache.get_detector(self.request.yunet)
+                if self.model_cache is not None
+                else self.detector_factory(self.request.yunet)
+            )
         except SceneVaultAiError:
             raise
         except Exception as error:
+            raise DetectionError(
+                "face detector initialization failed",
+                details={"backend": "yunet"},
+            ) from error
+
+        try:
+            faces, sharpness_values = detector.detect_faces(image_bgr)
+            return faces, sharpness_values, len(faces)
+        except Exception as error:
+            if self.model_cache is not None:
+                self.model_cache.discard_detector(self.request.yunet)
+            if isinstance(error, SceneVaultAiError):
+                raise
             raise DetectionError(
                 "face detection failed",
                 details={"backend": "yunet"},

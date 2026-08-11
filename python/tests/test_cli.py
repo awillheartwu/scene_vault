@@ -5,7 +5,7 @@ import sys
 import unittest
 from types import SimpleNamespace
 
-from scene_vault_ai.cli import _request
+from scene_vault_ai.cli import MAX_REQUEST_BYTES, _request, _worker
 from scene_vault_ai.protocol import Response
 
 
@@ -39,6 +39,16 @@ class _ByteBuffer:
         self.data += value
         return len(value)
 
+    def readline(self, size: int = -1) -> bytes:
+        if self._position >= len(self.data):
+            return b""
+        limit = len(self.data) if size < 0 else min(len(self.data), self._position + size)
+        newline = self.data.find(b"\n", self._position, limit)
+        end = newline + 1 if newline >= 0 else limit
+        chunk = self.data[self._position : end]
+        self._position = end
+        return chunk
+
     def flush(self) -> None:
         pass
 
@@ -68,6 +78,36 @@ class CliEncodingTests(unittest.TestCase):
         self.assertEqual(response["data"]["name"], "杰德")
         self.assertEqual(response["requestId"], "utf8-1")
         self.assertIn("杰德".encode("utf-8"), stdout.data)
+
+    def test_worker_rejects_oversized_line_and_reads_the_next_request(self) -> None:
+        oversized = b"x" * (MAX_REQUEST_BYTES + 10) + b"\n"
+        request = json.dumps(
+            {
+                "protocolVersion": 1,
+                "requestId": "after-large-line",
+                "action": "processScreenshot",
+                "payload": {"characterName": "星见"},
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        service = _StubService()
+        stdin = _ByteBuffer(oversized + request + b"\n")
+        stdout = _ByteBuffer()
+        old_stdin, old_stdout = sys.stdin, sys.stdout
+        sys.stdin = SimpleNamespace(buffer=stdin)
+        sys.stdout = SimpleNamespace(buffer=stdout)
+        try:
+            code = _worker(service)
+        finally:
+            sys.stdin, sys.stdout = old_stdin, old_stdout
+
+        responses = [json.loads(line) for line in stdout.data.decode("utf-8").splitlines()]
+        self.assertEqual(code, 0)
+        self.assertEqual(len(responses), 2)
+        self.assertFalse(responses[0]["ok"])
+        self.assertEqual(responses[0]["error"]["code"], "invalid_request")
+        self.assertTrue(responses[1]["ok"])
+        self.assertEqual(responses[1]["requestId"], "after-large-line")
 
 
 if __name__ == "__main__":

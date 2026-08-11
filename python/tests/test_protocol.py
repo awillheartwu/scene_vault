@@ -3,7 +3,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from scene_vault_ai.errors import InvalidRequestError
 from scene_vault_ai.protocol import PROTOCOL_VERSION, Request, Response
@@ -119,7 +119,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(response.ok)
         self.assertEqual(response.request_id, "process-1")
         parse_payload.assert_called_once_with({"inputPath": "C:/captures/one.png"})
-        processor_class.assert_called_once_with(processing_request, progress=None)
+        processor_class.assert_called_once_with(
+            processing_request,
+            model_cache=ANY,
+            progress=None,
+        )
         self.assertGreaterEqual(response.data["timings"]["processorInitMs"], 0.0)
         self.assertGreaterEqual(response.data["timings"]["serviceTotalMs"], 0.0)
 
@@ -213,6 +217,44 @@ class ProtocolTests(unittest.TestCase):
             response["error"]["code"],
             "unsupported_protocol_version",
         )
+
+    def test_cli_worker_isolates_invalid_requests_and_continues(self) -> None:
+        requests = [
+            json.dumps(
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "requestId": "worker-1",
+                    "action": "health",
+                    "payload": {},
+                }
+            ),
+            "{",
+            json.dumps(
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "requestId": "worker-2",
+                    "action": "health",
+                    "payload": {},
+                }
+            ),
+        ]
+        process = subprocess.run(
+            [sys.executable, "-m", "scene_vault_ai", "worker"],
+            input="\n".join(requests) + "\n",
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        responses = [json.loads(line) for line in process.stdout.splitlines()]
+
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(process.stderr, "")
+        self.assertEqual(len(responses), 3)
+        self.assertEqual(responses[0]["requestId"], "worker-1")
+        self.assertTrue(responses[0]["ok"])
+        self.assertEqual(responses[1]["error"]["code"], "invalid_json")
+        self.assertEqual(responses[2]["requestId"], "worker-2")
+        self.assertTrue(responses[2]["ok"])
 
     def test_cli_rejects_duplicate_fields_and_invalid_json(self) -> None:
         duplicate = run_cli(
