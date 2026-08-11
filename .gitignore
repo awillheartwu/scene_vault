@@ -32,6 +32,7 @@ python/.venv/
 # Windows release build artifacts (populated by scripts/release-windows.ps1)
 /src-tauri/binaries/
 /src-tauri/resources/models/
+/dist-release/
 
 # User-provided face benchmark datasets (game screenshots, never committed)
 python/tests/fixtures/face_eval/
