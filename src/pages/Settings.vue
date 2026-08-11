@@ -14,6 +14,7 @@ import {
   FileSearch,
   FileText,
   FolderOpen,
+  HardDrive,
   Keyboard,
   LoaderCircle,
   RotateCcw,
@@ -46,6 +47,7 @@ import ColorField from "@/components/common/ColorField.vue";
 import CornerFallbackPicker from "@/components/common/CornerFallbackPicker.vue";
 import FaceTextPositionPicker from "@/components/common/FaceTextPositionPicker.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
+import ResourceStoragePanel from "@/components/settings/ResourceStoragePanel.vue";
 import { toast } from "@/lib/toast";
 
 const NAMING_PLACEHOLDERS: [string, string][] = [
@@ -61,7 +63,7 @@ const NAMING_PLACEHOLDERS: [string, string][] = [
 
 const DEFAULT_NAMING_TEMPLATE = "{source} - {character} - {id}";
 
-type SettingsCategoryKey = "general" | "naming" | "recognition" | "processing" | "vision";
+type SettingsCategoryKey = "general" | "naming" | "recognition" | "processing" | "vision" | "resources";
 
 const CATEGORIES: { key: SettingsCategoryKey; label: string; icon: Component }[] = [
   { key: "general", label: "通用设置", icon: Settings2 },
@@ -69,6 +71,7 @@ const CATEGORIES: { key: SettingsCategoryKey; label: string; icon: Component }[]
   { key: "recognition", label: "自动角色建议", icon: ScanFace },
   { key: "processing", label: "视觉处理参数", icon: Wand2 },
   { key: "vision", label: "视觉引擎", icon: Cpu },
+  { key: "resources", label: "资源与存储", icon: HardDrive },
 ];
 
 const activeCategory = ref<SettingsCategoryKey>("general");
@@ -247,6 +250,7 @@ const dirtyByCategory = computed<Record<SettingsCategoryKey, boolean>>(() => ({
   recognition: recognitionDirty.value,
   processing: processingDirty.value,
   vision: visionDirty.value,
+  resources: false,
 }));
 const hasDirtySettings = computed(() => Object.values(dirtyByCategory.value).some(Boolean));
 
@@ -770,7 +774,7 @@ onBeforeUnmount(() => {
     <PageHeader
       eyebrow="Scene Vault"
       title="设置"
-      description="通用交互与可选 AI 引擎配置；未配置 AI 时截图发现、分类标记和历史仍然可用。"
+      description="通用交互、可选 AI 引擎与本地资源诊断；未配置 AI 时核心素材管理仍然可用。"
     >
       <template #actions>
         <Keyboard :size="30" />
@@ -1278,6 +1282,19 @@ onBeforeUnmount(() => {
             <dl><div><dt>引擎版本</dt><dd>{{ health.engineVersion || "—" }}</dd></div><div><dt>Python</dt><dd>{{ health.pythonVersion || "—" }}</dd></div><div><dt>单图处理</dt><dd>{{ health.processScreenshotAvailable ? "支持" : "不支持" }}</dd></div></dl>
             <p v-if="health.errorMessage">{{ health.errorMessage }}</p>
           </section>
+        </div>
+
+        <div
+          id="settings-pane-resources"
+          class="settings-pane"
+          role="tabpanel"
+          aria-labelledby="settings-tab-resources"
+          v-show="activeCategory === 'resources'"
+        >
+          <ResourceStoragePanel
+            v-if="activeCategory === 'resources'"
+            :recognizer="settings.recognizer"
+          />
         </div>
       </div>
     </div>

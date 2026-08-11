@@ -3,17 +3,22 @@ use tauri::{AppHandle, Emitter, State};
 use crate::{
     db::AppState,
     error::AppError,
-    models::capture::{
-        CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureSession, ClassifyPopupContext,
-        CompleteCaptureProcessingInput, DiscoverCapturesInput, DiscoverCapturesResult,
-        EndCaptureSessionInput, ImportDirectoryCapturesInput, ImportedRecognitionInput,
-        LabelCaptureInput, ListCaptureHistoryInput, ListCategoryItemsInput, MarkCaptureFailedInput,
-        ReadCaptureImageInput, RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput,
-        RetryDegradedCapturesInput, StartCaptureSessionInput, StartCaptureSessionResult,
-        UnimportedCapture,
+    models::{
+        capture::{
+            CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureSession,
+            ClassifyPopupContext, CompleteCaptureProcessingInput, DiscoverCapturesInput,
+            DiscoverCapturesResult, EndCaptureSessionInput, ImportDirectoryCapturesInput,
+            ImportedRecognitionInput, LabelCaptureInput, ListCaptureHistoryInput,
+            ListCategoryItemsInput, MarkCaptureFailedInput, ReadCaptureImageInput,
+            RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput,
+            RetryDegradedCapturesInput, StartCaptureSessionInput, StartCaptureSessionResult,
+            UnimportedCapture,
+        },
+        diagnostics::{LogLevel, LogRecord},
     },
     services::{
-        capture_archive_service, capture_discovery_service, capture_service, thumbnail_service,
+        capture_archive_service, capture_discovery_service, capture_service, log_service,
+        thumbnail_service,
     },
 };
 
@@ -22,7 +27,9 @@ pub async fn start_capture_session(
     state: State<'_, AppState>,
     input: StartCaptureSessionInput,
 ) -> Result<StartCaptureSessionResult, AppError> {
-    capture_service::start_session(&state.pool, input).await
+    let result = capture_service::start_session(&state.pool, input).await?;
+    session_event("session_started", &result.session);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -38,7 +45,9 @@ pub async fn end_capture_session(
     state: State<'_, AppState>,
     input: EndCaptureSessionInput,
 ) -> Result<CaptureSession, AppError> {
-    capture_service::end_session(&state.pool, input).await
+    let session = capture_service::end_session(&state.pool, input).await?;
+    session_event("session_ended", &session);
+    Ok(session)
 }
 
 #[tauri::command]
@@ -72,7 +81,22 @@ pub async fn discover_captures(
     state: State<'_, AppState>,
     input: DiscoverCapturesInput,
 ) -> Result<DiscoverCapturesResult, AppError> {
-    capture_discovery_service::discover(&state.pool, input).await
+    let session_id = input.session_id.clone();
+    let result = capture_discovery_service::discover(&state.pool, input).await?;
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "capture.discovery".to_owned(),
+        message: format!(
+            "discovered {} new captures from {} entries",
+            result.discovered_count, result.entries_scanned
+        ),
+        event: Some("scan_completed".to_owned()),
+        session_id: Some(session_id),
+        duration_ms: Some(result.scan_duration_ms as f64),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
+    Ok(result)
 }
 
 #[tauri::command]
@@ -80,7 +104,9 @@ pub async fn register_capture(
     state: State<'_, AppState>,
     input: RegisterCaptureInput,
 ) -> Result<CaptureItem, AppError> {
-    capture_service::register_capture(&state.pool, input).await
+    let item = capture_service::register_capture(&state.pool, input).await?;
+    item_event("registered", &item);
+    Ok(item)
 }
 
 #[tauri::command]
@@ -90,6 +116,7 @@ pub async fn label_capture(
     input: LabelCaptureInput,
 ) -> Result<CaptureItem, AppError> {
     let item = capture_service::label_capture(&state.pool, input).await?;
+    item_event("labeled", &item);
     let _ = app.emit("capture:item-updated", &item);
     Ok(item)
 }
@@ -101,6 +128,7 @@ pub async fn relabel_capture_item(
     input: RelabelCaptureInput,
 ) -> Result<CaptureItem, AppError> {
     let item = capture_service::relabel_capture_item(&state.pool, input).await?;
+    item_event("relabeled", &item);
     let _ = app.emit("capture:item-updated", &item);
     Ok(item)
 }
@@ -112,6 +140,7 @@ pub async fn retry_capture(
     input: RetryCaptureInput,
 ) -> Result<CaptureItem, AppError> {
     let item = capture_service::retry_capture(&state.pool, input).await?;
+    item_event("retry_requested", &item);
     let _ = app.emit("capture:item-updated", &item);
     Ok(item)
 }
@@ -157,6 +186,7 @@ pub async fn import_directory_captures(
         // Mirror live file discovery so the Capture page can show imported
         // screenshots immediately without waiting for a reload.
         let _ = app.emit("capture:item-created", item);
+        item_event("imported", item);
     }
     Ok(count)
 }
@@ -263,4 +293,32 @@ pub async fn classify_popup_context(
     state: State<'_, AppState>,
 ) -> Result<ClassifyPopupContext, AppError> {
     capture_service::classify_popup_context(&state.pool).await
+}
+
+fn session_event(event: &str, session: &CaptureSession) {
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "capture.session".to_owned(),
+        message: event.replace('_', " "),
+        event: Some(event.to_owned()),
+        project_id: Some(session.project_id.clone()),
+        session_id: Some(session.id.clone()),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
+}
+
+fn item_event(event: &str, item: &CaptureItem) {
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "capture.state".to_owned(),
+        message: event.replace('_', " "),
+        event: Some(event.to_owned()),
+        project_id: Some(item.project_id.clone()),
+        session_id: Some(item.session_id.clone()),
+        capture_item_id: Some(item.id.clone()),
+        attempt: u32::try_from(item.attempt_count).ok(),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
 }

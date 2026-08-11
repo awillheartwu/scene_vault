@@ -20,9 +20,11 @@ start-tauri-dev.bat
 应用首次启动会在 Tauri app data 目录创建数据库并运行内置迁移。
 
 Windows 原生开发必须使用仓库根目录的 `start-tauri-dev.bat`。该入口通过 affinity mask
-将构建和应用进程限制在 CPU 0–3，并设置 `CARGO_BUILD_JOBS=4`、
-`RAYON_NUM_THREADS=4` 和 `TOKIO_WORKER_THREADS=4`，避免 Rust 编译、批量缩略图或后台
-任务占满整颗处理器。WSL 中的重型 Rust 命令统一使用 `taskset -c 0-3`。
+将构建和应用进程限制在 CPU 0–3。清理 `target` 后的首次全量构建使用单个 Cargo job，
+已有可执行文件时的增量构建使用两个 job；运行时仍设置 `RAYON_NUM_THREADS=4` 和
+`TOKIO_WORKER_THREADS=4`。这是为了避免多个 `rustc.exe` 与 `cl.exe` 同时运行导致内存
+压力和 `0xc0000005 (STATUS_ACCESS_VIOLATION)`。WSL 中的重型 Rust 命令统一使用
+`taskset -c 0-3`。
 
 ## 验证
 

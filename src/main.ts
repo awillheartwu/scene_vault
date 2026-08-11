@@ -5,6 +5,7 @@ import App from "./App.vue";
 import { router } from "./router";
 import { installContextMenuGuard } from "@/composables/useContextMenu";
 import { applyPersistedTheme, initThemeSync } from "@/lib/theme";
+import { installClientErrorLogging } from "@/lib/client-log";
 
 import "./assets/main.css";
 
@@ -16,6 +17,7 @@ void initThemeSync();
 // The WebView native context menu must not appear in the desktop app; input
 // controls keep it for copy/paste. Custom per-item menus are unaffected.
 installContextMenuGuard();
+installClientErrorLogging();
 
 // The workbench popup is a separate always-on-top window that reuses the same
 // frontend bundle. Detect it by Tauri window label (or ?popup=workbench in

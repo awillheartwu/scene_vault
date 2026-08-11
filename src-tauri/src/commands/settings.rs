@@ -6,12 +6,13 @@ use crate::{
     models::{
         app_settings::{AppSettings, UpdateAppSettingsInput},
         archive_naming::{ArchiveNamingSettings, UpdateArchiveNamingSettingsInput},
+        diagnostics::{LogLevel, LogRecord},
         recognition_settings::{RecognitionSettings, UpdateRecognitionSettingsInput},
         vision::ProcessingSettings,
     },
     services::{
-        app_settings_service, archive_naming_settings_service, processing_settings_service,
-        recognition_settings_service, shortcuts,
+        app_settings_service, archive_naming_settings_service, log_service,
+        processing_settings_service, recognition_settings_service, shortcuts,
     },
 };
 
@@ -29,6 +30,7 @@ pub async fn update_app_settings(
     let previous = app_settings_service::get(&state.pool).await?;
     let saved = app_settings_service::update(&state.pool, input).await?;
     shortcuts::reconfigure(&app, &previous, &saved)?;
+    settings_event("app_settings_updated");
     Ok(saved)
 }
 
@@ -44,7 +46,9 @@ pub async fn update_archive_naming_settings(
     state: State<'_, AppState>,
     input: UpdateArchiveNamingSettingsInput,
 ) -> Result<ArchiveNamingSettings, AppError> {
-    archive_naming_settings_service::update(&state.pool, input).await
+    let saved = archive_naming_settings_service::update(&state.pool, input).await?;
+    settings_event("archive_naming_updated");
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -59,7 +63,9 @@ pub async fn update_recognition_settings(
     state: State<'_, AppState>,
     input: UpdateRecognitionSettingsInput,
 ) -> Result<RecognitionSettings, AppError> {
-    recognition_settings_service::update(&state.pool, input).await
+    let saved = recognition_settings_service::update(&state.pool, input).await?;
+    settings_event("recognition_settings_updated");
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -74,5 +80,18 @@ pub async fn update_processing_settings(
     state: State<'_, AppState>,
     settings: ProcessingSettings,
 ) -> Result<ProcessingSettings, AppError> {
-    processing_settings_service::update(&state.pool, settings).await
+    let saved = processing_settings_service::update(&state.pool, settings).await?;
+    settings_event("processing_settings_updated");
+    Ok(saved)
+}
+
+fn settings_event(event: &str) {
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "settings.state".to_owned(),
+        message: event.replace('_', " "),
+        event: Some(event.to_owned()),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
 }

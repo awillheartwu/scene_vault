@@ -25,6 +25,24 @@ class _FakeDetector:
 
 
 class ModelCacheTests(unittest.TestCase):
+    def test_emits_cache_miss_load_and_hit_without_paths(self) -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        with TemporaryDirectory() as temporary_directory:
+            model_path = Path(temporary_directory) / "yunet.onnx"
+            model_path.write_bytes(b"model")
+            cache = VisionModelCache(
+                detector_factory=lambda _config: _FakeDetector(),
+                event_sink=lambda event, fields: events.append((event, fields)),
+            )
+            config = YuNetConfig(model_path)
+            cache.get_detector(config)
+            cache.get_detector(config)
+
+        self.assertEqual([event for event, _ in events], [
+            "model_cache_miss", "model_loaded", "model_cache_hit"
+        ])
+        self.assertTrue(all("path" not in fields for _, fields in events))
+
     def test_reuses_matching_models_and_replaces_changed_configuration(self) -> None:
         detector_calls: list[YuNetConfig] = []
         sface_calls: list[Path] = []

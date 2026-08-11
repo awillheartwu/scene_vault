@@ -8,7 +8,10 @@ use tauri::{AppHandle, Emitter};
 
 use crate::{
     error::AppError,
-    models::capture::{DiscoverCapturesInput, DiscoverCapturesResult},
+    models::{
+        capture::{DiscoverCapturesInput, DiscoverCapturesResult},
+        diagnostics::{LogLevel, LogRecord},
+    },
     services::{capture_service, log_service},
 };
 
@@ -223,18 +226,19 @@ async fn poll_active_sessions_once(
                 // directory growing large shows up here before polling needs any
                 // architectural change (notify/reconciliation is a later option).
                 if result.scan_duration_ms >= 1_000 || result.entries_scanned >= 1_000 {
-                    log_service::warn(
-                        "capture.discovery",
-                        format!(
-                            "slow scan: session={session_id} duration={}ms entries={} new={} known={} unstable={} ignored={}",
-                            result.scan_duration_ms,
-                            result.entries_scanned,
-                            result.discovered_count,
-                            result.already_known_count,
-                            result.unstable_count,
-                            result.ignored_count,
+                    log_service::record_event(LogRecord {
+                        level: LogLevel::Warn,
+                        module: "capture.discovery".to_owned(),
+                        message: format!(
+                            "slow scan of {} entries; {} captures discovered",
+                            result.entries_scanned, result.discovered_count
                         ),
-                    );
+                        event: Some("slow_scan".to_owned()),
+                        session_id: Some(session_id.clone()),
+                        duration_ms: Some(result.scan_duration_ms as f64),
+                        outcome: Some("succeeded".to_owned()),
+                        ..Default::default()
+                    });
                 }
                 if let Some(app) = app {
                     for item in result.discovered_items {
@@ -242,10 +246,16 @@ async fn poll_active_sessions_once(
                     }
                 }
             }
-            Err(error) => log_service::warn(
-                "capture.discovery",
-                format!("poll failed for session {session_id}: {error}"),
-            ),
+            Err(_error) => log_service::record_event(LogRecord {
+                level: LogLevel::Warn,
+                module: "capture.discovery".to_owned(),
+                message: "background source scan failed; next poll will retry".to_owned(),
+                event: Some("source_scan_failed".to_owned()),
+                session_id: Some(session_id),
+                outcome: Some("retrying".to_owned()),
+                error_code: Some("source_unavailable".to_owned()),
+                ..Default::default()
+            }),
         }
     }
     Ok(())

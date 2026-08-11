@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+from time import perf_counter
 from collections.abc import Sequence
 from typing import Any
 
@@ -75,6 +76,8 @@ def _worker(service: AiService) -> int:
 
 
 def _handle_request_bytes(service: AiService, raw_bytes: bytes) -> Response:
+    started = perf_counter()
+    request: Request | None = None
     try:
         # The Rust host always writes UTF-8; on Windows the default text-mode
         # stdin decodes with the ANSI codepage (e.g. GBK), which corrupts CJK
@@ -87,12 +90,27 @@ def _handle_request_bytes(service: AiService, raw_bytes: bytes) -> Response:
         if not isinstance(raw_request, dict):
             raise InvalidRequestError("request must be a JSON object")
         request = Request.from_dict(raw_request)
+        _stderr_log(
+            "info",
+            "request",
+            "request_started",
+            requestId=request.request_id,
+            message=request.action,
+            outcome="started",
+        )
         response = service.handle(
             request,
             progress=lambda stage, percent: _stderr_progress(
                 stage,
                 percent,
                 request_id=request.request_id,
+            ),
+            log_event=lambda event, fields: _stderr_log(
+                "debug",
+                "model_cache",
+                event,
+                requestId=request.request_id,
+                **fields,
             ),
         )
     except UnicodeDecodeError as error:
@@ -125,7 +143,33 @@ def _handle_request_bytes(service: AiService, raw_bytes: bytes) -> Response:
             ),
         )
 
+    duration_ms = round((perf_counter() - started) * 1000.0, 3)
+    error_code = response.error.code if response.error is not None else None
+    _stderr_log(
+        "info" if response.ok else "error",
+        "request",
+        "request_succeeded" if response.ok else "request_failed",
+        requestId=response.request_id or (request.request_id if request else None),
+        message=response.action,
+        durationMs=duration_ms,
+        outcome="succeeded" if response.ok else "failed",
+        errorCode=error_code,
+    )
     return response
+
+
+def _stderr_log(level: str, module: str, event: str, **fields: object) -> None:
+    payload: dict[str, object] = {
+        "level": level,
+        "module": module,
+        "event": event,
+    }
+    payload.update({key: value for key, value in fields.items() if value is not None})
+    print(
+        "SVLOG " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _stderr_progress(

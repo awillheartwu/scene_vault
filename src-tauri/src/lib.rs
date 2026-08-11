@@ -41,12 +41,28 @@ pub fn run() {
             );
             let app_handle = app.handle().clone();
             let cache_root = app.path().app_cache_dir()?.join("capture-output");
-            let pool = tauri::async_runtime::block_on(async {
+            let (pool, recovered_items) = tauri::async_runtime::block_on(async {
                 let pool = db::initialize(app.handle()).await?;
-                services::capture_service::recover_interrupted_processing(&pool).await?;
-                Ok::<_, error::AppError>(pool)
+                let recovered =
+                    services::capture_service::recover_interrupted_processing(&pool).await?;
+                Ok::<_, error::AppError>((pool, recovered))
             })?;
             app.manage(AppState { pool: pool.clone() });
+            {
+                let settings =
+                    tauri::async_runtime::block_on(services::log_settings_service::get(&pool))?;
+                services::log_service::configure(&settings)?;
+            }
+            if recovered_items > 0 {
+                services::log_service::record_event(models::diagnostics::LogRecord {
+                    level: models::diagnostics::LogLevel::Warn,
+                    module: "capture.recovery".to_owned(),
+                    message: format!("marked {recovered_items} interrupted captures as failed"),
+                    event: Some("startup_recovery_completed".to_owned()),
+                    outcome: Some("recovered".to_owned()),
+                    ..Default::default()
+                });
+            }
             {
                 let labels: Vec<String> = app.webview_windows().keys().cloned().collect();
                 services::log_service::debug(
@@ -164,9 +180,15 @@ pub fn run() {
             commands::settings::get_processing_settings,
             commands::settings::update_processing_settings,
             commands::diagnostics::list_debug_logs,
+            commands::diagnostics::get_log_settings,
+            commands::diagnostics::update_log_settings,
+            commands::diagnostics::record_client_event,
             commands::diagnostics::get_log_status,
             commands::diagnostics::cleanup_debug_logs,
             commands::diagnostics::get_diagnostic_summary,
+            commands::diagnostics::get_process_resource_status,
+            commands::diagnostics::get_storage_resource_status,
+            commands::diagnostics::cleanup_resource,
             commands::window::set_window_always_on_top,
         ])
         .build(tauri::generate_context!())

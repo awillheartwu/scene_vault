@@ -33,6 +33,7 @@ class AiService:
         self,
         request: Request,
         progress: Callable[[str, float], None] | None = None,
+        log_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> Response:
         if request.protocol_version != PROTOCOL_VERSION:
             return _failure(
@@ -66,6 +67,7 @@ class AiService:
 
         if request.action == "processScreenshot":
             service_started = perf_counter()
+            self.model_cache.event_sink = log_event
             try:
                 processing_request = ProcessingRequest.from_payload(request.payload)
                 processor_started = perf_counter()
@@ -101,6 +103,8 @@ class AiService:
                     ),
                     request_id=request.request_id,
                 )
+            finally:
+                self.model_cache.event_sink = None
             return Response(
                 ok=True,
                 action=request.action,

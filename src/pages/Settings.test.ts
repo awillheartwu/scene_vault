@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { api, pickFile, pickDirectory, openPathExternal, leaveGuard } = vi.hoisted(() => ({
+const { api, pickFile, pickDirectory, openPathExternal, revealPath, leaveGuard } = vi.hoisted(() => ({
   api: {
     getVisionSettings: vi.fn(),
     getAppSettings: vi.fn(),
@@ -17,10 +17,14 @@ const { api, pickFile, pickDirectory, openPathExternal, leaveGuard } = vi.hoiste
     updateRecognitionSettings: vi.fn(),
     updateProcessingSettings: vi.fn(),
     checkVision: vi.fn(),
+    getProcessResourceStatus: vi.fn(),
+    getStorageResourceStatus: vi.fn(),
+    cleanupResource: vi.fn(),
   },
   pickFile: vi.fn(),
   pickDirectory: vi.fn(),
   openPathExternal: vi.fn(),
+  revealPath: vi.fn(),
   leaveGuard: { current: null as null | ((...args: unknown[]) => unknown) },
 }));
 
@@ -29,6 +33,7 @@ vi.mock("@/lib/capture-api", () => ({
   pickFile,
   pickDirectory,
   openPathExternal,
+  revealPath,
 }));
 
 vi.mock("vue-router", () => ({
@@ -174,9 +179,24 @@ beforeEach(() => {
     ...(settings as object),
   }));
   api.updateProcessingSettings.mockResolvedValue(undefined);
+  api.getProcessResourceStatus.mockResolvedValue({
+    capturedAt: "2026-08-11T08:00:00Z",
+    approximate: false,
+    logicalProcessors: 16,
+    groups: [],
+    totalCpuPercent: null,
+    totalWorkingSetBytes: 0,
+    totalPrivateBytes: 0,
+  });
+  api.getStorageResourceStatus.mockResolvedValue({
+    capturedAt: "2026-08-11T08:00:00Z",
+    entries: [],
+    totalBytes: 0,
+  });
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   wrapper?.unmount();
   wrapper = null;
@@ -194,9 +214,10 @@ describe("Settings category navigation", () => {
       "自动角色建议",
       "视觉处理参数",
       "视觉引擎",
+      "资源与存储",
     ]);
     expect(tabs[0].attributes("aria-selected")).toBe("true");
-    expect(page.findAll('[role="tabpanel"]')).toHaveLength(5);
+    expect(page.findAll('[role="tabpanel"]')).toHaveLength(6);
     expect(page.findAll("form")).toHaveLength(5);
 
     expect(page.get("#classify-shortcut").isVisible()).toBe(true);
@@ -249,6 +270,26 @@ describe("Settings category navigation", () => {
     expect((page.get("#recognition-threshold").element as HTMLInputElement).value).toBe(
       "0.55",
     );
+  });
+
+  it("mounts resource monitoring only while the resource category is active", async () => {
+    vi.useFakeTimers();
+    const page = mountSettings();
+    await flushPromises();
+    expect(api.getProcessResourceStatus).not.toHaveBeenCalled();
+    expect(api.getStorageResourceStatus).not.toHaveBeenCalled();
+
+    await page.get("#settings-tab-resources").trigger("click");
+    await flushPromises();
+    expect(api.getProcessResourceStatus).toHaveBeenCalledTimes(1);
+    expect(api.getStorageResourceStatus).toHaveBeenCalledTimes(1);
+
+    await page.get("#settings-tab-general").trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(api.getProcessResourceStatus).toHaveBeenCalledTimes(1);
+    expect(api.getStorageResourceStatus).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 
   it("keeps per-model recognition drafts across recognizer switches", async () => {

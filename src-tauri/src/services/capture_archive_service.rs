@@ -9,10 +9,11 @@ use crate::{
     models::{
         archive_naming::ArchiveNamingSettings,
         capture::{CaptureItem, CaptureItemIdInput},
+        diagnostics::{LogLevel, LogRecord},
     },
     services::{
         archive_naming::{self, ArchiveNameContext},
-        archive_naming_settings_service, capture_service,
+        archive_naming_settings_service, capture_service, log_service,
     },
 };
 
@@ -36,6 +37,13 @@ pub async fn archive(
     match archive_pending_item(pool, &item).await {
         Ok(completed) => Ok(completed),
         Err(error) => {
+            archive_event(
+                &item,
+                LogLevel::Error,
+                "archive_operation_failed",
+                "failed",
+                Some("archive_operation_error"),
+            );
             // A filesystem or persistence failure must be visible after restart.
             // Keep the generated local files and any verified archive files so a
             // later call can resume safely.
@@ -418,6 +426,15 @@ async fn copy_verified_atomic(
 
     if let Ok(existing) = tokio::fs::metadata(destination).await {
         if existing.is_file() && existing.len() == expected_length {
+            log_service::record_event(LogRecord {
+                level: LogLevel::Debug,
+                module: "capture.archive".to_owned(),
+                message: "verified and reused existing archive file".to_owned(),
+                event: Some("existing_file_reused".to_owned()),
+                capture_item_id: Some(capture_item_id.to_owned()),
+                outcome: Some("succeeded".to_owned()),
+                ..Default::default()
+            });
             return Ok(expected_length);
         }
         return Err(AppError::Archive(format!(
@@ -448,6 +465,15 @@ async fn copy_verified_atomic(
                 destination.display()
             )));
         }
+        log_service::record_event(LogRecord {
+            level: LogLevel::Debug,
+            module: "capture.archive".to_owned(),
+            message: "temporary archive copy passed length verification".to_owned(),
+            event: Some("copy_verified".to_owned()),
+            capture_item_id: Some(capture_item_id.to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            ..Default::default()
+        });
 
         if let Err(rename_error) = tokio::fs::rename(&temporary, destination).await {
             // A concurrent retry or a restart after the rename can leave the
@@ -460,6 +486,15 @@ async fn copy_verified_atomic(
             }
             return Err(AppError::Io(rename_error));
         }
+        log_service::record_event(LogRecord {
+            level: LogLevel::Debug,
+            module: "capture.archive".to_owned(),
+            message: "archive file promoted by atomic rename".to_owned(),
+            event: Some("atomic_rename_completed".to_owned()),
+            capture_item_id: Some(capture_item_id.to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            ..Default::default()
+        });
         Ok(expected_length)
     }
     .await;
@@ -468,6 +503,28 @@ async fn copy_verified_atomic(
         let _ = tokio::fs::remove_file(&temporary).await;
     }
     result
+}
+
+fn archive_event(
+    item: &CaptureItem,
+    level: LogLevel,
+    event: &str,
+    outcome: &str,
+    error_code: Option<&str>,
+) {
+    log_service::record_event(LogRecord {
+        level,
+        module: "capture.archive".to_owned(),
+        message: event.replace('_', " "),
+        event: Some(event.to_owned()),
+        project_id: Some(item.project_id.clone()),
+        session_id: Some(item.session_id.clone()),
+        capture_item_id: Some(item.id.clone()),
+        attempt: u32::try_from(item.attempt_count).ok(),
+        outcome: Some(outcome.to_owned()),
+        error_code: error_code.map(str::to_owned),
+        ..Default::default()
+    });
 }
 
 async fn validate_local_archive_source(path: &Path) -> Result<PathBuf, AppError> {

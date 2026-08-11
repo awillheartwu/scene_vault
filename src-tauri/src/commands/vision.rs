@@ -4,11 +4,16 @@ use tauri::State;
 use crate::{
     db::AppState,
     error::AppError,
-    models::vision::{
-        BundledFont, CaptureRuntimeStatus, UpdateVisionSettingsInput, VisionHealth, VisionSettings,
+    models::{
+        diagnostics::{LogLevel, LogRecord},
+        vision::{
+            BundledFont, CaptureRuntimeStatus, UpdateVisionSettingsInput, VisionHealth,
+            VisionSettings,
+        },
     },
     services::{
-        capture_worker_service, font_service, vision_engine_service, vision_settings_service,
+        capture_worker_service, font_service, log_service, vision_engine_service,
+        vision_settings_service,
     },
 };
 
@@ -22,7 +27,16 @@ pub async fn update_vision_settings(
     state: State<'_, AppState>,
     input: UpdateVisionSettingsInput,
 ) -> Result<VisionSettings, AppError> {
-    vision_settings_service::update(&state.pool, input).await
+    let settings = vision_settings_service::update(&state.pool, input).await?;
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "settings.vision".to_owned(),
+        message: "vision settings updated".to_owned(),
+        event: Some("vision_settings_updated".to_owned()),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
+    Ok(settings)
 }
 
 #[tauri::command]

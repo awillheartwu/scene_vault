@@ -199,3 +199,38 @@ Command 和 Service 重复写两条日志。
 - Python：成功、协议错误、模型错误、异常、cache hit/miss/reload 均保持 request ID；
 - Vue：invoke 失败同时有用户反馈和一条持久化事件，不重复、不包含敏感数据；
 - E2E：从一次分类操作追踪到 worker、归档、重试或完成的完整时间线。
+
+## 2026-08-11 实施结果
+
+本轮已完成日志覆盖扩展的代码闭环：
+
+- `LogRecord` 已增加可选关联字段，旧四字段 JSONL 仍可反序列化；查询支持 event、outcome
+  和跨 operation/request/project/session/capture/note 的关联 ID；状态会报告本次运行的队列
+  丢弃计数。
+- Capture 会话、发现、导入、分类、处理、归档与重试，笔记同步，项目、角色、Face Bank、
+  识别复核和设置变更已接入结构化业务事件；不记录名称、正文或文件路径。
+- Python request 与模型缓存通过 stderr `SVLOG` 输出，worker 和 one-shot 均由 Rust 解析并
+  写入同一 JSONL；stdout 的协议响应不变。
+- Vue 增加受限事件 Command、全局 error/unhandledrejection 捕获和统一 Tauri invoke 失败
+  记录；日志桥失败不会递归或影响原操作的错误反馈。
+- History 日志面板已支持模块、事件、结果与关联 ID 组合筛选，并展示 request/capture ID、
+  outcome 和 duration。
+
+自动验证已覆盖 Rust v1/v2 兼容与字段筛选、Python SVLOG/缓存事件、Vue 筛选和既有业务
+回归。仍需在 Windows 实机验收 worker 崩溃与 one-shot fallback、NAS 断线、日志轮转、
+中文/UNC 路径脱敏以及资源页实时 CPU/内存读数；“单次操作时间线”和可配置慢操作阈值
+属于后续诊断体验增强，不阻塞本轮日志覆盖任务完成。
+
+## 2026-08-11 清理控制与分页补充
+
+- 日志策略保存在 SQLite `settings/logging.policy`，设置页可调整保留天数（1–365）、单个
+  JSONL 文件上限（1–100 MiB）、归档数量（1–200）以及是否在启动和轮转时自动清理。
+  保存后立即更新运行中的 LogStore；关闭自动清理不会禁用手动“按策略清理”。
+- 日志查询增加 `offset/limit/nextOffset/hasMore`。History 首次只渲染最新 100 条，滚动
+  接近底部时继续加载；首次查询固定 `since/until` 时间窗，避免加载下一页时被新日志
+  整体推移。手动刷新和修改筛选会建立新的时间窗。
+- 日志页不订阅实时事件、不设置轮询定时器。切换回截图历史时组件卸载，
+  `IntersectionObserver` 同时断开；后台仍只保留原有 Rust 异步日志写入线程。
+- 进一步补充 startup recovery、后台 source scan 失败、归档 copy verification/atomic
+  rename、笔记外部冲突备份、Face Sample 状态/标记、验证/建议刷新、缩略图生成失败与
+  缓存淘汰事件。成功高频读取和空轮询继续不记录。

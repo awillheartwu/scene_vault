@@ -13,7 +13,7 @@ class _StubService:
     def __init__(self) -> None:
         self.last_payload: dict | None = None
 
-    def handle(self, request, progress=None):  # noqa: ARG002
+    def handle(self, request, progress=None, log_event=None):  # noqa: ARG002
         self.last_payload = request.payload
         return Response(
             ok=True,

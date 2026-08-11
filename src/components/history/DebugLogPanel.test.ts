@@ -31,9 +31,15 @@ beforeEach(() => {
       level: "error",
       module: "capture.worker",
       message: "processing failed",
+      event: "processing_failed",
+      outcome: "failed",
+      requestId: "req-1",
     }],
     matchedCount: 1,
     truncated: false,
+    offset: 0,
+    nextOffset: null,
+    hasMore: false,
   });
   api.getLogStatus.mockResolvedValue({
     directory: "C:\\Logs\\Scene Vault",
@@ -70,12 +76,22 @@ describe("DebugLogPanel", () => {
 
       const selects = document.body.querySelectorAll<HTMLSelectElement>(".log-toolbar select");
       const input = document.body.querySelector<HTMLInputElement>(".module-filter input");
-      expect(selects).toHaveLength(2);
+      expect(selects).toHaveLength(3);
       selects[1].value = "error";
       selects[1].dispatchEvent(new Event("change", { bubbles: true }));
       if (input) {
         input.value = "worker";
         input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      const eventInput = document.body.querySelector<HTMLInputElement>(".event-filter input");
+      const correlationInput = document.body.querySelector<HTMLInputElement>(".correlation-filter input");
+      if (eventInput) {
+        eventInput.value = "processing";
+        eventInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      if (correlationInput) {
+        correlationInput.value = "req-1";
+        correlationInput.dispatchEvent(new Event("input", { bubbles: true }));
       }
       document.body.querySelector<HTMLButtonElement>(".log-filter-button")?.click();
       await flushPromises();
@@ -83,10 +99,59 @@ describe("DebugLogPanel", () => {
       expect(api.listDebugLogs).toHaveBeenLastCalledWith(expect.objectContaining({
         levels: ["error"],
         module: "worker",
-        limit: 500,
+        event: "processing",
+        correlationId: "req-1",
+        offset: 0,
+        limit: 100,
       }));
     } finally {
       wrapper.unmount();
+    }
+  });
+
+  it("loads the next page on demand without replacing existing rows", async () => {
+    api.listDebugLogs
+      .mockResolvedValueOnce({
+        records: [{ timestamp: "2026-08-09T02:00:00Z", level: "info", module: "first", message: "page one" }],
+        matchedCount: 2,
+        truncated: true,
+        offset: 0,
+        nextOffset: 1,
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        records: [{ timestamp: "2026-08-09T01:00:00Z", level: "info", module: "second", message: "page two" }],
+        matchedCount: 2,
+        truncated: false,
+        offset: 1,
+        nextOffset: null,
+        hasMore: false,
+      });
+    const wrapper = mount(DebugLogPanel, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await wrapper.get(".log-load-sentinel button").trigger("click");
+      await flushPromises();
+      expect(wrapper.text()).toContain("page one");
+      expect(wrapper.text()).toContain("page two");
+      expect(api.listDebugLogs).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 1, limit: 100 }));
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("disconnects infinite-loading observation when leaving the log page", async () => {
+    const observer = { observe: vi.fn(), disconnect: vi.fn() };
+    vi.stubGlobal("IntersectionObserver", vi.fn(function () { return observer; }));
+    const wrapper = mount(DebugLogPanel);
+    try {
+      await flushPromises();
+      expect(observer.observe).toHaveBeenCalledOnce();
+      wrapper.unmount();
+      expect(observer.disconnect).toHaveBeenCalledOnce();
+    } finally {
+      if (wrapper.exists()) wrapper.unmount();
+      vi.unstubAllGlobals();
     }
   });
 
@@ -117,7 +182,7 @@ describe("DebugLogPanel", () => {
     const wrapper = mount(DebugLogPanel, { attachTo: document.body });
     try {
       await flushPromises();
-      expect(document.body.textContent).toContain("可能包含本地路径");
+      expect(document.body.textContent).toContain("离开后不占用监控资源");
       document.body.querySelector<HTMLButtonElement>(".copy-diagnostics")?.click();
       await flushPromises();
       expect(execCommand).toHaveBeenCalledWith("copy");

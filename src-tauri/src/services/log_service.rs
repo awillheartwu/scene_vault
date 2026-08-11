@@ -4,6 +4,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     sync::{
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, SyncSender, TrySendError},
         Arc, Mutex, OnceLock,
     },
@@ -15,7 +16,8 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use crate::{
     error::AppError,
     models::diagnostics::{
-        LogCleanupResult, LogLevel, LogQuery, LogQueryResult, LogRecord, LogStatus,
+        LogCleanupResult, LogLevel, LogPolicySettings, LogQuery, LogQueryResult, LogRecord,
+        LogStatus,
     },
 };
 
@@ -30,6 +32,7 @@ const MAX_QUERY_LIMIT: usize = 1_000;
 const LOG_QUEUE_CAPACITY: usize = 1_024;
 
 static GLOBAL_LOG_SERVICE: OnceLock<GlobalLogService> = OnceLock::new();
+static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 
 struct GlobalLogService {
     store: Arc<LogStore>,
@@ -41,6 +44,7 @@ struct LogPolicy {
     max_file_bytes: u64,
     retention_days: i64,
     max_archived_files: usize,
+    automatic_cleanup: bool,
 }
 
 impl Default for LogPolicy {
@@ -49,6 +53,7 @@ impl Default for LogPolicy {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             retention_days: DEFAULT_RETENTION_DAYS,
             max_archived_files: DEFAULT_MAX_ARCHIVED_FILES,
+            automatic_cleanup: true,
         }
     }
 }
@@ -56,7 +61,7 @@ impl Default for LogPolicy {
 #[derive(Debug)]
 pub struct LogStore {
     directory: PathBuf,
-    policy: LogPolicy,
+    policy: Mutex<LogPolicy>,
     operation_lock: Mutex<()>,
 }
 
@@ -65,10 +70,9 @@ impl LogStore {
         fs::create_dir_all(&directory)?;
         let store = Self {
             directory,
-            policy,
+            policy: Mutex::new(policy),
             operation_lock: Mutex::new(()),
         };
-        store.cleanup_policy()?;
         Ok(store)
     }
 
@@ -99,7 +103,12 @@ impl LogStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        if size < self.policy.max_file_bytes {
+        let policy = self
+            .policy
+            .lock()
+            .map_err(|_| AppError::Io(std::io::Error::other("log policy lock was poisoned")))?
+            .clone();
+        if size < policy.max_file_bytes {
             return Ok(());
         }
 
@@ -118,7 +127,9 @@ impl LogStore {
             eprintln!("[WARN] [logging] could not rotate current log: {error}");
             return Ok(());
         }
-        self.cleanup_unlocked()?;
+        if policy.automatic_cleanup {
+            self.cleanup_unlocked()?;
+        }
         Ok(())
     }
 
@@ -151,7 +162,12 @@ impl LogStore {
     }
 
     fn cleanup_unlocked(&self) -> Result<usize, AppError> {
-        let cutoff = Utc::now() - Duration::days(self.policy.retention_days);
+        let policy = self
+            .policy
+            .lock()
+            .map_err(|_| AppError::Io(std::io::Error::other("log policy lock was poisoned")))?
+            .clone();
+        let cutoff = Utc::now() - Duration::days(policy.retention_days);
         let mut removed = 0_usize;
         let mut kept_archives = 0_usize;
         for (path, modified, _) in self.log_files()? {
@@ -160,7 +176,7 @@ impl LogStore {
             }
             let modified: DateTime<Utc> = modified.into();
             let expired = modified < cutoff;
-            let over_limit = kept_archives >= self.policy.max_archived_files;
+            let over_limit = kept_archives >= policy.max_archived_files;
             if expired || over_limit {
                 match fs::remove_file(&path) {
                     Ok(()) => removed += 1,
@@ -192,11 +208,16 @@ impl LogStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_lowercase);
+        let event = normalized_filter(query.event.as_deref());
+        let correlation_id = normalized_filter(query.correlation_id.as_deref());
+        let outcome = normalized_filter(query.outcome.as_deref());
         let limit = query
             .limit
             .unwrap_or(DEFAULT_QUERY_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
-        let mut records = Vec::with_capacity(limit.saturating_add(1));
+        let offset = query.offset.unwrap_or(0).min(1_000_000);
+        let keep_count = offset.saturating_add(limit);
+        let mut records = Vec::with_capacity(keep_count.saturating_add(1));
         let mut matched_count = 0_usize;
 
         for (path, _, _) in self.log_files()? {
@@ -220,23 +241,48 @@ impl LogStore {
                     || module
                         .as_ref()
                         .is_some_and(|needle| !record.module.to_lowercase().contains(needle))
+                    || event.as_ref().is_some_and(|needle| {
+                        !record
+                            .event
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(needle)
+                    })
+                    || outcome.as_ref().is_some_and(|needle| {
+                        !record
+                            .outcome
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(needle)
+                    })
+                    || correlation_id
+                        .as_ref()
+                        .is_some_and(|needle| !record_matches_correlation(&record, needle))
                 {
                     continue;
                 }
                 matched_count = matched_count.saturating_add(1);
                 records.push(record);
-                if records.len() > limit.saturating_mul(2) {
+                if records.len() > keep_count.saturating_mul(2).max(1) {
                     records.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-                    records.truncate(limit);
+                    records.truncate(keep_count);
                 }
             }
         }
         records.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-        records.truncate(limit);
+        records.truncate(keep_count);
+        let records = records.into_iter().skip(offset).take(limit).collect();
+        let next_offset =
+            (offset.saturating_add(limit) < matched_count).then_some(offset.saturating_add(limit));
         Ok(LogQueryResult {
             records,
             matched_count,
-            truncated: matched_count > limit,
+            truncated: next_offset.is_some(),
+            offset,
+            next_offset,
+            has_more: next_offset.is_some(),
         })
     }
 
@@ -250,13 +296,20 @@ impl LogStore {
 
     fn status_unlocked(&self) -> Result<LogStatus, AppError> {
         let files = self.log_files()?;
+        let policy = self
+            .policy
+            .lock()
+            .map_err(|_| AppError::Io(std::io::Error::other("log policy lock was poisoned")))?
+            .clone();
         Ok(LogStatus {
             directory: self.directory.to_string_lossy().into_owned(),
             file_count: files.len(),
             total_bytes: files.iter().map(|(_, _, bytes)| bytes).sum(),
-            retention_days: self.policy.retention_days,
-            max_file_bytes: self.policy.max_file_bytes,
-            max_archived_files: self.policy.max_archived_files,
+            retention_days: policy.retention_days,
+            max_file_bytes: policy.max_file_bytes,
+            max_archived_files: policy.max_archived_files,
+            dropped_records: DROPPED_RECORDS.load(Ordering::Relaxed),
+            automatic_cleanup: policy.automatic_cleanup,
         })
     }
 
@@ -267,6 +320,50 @@ impl LogStore {
             .map_err(|_| AppError::Io(std::io::Error::other("log operation lock was poisoned")))?;
         self.cleanup_unlocked()
     }
+
+    fn configure(&self, settings: &LogPolicySettings) -> Result<(), AppError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| AppError::Io(std::io::Error::other("log operation lock was poisoned")))?;
+        {
+            let mut policy = self
+                .policy
+                .lock()
+                .map_err(|_| AppError::Io(std::io::Error::other("log policy lock was poisoned")))?;
+            *policy = LogPolicy {
+                max_file_bytes: settings.max_file_size_mb.saturating_mul(1024 * 1024),
+                retention_days: settings.retention_days,
+                max_archived_files: settings.max_archived_files,
+                automatic_cleanup: settings.automatic_cleanup,
+            };
+        }
+        if settings.automatic_cleanup {
+            self.cleanup_unlocked()?;
+        }
+        Ok(())
+    }
+}
+
+fn normalized_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase)
+}
+
+fn record_matches_correlation(record: &LogRecord, needle: &str) -> bool {
+    [
+        record.operation_id.as_deref(),
+        record.request_id.as_deref(),
+        record.project_id.as_deref(),
+        record.session_id.as_deref(),
+        record.capture_item_id.as_deref(),
+        record.note_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_lowercase().contains(needle))
 }
 
 fn parse_boundary(value: Option<&str>, label: &str) -> Result<Option<DateTime<Utc>>, AppError> {
@@ -301,21 +398,39 @@ pub fn record(level: LogLevel, module: impl Into<String>, message: impl Into<Str
     let module = module.into();
     let message = message.into();
     eprintln!("[{}] [{module}] {message}", level.as_str().to_uppercase());
-    let Some(service) = GLOBAL_LOG_SERVICE.get() else {
-        return;
-    };
     let record = LogRecord {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         level,
         module,
         message,
+        ..Default::default()
+    };
+    enqueue(record);
+}
+
+pub fn record_event(mut record: LogRecord) {
+    record.timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    eprintln!(
+        "[{}] [{}] {}",
+        record.level.as_str().to_uppercase(),
+        record.module,
+        record.message
+    );
+    enqueue(record);
+}
+
+fn enqueue(record: LogRecord) {
+    let Some(service) = GLOBAL_LOG_SERVICE.get() else {
+        return;
     };
     match service.sender.try_send(record) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
+            DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
             eprintln!("[WARN] [logging] log queue is full; dropping one record")
         }
         Err(TrySendError::Disconnected(_)) => {
+            DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
             eprintln!("[ERROR] [logging] log writer is unavailable")
         }
     }
@@ -350,6 +465,10 @@ pub fn query(query: LogQuery) -> Result<LogQueryResult, AppError> {
 
 pub fn status() -> Result<LogStatus, AppError> {
     global_store()?.status()
+}
+
+pub fn configure(settings: &LogPolicySettings) -> Result<(), AppError> {
+    global_store()?.configure(settings)
 }
 
 pub fn cleanup() -> Result<LogCleanupResult, AppError> {
@@ -411,6 +530,7 @@ mod tests {
             level,
             module: module.to_owned(),
             message: message.to_owned(),
+            ..Default::default()
         }
     }
 
@@ -456,7 +576,56 @@ mod tests {
             .unwrap();
         assert_eq!(limited.matched_count, 2);
         assert!(limited.truncated);
+        assert!(limited.has_more);
+        assert_eq!(limited.next_offset, Some(1));
         assert_eq!(limited.records[0].message, "failed");
+
+        let second_page = store
+            .query(LogQuery {
+                offset: limited.next_offset,
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second_page.records[0].message, "started");
+        assert!(!second_page.has_more);
+        assert_eq!(second_page.next_offset, None);
+    }
+
+    #[test]
+    fn reads_v1_records_and_filters_v2_correlation_fields() {
+        let legacy: LogRecord = serde_json::from_str(
+            r#"{"timestamp":"2026-08-09T01:00:00Z","level":"info","module":"legacy","message":"old"}"#,
+        )
+        .unwrap();
+        assert!(legacy.event.is_none());
+
+        let temp = tempdir().unwrap();
+        let store = LogStore::new(temp.path().to_path_buf(), LogPolicy::default()).unwrap();
+        let mut structured = record(
+            "2026-08-09T02:00:00.000Z",
+            LogLevel::Error,
+            "capture.worker",
+            "failed",
+        );
+        structured.event = Some("processing_failed".to_owned());
+        structured.capture_item_id = Some("capture-123".to_owned());
+        structured.outcome = Some("failed".to_owned());
+        store.append(&structured).unwrap();
+
+        let result = store
+            .query(LogQuery {
+                event: Some("processing".to_owned()),
+                correlation_id: Some("CAPTURE-123".to_owned()),
+                outcome: Some("fail".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.matched_count, 1);
+        assert_eq!(
+            result.records[0].event.as_deref(),
+            Some("processing_failed")
+        );
     }
 
     #[test]
@@ -468,6 +637,7 @@ mod tests {
                 max_file_bytes: 1,
                 retention_days: 14,
                 max_archived_files: 1,
+                automatic_cleanup: true,
             },
         )
         .unwrap();

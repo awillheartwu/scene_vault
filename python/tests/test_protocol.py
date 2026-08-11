@@ -192,7 +192,8 @@ class ProtocolTests(unittest.TestCase):
         response = json.loads(process.stdout)
 
         self.assertEqual(process.returncode, 0)
-        self.assertEqual(process.stderr, "")
+        self.assertIn('"event":"request_succeeded"', process.stderr)
+        self.assertIn('"requestId":"cli-health-1"', process.stderr)
         self.assertTrue(response["ok"])
         self.assertEqual(response["action"], "health")
         self.assertEqual(response["requestId"], "cli-health-1")
@@ -211,7 +212,8 @@ class ProtocolTests(unittest.TestCase):
         response = json.loads(process.stdout)
 
         self.assertEqual(process.returncode, 1)
-        self.assertEqual(process.stderr, "")
+        self.assertIn('"event":"request_failed"', process.stderr)
+        self.assertIn('"errorCode":"unsupported_protocol_version"', process.stderr)
         self.assertFalse(response["ok"])
         self.assertEqual(
             response["error"]["code"],
@@ -248,7 +250,8 @@ class ProtocolTests(unittest.TestCase):
         responses = [json.loads(line) for line in process.stdout.splitlines()]
 
         self.assertEqual(process.returncode, 0)
-        self.assertEqual(process.stderr, "")
+        self.assertIn('"event":"request_failed"', process.stderr)
+        self.assertIn('"event":"request_succeeded"', process.stderr)
         self.assertEqual(len(responses), 3)
         self.assertEqual(responses[0]["requestId"], "worker-1")
         self.assertTrue(responses[0]["ok"])

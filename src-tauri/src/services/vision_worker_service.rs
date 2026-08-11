@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -27,6 +28,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(15);
 const START_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const PROGRESS_PREFIX: &str = "SVPROGRESS ";
+const LOG_PREFIX: &str = "SVLOG ";
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 static WORKER_MANAGER: OnceLock<Mutex<VisionWorkerManager>> = OnceLock::new();
@@ -391,10 +393,12 @@ impl WorkerProcess {
                                 callback(&event.stage, event.percent);
                             }
                         }
+                    } else if record_python_log_line(&line) {
+                        // Structured Python events are persisted by the Rust logger.
                     } else if !line.trim().is_empty() {
                         log_service::debug(
                             "vision.python",
-                            format!("stderr: {}", truncate(&line, 500)),
+                            format!("stderr: {}", sanitize_external_line(&line)),
                         );
                     }
                 }
@@ -441,6 +445,71 @@ impl WorkerProcess {
             ),
         );
     }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct PythonLogEvent {
+    level: Option<String>,
+    module: String,
+    event: String,
+    message: Option<String>,
+    request_id: Option<String>,
+    duration_ms: Option<f64>,
+    outcome: Option<String>,
+    error_code: Option<String>,
+}
+
+fn parse_python_log_line(line: &str) -> Option<PythonLogEvent> {
+    let payload = line.strip_prefix(LOG_PREFIX)?;
+    let event: PythonLogEvent = serde_json::from_str(payload).ok()?;
+    if !valid_log_token(&event.module, 80)
+        || !valid_log_token(&event.event, 80)
+        || event
+            .duration_ms
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return None;
+    }
+    Some(event)
+}
+
+pub(super) fn record_python_log_line(line: &str) -> bool {
+    let Some(event) = parse_python_log_line(line) else {
+        return false;
+    };
+    let level = match event.level.as_deref() {
+        Some("error") => crate::models::diagnostics::LogLevel::Error,
+        Some("warn" | "warning") => crate::models::diagnostics::LogLevel::Warn,
+        Some("debug") => crate::models::diagnostics::LogLevel::Debug,
+        _ => crate::models::diagnostics::LogLevel::Info,
+    };
+    let message = event
+        .message
+        .as_deref()
+        .unwrap_or(&event.event)
+        .replace(['\r', '\n'], " | ");
+    log_service::record_event(crate::models::diagnostics::LogRecord {
+        level,
+        module: format!("vision.python.{}", event.module),
+        message: truncate(&message, 500),
+        event: Some(event.event),
+        request_id: event.request_id.filter(|value| valid_log_token(value, 128)),
+        duration_ms: event.duration_ms,
+        outcome: event.outcome.filter(|value| valid_log_token(value, 40)),
+        error_code: event.error_code.filter(|value| valid_log_token(value, 80)),
+        worker_mode: Some("python".to_owned()),
+        ..Default::default()
+    });
+    true
+}
+
+fn valid_log_token(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-:".contains(character))
 }
 
 #[derive(Debug, PartialEq)]
@@ -520,6 +589,21 @@ fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+pub(super) fn sanitize_external_line(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let contains_path = value.starts_with('/')
+        || value.contains(" /")
+        || value.contains(r"\\")
+        || bytes.windows(3).any(|part| {
+            part[0].is_ascii_alphabetic() && part[1] == b':' && matches!(part[2], b'\\' | b'/')
+        });
+    if contains_path {
+        "[external stderr contained a local path]".to_owned()
+    } else {
+        truncate(&value.replace(['\r', '\n'], " | "), 500)
+    }
+}
+
 fn sanitize_error(error: &AppError) -> String {
     truncate(&error.to_string().replace(['\r', '\n'], " | "), 500)
 }
@@ -581,6 +665,20 @@ mod tests {
         assert!(parse_progress_line(r#"SVPROGRESS {"stage":"","percent":20}"#).is_none());
         assert!(parse_progress_line(r#"SVPROGRESS {"stage":"read","percent":101}"#).is_none());
         assert!(parse_progress_line("Python warning").is_none());
+    }
+
+    #[test]
+    fn parses_structured_python_logs_and_rejects_unsafe_tokens() {
+        let event = parse_python_log_line(
+            r#"SVLOG {"level":"error","module":"request","event":"request_failed","requestId":"req-1","durationMs":12.5,"outcome":"failed","errorCode":"bad_input"}"#,
+        )
+        .unwrap();
+        assert_eq!(event.event, "request_failed");
+        assert_eq!(event.request_id.as_deref(), Some("req-1"));
+        assert!(
+            parse_python_log_line(r#"SVLOG {"module":"bad module","event":"request_failed"}"#)
+                .is_none()
+        );
     }
 
     #[test]

@@ -8,7 +8,11 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    models::project_note::{GetProjectNoteInput, ProjectNote, UpdateProjectNoteInput},
+    models::{
+        diagnostics::{LogLevel, LogRecord},
+        project_note::{GetProjectNoteInput, ProjectNote, UpdateProjectNoteInput},
+    },
+    services::log_service,
 };
 
 const NOTE_FILE_NAME: &str = "笔记.md";
@@ -135,13 +139,49 @@ async fn sync_note(pool: &SqlitePool, note: &ProjectNote) -> Result<ProjectNote,
     if note.status == "synced" {
         return Ok(note.clone());
     }
+    note_log(note, LogLevel::Info, "sync_started", "started", None);
     match write_remote(note).await {
-        Ok(()) => mark_synced(pool, &note.id, &note.content).await,
-        Err(error) => mark_sync_failure(pool, &note.id, &error.to_string()).await,
+        Ok(conflict_backed_up) => {
+            if conflict_backed_up {
+                note_log(
+                    note,
+                    LogLevel::Warn,
+                    "external_conflict_backed_up",
+                    "recovered",
+                    None,
+                );
+            }
+            let synced = mark_synced(pool, &note.id, &note.content).await?;
+            note_log(&synced, LogLevel::Info, "sync_completed", "succeeded", None);
+            Ok(synced)
+        }
+        Err(error) => {
+            let failed = mark_sync_failure(pool, &note.id, &error.to_string()).await?;
+            note_log(
+                &failed,
+                if failed.status == "failed" {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Warn
+                },
+                if failed.status == "failed" {
+                    "sync_failed"
+                } else {
+                    "sync_retry_scheduled"
+                },
+                if failed.status == "failed" {
+                    "failed"
+                } else {
+                    "retrying"
+                },
+                Some("note_sync_error"),
+            );
+            Ok(failed)
+        }
     }
 }
 
-async fn write_remote(note: &ProjectNote) -> Result<(), AppError> {
+async fn write_remote(note: &ProjectNote) -> Result<bool, AppError> {
     let remote = PathBuf::from(&note.remote_path);
     let parent = remote.parent().ok_or_else(|| {
         AppError::Validation("note remote path has no parent directory".to_owned())
@@ -154,6 +194,7 @@ async fn write_remote(note: &ProjectNote) -> Result<(), AppError> {
         Err(error) => return Err(AppError::Io(error)),
     };
 
+    let mut conflict_backed_up = false;
     if let Some(existing) = existing {
         let last_synced = note.last_synced_content.as_deref().unwrap_or("");
         let ours = existing == last_synced || existing == note.content;
@@ -162,6 +203,7 @@ async fn write_remote(note: &ProjectNote) -> Result<(), AppError> {
             // remote edit as a timestamped copy before writing our content.
             let backup = parent.join(format!("笔记-{}.md", timestamp()));
             tokio::fs::write(&backup, &existing).await?;
+            conflict_backed_up = true;
         }
     }
 
@@ -175,7 +217,7 @@ async fn write_remote(note: &ProjectNote) -> Result<(), AppError> {
             )));
         }
         tokio::fs::rename(&temporary, &remote).await?;
-        Ok(())
+        Ok(conflict_backed_up)
     }
     .await;
 
@@ -268,7 +310,17 @@ pub fn run_background(pool: SqlitePool) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            let _ = sync_once(&pool).await;
+            if sync_once(&pool).await.is_err() {
+                log_service::record_event(LogRecord {
+                    level: LogLevel::Error,
+                    module: "notes.sync".to_owned(),
+                    message: "note background sync cycle failed".to_owned(),
+                    event: Some("cycle_failed".to_owned()),
+                    outcome: Some("failed".to_owned()),
+                    error_code: Some("note_sync_cycle_error".to_owned()),
+                    ..Default::default()
+                });
+            }
         }
     });
 }
@@ -317,6 +369,27 @@ fn required<'a>(value: &'a str, label: &str) -> Result<&'a str, AppError> {
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+fn note_log(
+    note: &ProjectNote,
+    level: LogLevel,
+    event: &str,
+    outcome: &str,
+    error_code: Option<&str>,
+) {
+    log_service::record_event(LogRecord {
+        level,
+        module: "notes.sync".to_owned(),
+        message: event.replace('_', " "),
+        event: Some(event.to_owned()),
+        project_id: Some(note.project_id.clone()),
+        note_id: Some(note.id.clone()),
+        attempt: u32::try_from(note.attempt_count).ok(),
+        outcome: Some(outcome.to_owned()),
+        error_code: error_code.map(str::to_owned),
+        ..Default::default()
+    });
 }
 
 fn path_to_string(path: &Path) -> String {

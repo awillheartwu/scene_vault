@@ -10,11 +10,13 @@ use crate::{
         capture::{
             CaptureItem, CaptureItemIdInput, CompleteCaptureProcessingInput, MarkCaptureFailedInput,
         },
+        diagnostics::{LogLevel, LogRecord},
         vision::CaptureRuntimeStatus,
     },
     services::{
-        capture_archive_service, capture_service, processing_settings_service, recognition_service,
-        recognition_settings_service, vision_engine_service, vision_settings_service,
+        capture_archive_service, capture_service, log_service, processing_settings_service,
+        recognition_service, recognition_settings_service, vision_engine_service,
+        vision_settings_service,
     },
 };
 
@@ -26,6 +28,15 @@ pub async fn run(pool: SqlitePool, app: AppHandle, cache_root: PathBuf) {
     loop {
         interval.tick().await;
         if let Err(error) = process_once(&pool, &app, &cache_root).await {
+            log_service::record_event(LogRecord {
+                level: LogLevel::Error,
+                module: "capture.worker".to_owned(),
+                message: "capture worker cycle failed".to_owned(),
+                event: Some("cycle_failed".to_owned()),
+                outcome: Some("failed".to_owned()),
+                error_code: Some("worker_cycle_error".to_owned()),
+                ..Default::default()
+            });
             let _ = app.emit("capture:runtime-error", error.to_string());
         }
     }
@@ -44,22 +55,7 @@ pub async fn process_once(
     // are archived raw through the degraded path instead of waiting forever.
 
     if let Some(item) = capture_service::next_archive_pending(pool).await? {
-        match capture_archive_service::archive(
-            pool,
-            CaptureItemIdInput {
-                capture_item_id: item.id.clone(),
-            },
-        )
-        .await
-        {
-            Ok(completed) => emit_item(app, &completed),
-            Err(error) => {
-                let scheduled =
-                    capture_service::schedule_archive_retry(pool, &item.id, &error.to_string())
-                        .await?;
-                emit_item(app, &scheduled);
-            }
-        }
+        archive_and_emit(pool, app, &item).await?;
         emit_runtime(pool, app).await?;
         return Ok(());
     }
@@ -84,27 +80,20 @@ pub async fn process_once(
         return Ok(());
     };
     emit_item(app, &item);
+    capture_log(
+        &item,
+        LogLevel::Info,
+        "processing_started",
+        "started",
+        "capture processing started",
+        None,
+    );
     emit_runtime(pool, app).await?;
 
     if item.classification != "person" {
         let pending = capture_service::mark_archive_pending_from_processing(pool, &item.id).await?;
         emit_item(app, &pending);
-        match capture_archive_service::archive(
-            pool,
-            CaptureItemIdInput {
-                capture_item_id: pending.id.clone(),
-            },
-        )
-        .await
-        {
-            Ok(completed) => emit_item(app, &completed),
-            Err(error) => {
-                let scheduled =
-                    capture_service::schedule_archive_retry(pool, &pending.id, &error.to_string())
-                        .await?;
-                emit_item(app, &scheduled);
-            }
-        }
+        archive_and_emit(pool, app, &pending).await?;
         emit_runtime(pool, app).await?;
         return Ok(());
     }
@@ -124,32 +113,38 @@ pub async fn process_once(
     };
     match result {
         Ok(pending) => {
+            capture_log(
+                &pending,
+                LogLevel::Info,
+                "processing_completed",
+                if engine_configured {
+                    "succeeded"
+                } else {
+                    "degraded"
+                },
+                if engine_configured {
+                    "capture processing completed"
+                } else {
+                    "capture processing completed without AI engine"
+                },
+                None,
+            );
             if item.classification == "person" {
                 let _ = recognition_service::enroll_face_sample(pool, &pending.id).await;
                 let _ = recognition_service::suggest_from_face_bank(pool, &pending.id).await;
             }
             emit_item(app, &pending);
-            match capture_archive_service::archive(
-                pool,
-                CaptureItemIdInput {
-                    capture_item_id: pending.id.clone(),
-                },
-            )
-            .await
-            {
-                Ok(completed) => emit_item(app, &completed),
-                Err(error) => {
-                    let scheduled = capture_service::schedule_archive_retry(
-                        pool,
-                        &pending.id,
-                        &error.to_string(),
-                    )
-                    .await?;
-                    emit_item(app, &scheduled);
-                }
-            }
+            archive_and_emit(pool, app, &pending).await?;
         }
         Err(error) => {
+            capture_log(
+                &item,
+                LogLevel::Error,
+                "processing_failed",
+                "failed",
+                "capture processing failed",
+                Some("vision_processing_error"),
+            );
             let failed = capture_service::mark_failed(
                 pool,
                 MarkCaptureFailedInput {
@@ -200,15 +195,19 @@ async fn process_awaiting_label_feature(
     .await
     {
         Ok(response) => response,
-        Err(error) => {
+        Err(_error) => {
             // Engine failures are transient (broken model/env, missing
             // python, ...). Keep the item retryable instead of permanently
             // marking it "no face", and back off a minute so a broken engine
             // does not spin the worker every poll cycle. Only a successful
             // run that finds no face writes the "[]" marker below.
-            crate::services::log_service::error(
-                "capture.worker",
-                format!("face feature extraction failed: {error}"),
+            capture_log(
+                &item,
+                LogLevel::Error,
+                "prelabel_feature_failed",
+                "retrying",
+                "pre-label face feature extraction failed; retry scheduled",
+                Some("vision_feature_error"),
             );
             sqlx::query(
                 r#"
@@ -418,6 +417,78 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
 
 fn emit_item(app: &AppHandle, item: &CaptureItem) {
     let _ = app.emit("capture:item-updated", item);
+}
+
+async fn archive_and_emit(
+    pool: &SqlitePool,
+    app: &AppHandle,
+    item: &CaptureItem,
+) -> Result<(), AppError> {
+    capture_log(
+        item,
+        LogLevel::Info,
+        "archive_started",
+        "started",
+        "capture archive started",
+        None,
+    );
+    match capture_archive_service::archive(
+        pool,
+        CaptureItemIdInput {
+            capture_item_id: item.id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(completed) => {
+            capture_log(
+                &completed,
+                LogLevel::Info,
+                "archive_completed",
+                "succeeded",
+                "capture archive completed",
+                None,
+            );
+            emit_item(app, &completed);
+        }
+        Err(error) => {
+            let scheduled =
+                capture_service::schedule_archive_retry(pool, &item.id, &error.to_string()).await?;
+            capture_log(
+                &scheduled,
+                LogLevel::Warn,
+                "archive_retry_scheduled",
+                "retrying",
+                "capture archive failed; retry scheduled",
+                Some("archive_error"),
+            );
+            emit_item(app, &scheduled);
+        }
+    }
+    Ok(())
+}
+
+fn capture_log(
+    item: &CaptureItem,
+    level: LogLevel,
+    event: &str,
+    outcome: &str,
+    message: &str,
+    error_code: Option<&str>,
+) {
+    log_service::record_event(LogRecord {
+        level,
+        module: "capture.worker".to_owned(),
+        message: message.to_owned(),
+        event: Some(event.to_owned()),
+        project_id: Some(item.project_id.clone()),
+        session_id: Some(item.session_id.clone()),
+        capture_item_id: Some(item.id.clone()),
+        attempt: u32::try_from(item.attempt_count).ok(),
+        outcome: Some(outcome.to_owned()),
+        error_code: error_code.map(str::to_owned),
+        ..Default::default()
+    });
 }
 
 async fn emit_runtime(pool: &SqlitePool, app: &AppHandle) -> Result<(), AppError> {

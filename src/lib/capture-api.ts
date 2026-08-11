@@ -1,6 +1,27 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+
+async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args);
+  } catch (error) {
+    if (command !== "record_client_event") {
+      void tauriInvoke("record_client_event", {
+        input: {
+          level: "error",
+          module: "ipc",
+          event: "command_failed",
+          message: `${command} failed`,
+          operationId: command,
+          outcome: "failed",
+          errorCode: "tauri_invoke_error",
+        },
+      }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
 
 export interface Project {
   id: string;
@@ -234,12 +255,34 @@ export interface LogRecord {
   level: LogLevel;
   module: string;
   message: string;
+  event?: string | null;
+  operationId?: string | null;
+  requestId?: string | null;
+  projectId?: string | null;
+  sessionId?: string | null;
+  captureItemId?: string | null;
+  noteId?: string | null;
+  attempt?: number | null;
+  durationMs?: number | null;
+  outcome?: string | null;
+  workerMode?: string | null;
+  errorCode?: string | null;
 }
 
 export interface LogQueryResult {
   records: LogRecord[];
   matchedCount: number;
   truncated: boolean;
+  offset: number;
+  nextOffset: number | null;
+  hasMore: boolean;
+}
+
+export interface LogPolicySettings {
+  retentionDays: number;
+  maxFileSizeMb: number;
+  maxArchivedFiles: number;
+  automaticCleanup: boolean;
 }
 
 export interface LogStatus {
@@ -249,11 +292,56 @@ export interface LogStatus {
   retentionDays: number;
   maxFileBytes: number;
   maxArchivedFiles: number;
+  droppedRecords: number;
+  automaticCleanup: boolean;
 }
 
 export interface LogCleanupResult {
   removedFiles: number;
   status: LogStatus;
+}
+
+export interface ProcessResourceGroup {
+  role: "rust" | "webview" | "python" | "helper";
+  processCount: number;
+  pids: number[];
+  cpuPercent: number | null;
+  workingSetBytes: number;
+  peakWorkingSetBytes: number;
+  privateBytes: number | null;
+}
+
+export interface ProcessResourceStatus {
+  capturedAt: string;
+  approximate: boolean;
+  logicalProcessors: number;
+  groups: ProcessResourceGroup[];
+  totalCpuPercent: number | null;
+  totalWorkingSetBytes: number;
+  totalPrivateBytes: number | null;
+}
+
+export interface StorageResourceEntry {
+  kind: string;
+  label: string;
+  path: string | null;
+  totalBytes: number;
+  fileCount: number;
+  cleanupAvailable: boolean;
+  cleanupDescription: string | null;
+}
+
+export interface StorageResourceStatus {
+  capturedAt: string;
+  entries: StorageResourceEntry[];
+  totalBytes: number;
+}
+
+export interface CleanupResourceResult {
+  kind: string;
+  removedFiles: number;
+  reclaimedBytes: number;
+  message: string;
 }
 
 export interface VisionSettings {
@@ -530,6 +618,10 @@ export const captureApi = {
     until?: string | null;
     levels?: LogLevel[];
     module?: string | null;
+    event?: string | null;
+    correlationId?: string | null;
+    outcome?: string | null;
+    offset?: number;
     limit?: number;
   }) => invoke<LogQueryResult>("list_debug_logs", {
     input: {
@@ -537,11 +629,34 @@ export const captureApi = {
       until: input.until ?? null,
       levels: input.levels ?? [],
       module: input.module ?? null,
+      event: input.event ?? null,
+      correlationId: input.correlationId ?? null,
+      outcome: input.outcome ?? null,
+      offset: input.offset ?? 0,
       limit: input.limit,
     },
   }),
+  recordClientEvent: (input: {
+    level: LogLevel;
+    module: string;
+    event: string;
+    message?: string | null;
+    operationId?: string | null;
+    durationMs?: number | null;
+    outcome?: string | null;
+    errorCode?: string | null;
+  }) => invoke<void>("record_client_event", { input }),
   getLogStatus: () => invoke<LogStatus>("get_log_status"),
+  getLogSettings: () => invoke<LogPolicySettings>("get_log_settings"),
+  updateLogSettings: (input: LogPolicySettings) =>
+    invoke<LogPolicySettings>("update_log_settings", { input }),
   cleanupDebugLogs: () => invoke<LogCleanupResult>("cleanup_debug_logs"),
+  getProcessResourceStatus: () =>
+    invoke<ProcessResourceStatus>("get_process_resource_status"),
+  getStorageResourceStatus: () =>
+    invoke<StorageResourceStatus>("get_storage_resource_status"),
+  cleanupResource: (kind: "thumbnail_cache" | "capture_output" | "expired_logs") =>
+    invoke<CleanupResourceResult>("cleanup_resource", { input: { kind } }),
   getDiagnosticSummary: () => invoke<string>("get_diagnostic_summary"),
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   updateAppSettings: (settings: AppSettings) =>

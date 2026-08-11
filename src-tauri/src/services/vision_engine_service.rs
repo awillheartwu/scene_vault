@@ -572,25 +572,31 @@ async fn invoke_with_progress(
     // Stream SVPROGRESS lines from stderr while stdout keeps the single JSON
     // response contract. Old Python versions never write progress lines, so
     // this degrades gracefully to no progress events.
-    let stderr_task = if progress.is_some() {
-        if let Some(stderr) = child.stderr.take() {
-            let mut callback = progress.take().expect("progress checked above");
-            Some(tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Some((stage, percent)) = parse_progress_line(&line) {
+    let stderr_task = if let Some(stderr) = child.stderr.take() {
+        let mut callback = progress.take();
+        Some(tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            let mut captured = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some((stage, percent)) = parse_progress_line(&line) {
+                    if let Some(callback) = callback.as_mut() {
                         callback(&stage, percent);
-                    } else if !line.trim().is_empty() {
-                        log_service::debug(
-                            "vision.python",
-                            format!("stderr: {}", truncate(&line, 500)),
-                        );
                     }
+                } else if vision_worker_service::record_python_log_line(&line) {
+                    // Structured Python events are persisted by the Rust logger.
+                } else if !line.trim().is_empty() {
+                    captured.push(vision_worker_service::sanitize_external_line(&line));
+                    log_service::debug(
+                        "vision.python",
+                        format!(
+                            "stderr: {}",
+                            vision_worker_service::sanitize_external_line(&line)
+                        ),
+                    );
                 }
-            }))
-        } else {
-            None
-        }
+            }
+            captured.join(" | ")
+        }))
     } else {
         None
     };
@@ -648,14 +654,19 @@ async fn invoke_with_progress(
             return Err(AppError::Vision("Python request timed out".to_owned()));
         }
     };
-    finish_stderr_task(stderr_task).await;
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let streamed_stderr = finish_stderr_task(stderr_task).await;
+    let output_stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stderr = if streamed_stderr.is_empty() {
+        output_stderr
+    } else {
+        streamed_stderr
+    };
     if !stderr.is_empty() {
         log_service::debug(
             "vision.python",
             format!(
                 "stderr: {}",
-                truncate(&stderr.replace(['\r', '\n'], " | "), 1_000)
+                vision_worker_service::sanitize_external_line(&stderr)
             ),
         );
     }
@@ -689,23 +700,24 @@ async fn invoke_with_progress(
     ))
 }
 
-async fn abort_stderr_task(task: Option<JoinHandle<()>>) {
+async fn abort_stderr_task(task: Option<JoinHandle<String>>) {
     if let Some(task) = task {
         task.abort();
         let _ = task.await;
     }
 }
 
-async fn finish_stderr_task(task: Option<JoinHandle<()>>) {
+async fn finish_stderr_task(task: Option<JoinHandle<String>>) -> String {
     if let Some(mut task) = task {
-        if tokio::time::timeout(Duration::from_secs(2), &mut task)
-            .await
-            .is_err()
-        {
-            task.abort();
-            let _ = task.await;
+        match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+            Ok(Ok(output)) => return output,
+            _ => {
+                task.abort();
+                let _ = task.await;
+            }
         }
     }
+    String::new()
 }
 
 fn legacy_oneshot_request(request: &Value) -> Value {

@@ -88,9 +88,9 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
   与项目体积
 - [x] 建立 SFace/ArcFace one-shot/worker 与当前磁盘体积初始资源基线；结果见
   [RESOURCE_USAGE.md](RESOURCE_USAGE.md)
-- [ ] 增加“资源与存储”诊断页：Rust/WebView2/Python CPU、Working Set、Private Bytes，
+- [x] 增加“资源与存储”诊断页：Rust/WebView2/Python CPU、Working Set、Private Bytes，
   以及数据库、缓存、日志、模型、字体和运行时体积
-- [ ] 为已完成且成功归档的 `capture-output` 中间产物建立安全清理闭环
+- [x] 为已完成且成功归档的 `capture-output` 中间产物建立安全清理闭环
 - [x] 应用内自定义右键菜单：通用 ContextMenu 组件（Teleport + 命中判定），第一批接入
   Home 项目卡片、History 条目、Capture 截图项；危险操作复用确认对话框；需要新增后端
   命令的删除类操作暂缓；约束见
@@ -100,7 +100,9 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
 - [x] GitHub / Forgejo 远程双重推送流程
 - [x] 日志清理与可观测性：结构化本地日志、轮转保留策略、历史页调试日志查看与诊断复制；
   约束见 [本地日志与诊断信息决策](decisions/2026-08-09-local-logging-and-diagnostics.md)
-- [ ] 日志覆盖扩展：LogRecord v2 关联字段、Capture/归档/笔记主链路、Python `SVLOG`、
+- [x] 日志覆盖扩展：LogRecord v2 关联字段、Capture/归档/笔记主链路、Python `SVLOG`、
   Vue 安全事件桥和按 operation/request/capture ID 查询
+- [x] 日志诊断收尾：设置页可调整保留天数、单文件轮转上限、归档数量和自动清理；日志页
+  使用固定时间窗的 100 条分页与滚动加载，离开日志页后无实时订阅或后台轮询
 - [ ] 测试体系大更新：全量调整与对齐
 - [ ] README 与项目内文档编写完善（详尽版）

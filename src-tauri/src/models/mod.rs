@@ -8,5 +8,6 @@ pub mod project;
 pub mod project_note;
 pub mod recognition;
 pub mod recognition_settings;
+pub mod resource;
 pub mod tag;
 pub mod vision;

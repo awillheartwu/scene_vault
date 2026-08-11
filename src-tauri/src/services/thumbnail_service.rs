@@ -5,7 +5,11 @@ use std::time::SystemTime;
 
 use tokio::sync::Semaphore;
 
-use crate::error::AppError;
+use crate::{
+    error::AppError,
+    models::diagnostics::{LogLevel, LogRecord},
+    services::log_service,
+};
 
 /// Longest edge of generated thumbnails. 320px keeps text in annotated views
 /// barely readable while staying a few KB as JPEG.
@@ -86,7 +90,22 @@ pub async fn read_thumbnail(
         return Ok(bytes);
     }
 
-    let bytes = generate(source).await?;
+    let bytes = match generate(source).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log_service::record_event(LogRecord {
+                level: LogLevel::Warn,
+                module: "thumbnail.cache".to_owned(),
+                message: "thumbnail generation failed".to_owned(),
+                event: Some("generation_failed".to_owned()),
+                capture_item_id: Some(item_id.to_owned()),
+                outcome: Some("failed".to_owned()),
+                error_code: Some("thumbnail_generation_error".to_owned()),
+                ..Default::default()
+            });
+            return Err(error);
+        }
+    };
     if let Some(parent) = cache.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -183,14 +202,29 @@ pub fn enforce_cache_limit(dir: &Path, limit_bytes: u64) {
     }
     files.sort_by_key(|(modified, _)| *modified);
     let mut remaining = total;
+    let mut removed_files = 0_u32;
     for (_, path) in files {
         if remaining <= evict_to {
             break;
         }
-        if let Ok(meta) = std::fs::metadata(&path) {
-            remaining = remaining.saturating_sub(meta.len());
+        let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        if std::fs::remove_file(path).is_ok() {
+            remaining = remaining.saturating_sub(bytes);
+            removed_files = removed_files.saturating_add(1);
         }
-        let _ = std::fs::remove_file(path);
+    }
+    if removed_files > 0 {
+        log_service::record_event(LogRecord {
+            level: LogLevel::Info,
+            module: "thumbnail.cache".to_owned(),
+            message: format!(
+                "evicted {removed_files} thumbnail files and reclaimed {} bytes",
+                total.saturating_sub(remaining)
+            ),
+            event: Some("eviction_completed".to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            ..Default::default()
+        });
     }
 }
 
