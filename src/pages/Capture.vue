@@ -67,6 +67,22 @@ const characters = ref<Character[]>([]);
 const sessions = ref<CaptureSession[]>([]);
 const items = ref<CaptureItem[]>([]);
 const runtime = ref<CaptureRuntimeStatus | null>(null);
+const engineStatusLabel = computed(() => {
+  switch (runtime.value?.engineStatus) {
+    case "configured":
+      return "AI 已配置";
+    case "sidecar":
+      return "内置引擎";
+    default:
+      return "AI 未配置";
+  }
+});
+const engineOnline = computed(
+  () =>
+    (runtime.value?.engineStatus === "configured" ||
+      runtime.value?.engineStatus === "sidecar") &&
+    !runtime.value?.workerStatus,
+);
 const projectId = ref("");
 const sourceDirs = ref<ProjectSourceDirectory[]>([]);
 const projectDestination = ref("");
@@ -826,8 +842,8 @@ onBeforeUnmount(() => {
         <section class="session-control" aria-label="会话控制">
           <div class="session-health">
             <span :class="{ online: activeSession }"><Wifi :size="15" />{{ activeSession ? "监听中" : "未监听" }}</span>
-            <span :class="{ online: runtime?.engineStatus === 'configured' }">
-              <Sparkles :size="15" />{{ runtime?.engineStatus === "configured" ? "AI 已配置" : "AI 未配置" }}
+            <span :class="{ online: engineOnline }">
+              <Sparkles :size="15" />{{ engineStatusLabel }}
             </span>
           </div>
           <button v-if="activeSession" type="button" class="stop-button" :disabled="busy" @click="stopSession">
@@ -855,7 +871,7 @@ onBeforeUnmount(() => {
               :disabled="importBusy || runtime?.engineStatus === 'unconfigured'"
               :title="
                 runtime?.engineStatus === 'unconfigured'
-                  ? 'AI 未配置：先在设置中配置 Python 与模型，才能开始识别导入截图'
+                  ? 'AI 未配置：在设置中配置 Python 与模型，或安装带 AI 组件的版本，才能开始识别导入截图'
                   : '逐张识别已导入截图'
               "
               @click="startImportedRecognition"

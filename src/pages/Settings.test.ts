@@ -17,6 +17,7 @@ const { api, pickFile, pickDirectory, openPathExternal, revealPath, leaveGuard }
     updateRecognitionSettings: vi.fn(),
     updateProcessingSettings: vi.fn(),
     checkVision: vi.fn(),
+    runtimeStatus: vi.fn(),
     getProcessResourceStatus: vi.fn(),
     getStorageResourceStatus: vi.fn(),
     cleanupResource: vi.fn(),
@@ -156,6 +157,7 @@ function mountSettings() {
 }
 
 beforeEach(() => {
+  api.runtimeStatus.mockResolvedValue({ engineStatus: "unconfigured", workerStatus: "idle" });
   api.getVisionSettings.mockResolvedValue({ ...visionSettings });
   api.getAppSettings.mockResolvedValue({ ...appSettings });
   api.getThumbnailCacheStatus.mockResolvedValue({ ...cacheStatus });
@@ -314,6 +316,18 @@ describe("Settings category navigation", () => {
     expect((page.get("#recognition-threshold").element as HTMLInputElement).value).toBe(
       "0.55",
     );
+  });
+
+  it("announces the bundled sidecar engine as ready in the vision pane", async () => {
+    api.runtimeStatus.mockResolvedValue({ engineStatus: "sidecar", workerStatus: "idle" });
+    const wrapper = mountSettings();
+    await flushPromises();
+
+    await wrapper.get("#settings-tab-vision").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("内置引擎（bundled sidecar）已就绪");
+    expect(wrapper.text()).toContain("无需配置 Python");
   });
 });
 

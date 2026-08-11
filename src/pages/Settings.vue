@@ -86,6 +86,7 @@ const settings = ref<VisionSettings>({
   fontPath: null,
 });
 const health = ref<VisionHealth | null>(null);
+const runtimeEngineStatus = ref<string | null>(null);
 const appSettings = ref<AppSettings>({
   classifyShortcut: "Ctrl+Shift+S",
   noteShortcut: "Ctrl+Shift+N",
@@ -257,6 +258,14 @@ const hasDirtySettings = computed(() => Object.values(dirtyByCategory.value).som
 async function initialize() {
   try {
     settings.value = await captureApi.getVisionSettings();
+    captureApi
+      .runtimeStatus()
+      .then((status) => {
+        runtimeEngineStatus.value = status.engineStatus;
+      })
+      .catch(() => {
+        runtimeEngineStatus.value = null;
+      });
     appSettings.value = await captureApi.getAppSettings();
     cacheStatus.value = await captureApi.getThumbnailCacheStatus();
     namingSettings.value = await captureApi.getArchiveNamingSettings();
@@ -1208,6 +1217,20 @@ onBeforeUnmount(() => {
         <span class="eyebrow">本地视觉 · 可选</span>
         <h2>视觉引擎</h2>
       </div>
+      <div
+        v-if="runtimeEngineStatus === 'sidecar'"
+        class="engine-banner engine-banner-sidecar"
+        role="status"
+      >
+        内置引擎（bundled sidecar）已就绪：AI 组件已随安装包提供，无需配置 Python。
+      </div>
+      <div
+        v-else-if="runtimeEngineStatus === 'configured'"
+        class="engine-banner engine-banner-configured"
+        role="status"
+      >
+        外部 Python 引擎已配置。
+      </div>
       <div class="settings-field">
         <label for="python-path">Python 可执行文件</label>
         <p>开发阶段使用本地 Python 3.11+，不会随应用自动安装。</p>
@@ -1391,6 +1414,26 @@ onBeforeUnmount(() => {
 
 .settings-pane .health-card {
   margin-top: 14px;
+}
+
+.settings-pane .engine-banner {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settings-pane .engine-banner-sidecar {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+}
+
+.settings-pane .engine-banner-configured {
+  background: color-mix(in srgb, var(--chart-2) 10%, transparent);
+  color: var(--foreground);
+  border: 1px solid color-mix(in srgb, var(--chart-2) 30%, transparent);
 }
 
 @media (max-width: 860px) {
