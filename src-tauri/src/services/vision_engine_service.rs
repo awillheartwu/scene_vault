@@ -14,7 +14,7 @@ use tokio::{
 use crate::{
     error::AppError,
     models::vision::{ProcessingSettings, VisionHealth, VisionProcessData, VisionSettings},
-    services::{log_service, vision_settings_service},
+    services::{log_service, vision_settings_service, vision_worker_service},
 };
 
 const PROTOCOL_VERSION: i64 = 1;
@@ -27,26 +27,50 @@ pub type ProgressCallback = Box<dyn FnMut(&str, f64) + Send>;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EngineResponse {
-    protocol_version: i64,
+pub(super) struct EngineResponse {
+    pub(super) protocol_version: i64,
     #[serde(default)]
-    request_id: Option<String>,
-    ok: bool,
-    action: String,
-    data: Option<Value>,
-    error: Option<EngineError>,
+    pub(super) request_id: Option<String>,
+    pub(super) ok: bool,
+    pub(super) action: String,
+    pub(super) data: Option<Value>,
+    pub(super) error: Option<EngineError>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EngineError {
-    code: String,
-    message: String,
+pub(super) struct EngineError {
+    pub(super) code: String,
+    pub(super) message: String,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct InvocationMetrics {
     spawn_ms: f64,
     total_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessMode {
+    Worker,
+    OneshotFallback,
+}
+
+impl ProcessMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::OneshotFallback => "oneshot_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessInvocationMetrics {
+    mode: ProcessMode,
+    spawn_ms: Option<f64>,
+    worker_startup_ms: Option<f64>,
+    worker_attempt_ms: f64,
+    invoke_ms: f64,
 }
 
 pub async fn health(settings: &VisionSettings) -> Result<VisionHealth, AppError> {
@@ -263,27 +287,83 @@ fn insert_number(object: &mut serde_json::Map<String, Value>, key: &str, value: 
     }
 }
 
-async fn invoke_process(
+pub(super) async fn invoke_process(
     settings: &VisionSettings,
     mut request: Value,
     progress: Option<ProgressCallback>,
 ) -> Result<VisionProcessData, AppError> {
     let request_id = uuid::Uuid::new_v4().to_string();
     request["requestId"] = Value::String(request_id.clone());
-    let stdin = serde_json::to_vec(&request)
-        .map_err(|error| AppError::Vision(format!("cannot encode vision request: {error}")))?;
     let request_started = Instant::now();
-    let invocation =
-        invoke_with_progress(settings, "request", Some(&stdin), PROCESS_TIMEOUT, progress).await;
-    let (response, metrics) = match invocation {
-        Ok(result) => result,
-        Err(error) => {
-            log_request_failure(&request_id, request_started, &error);
-            return Err(error);
+    let worker_attempt_started = Instant::now();
+    let mut progress = progress;
+    let worker_invocation = vision_worker_service::invoke(
+        settings,
+        &request,
+        &request_id,
+        PROCESS_TIMEOUT,
+        &mut progress,
+    )
+    .await;
+    let (response, metrics) = match worker_invocation {
+        Ok(invocation) => (
+            invocation.response,
+            ProcessInvocationMetrics {
+                mode: ProcessMode::Worker,
+                spawn_ms: None,
+                worker_startup_ms: invocation.startup_ms,
+                worker_attempt_ms: elapsed_ms(worker_attempt_started),
+                invoke_ms: invocation.total_ms,
+            },
+        ),
+        Err(worker_error) => {
+            if vision_worker_service::is_shutdown_requested() {
+                log_request_failure(
+                    &request_id,
+                    request_started,
+                    ProcessMode::Worker,
+                    &worker_error,
+                );
+                return Err(worker_error);
+            }
+            let worker_attempt_ms = elapsed_ms(worker_attempt_started);
+            log_service::warn(
+                "vision.worker",
+                format!(
+                    "state=fallback request_id={request_id} mode=oneshot worker_attempt_ms={worker_attempt_ms:.3} error={}",
+                    truncate(&worker_error.to_string().replace(['\r', '\n'], " | "), 500)
+                ),
+            );
+            let stdin = serde_json::to_vec(&request).map_err(|error| {
+                AppError::Vision(format!("cannot encode vision request: {error}"))
+            })?;
+            match invoke_with_progress(settings, "request", Some(&stdin), PROCESS_TIMEOUT, progress)
+                .await
+            {
+                Ok((response, invocation)) => (
+                    response,
+                    ProcessInvocationMetrics {
+                        mode: ProcessMode::OneshotFallback,
+                        spawn_ms: Some(invocation.spawn_ms),
+                        worker_startup_ms: None,
+                        worker_attempt_ms,
+                        invoke_ms: invocation.total_ms,
+                    },
+                ),
+                Err(error) => {
+                    log_request_failure(
+                        &request_id,
+                        request_started,
+                        ProcessMode::OneshotFallback,
+                        &error,
+                    );
+                    return Err(error);
+                }
+            }
         }
     };
     if let Err(error) = ensure_protocol(&response, "processScreenshot") {
-        log_request_failure(&request_id, request_started, &error);
+        log_request_failure(&request_id, request_started, metrics.mode, &error);
         return Err(error);
     }
     if response
@@ -295,24 +375,24 @@ async fn invoke_process(
             "Python response request ID mismatch: expected {request_id}, received {}",
             response.request_id.as_deref().unwrap_or_default()
         ));
-        log_request_failure(&request_id, request_started, &error);
+        log_request_failure(&request_id, request_started, metrics.mode, &error);
         return Err(error);
     }
     if !response.ok {
         let error = response_error(response);
-        log_request_failure(&request_id, request_started, &error);
+        log_request_failure(&request_id, request_started, metrics.mode, &error);
         return Err(error);
     }
     let Some(data) = response.data else {
         let error = AppError::Vision("processing response has no data".to_owned());
-        log_request_failure(&request_id, request_started, &error);
+        log_request_failure(&request_id, request_started, metrics.mode, &error);
         return Err(error);
     };
     let result: VisionProcessData = match serde_json::from_value(data) {
         Ok(result) => result,
         Err(error) => {
             let error = AppError::Vision(format!("invalid processing response: {error}"));
-            log_request_failure(&request_id, request_started, &error);
+            log_request_failure(&request_id, request_started, metrics.mode, &error);
             return Err(error);
         }
     };
@@ -320,9 +400,12 @@ async fn invoke_process(
     log_service::debug(
         "vision.request",
         format!(
-            "request_id={request_id} mode=oneshot action=processScreenshot outcome=ok spawn_ms={:.3} rust_invoke_ms={:.3} rust_total_ms={:.3} processor_init_ms={} read_ms={} detect_ms={} feature_ms={} annotate_ms={} crop_ms={} write_ms={} process_total_ms={} service_total_ms={}",
-            metrics.spawn_ms,
-            metrics.total_ms,
+            "request_id={request_id} mode={} action=processScreenshot outcome=ok spawn_ms={} worker_startup_ms={} worker_attempt_ms={:.3} rust_invoke_ms={:.3} rust_total_ms={:.3} processor_init_ms={} read_ms={} detect_ms={} feature_ms={} annotate_ms={} crop_ms={} write_ms={} process_total_ms={} service_total_ms={}",
+            metrics.mode.as_str(),
+            timing_value(metrics.spawn_ms),
+            timing_value(metrics.worker_startup_ms),
+            metrics.worker_attempt_ms,
+            metrics.invoke_ms,
             elapsed_ms(request_started),
             timing_value(timings.and_then(|value| value.processor_init_ms)),
             timing_value(timings.and_then(|value| value.read_ms)),
@@ -531,11 +614,12 @@ fn timing_value(value: Option<f64>) -> String {
         .unwrap_or_else(|| "na".to_owned())
 }
 
-fn log_request_failure(request_id: &str, started: Instant, error: &AppError) {
+fn log_request_failure(request_id: &str, started: Instant, mode: ProcessMode, error: &AppError) {
     log_service::error(
         "vision.request",
         format!(
-            "request_id={request_id} mode=oneshot action=processScreenshot outcome=error rust_total_ms={:.3} error={}",
+            "request_id={request_id} mode={} action=processScreenshot outcome=error rust_total_ms={:.3} error={}",
+            mode.as_str(),
             elapsed_ms(started),
             truncate(&error.to_string().replace(['\r', '\n'], " | "), 500)
         ),

@@ -58,15 +58,17 @@ $requests | python -m scene_vault_ai worker
 
 - 输入输出均为 UTF-8 JSON Lines；空行忽略，单行最大 1 MiB。
 - 单个请求的 JSON、协议或处理错误只返回该请求的错误响应，不终止 worker。
-- stdin 到达 EOF 时正常退出；桌面端后续负责超时、崩溃重启与关闭生命周期。
+- stdin 到达 EOF 时正常退出；桌面端负责超时、崩溃重启与关闭生命周期。
 - 请求串行执行。YuNet 按完整检测配置缓存，SFace / ArcFace 按模型路径分别缓存；配置
   或路径变化会替换对应旧实例，加载失败不会进入缓存，推理异常会淘汰对应实例以便
   下一请求重新加载。
 - 进度继续写 stderr，格式为 `SVPROGRESS` JSON，并在请求提供 ID 时包含
   `requestId`。stdout 不允许写日志或非协议内容。
 
-当前 Rust 主程序尚未切换到 `worker`，仍使用 `request` 作为稳定路径。这样可以先独立
-验证 Python 多请求与缓存语义，再在下一阶段接入 Rust Worker Manager。
+Rust 主程序默认使用 `worker`，并在首次请求时执行健康握手。worker 无法启动、超时、
+退出或返回损坏的协议响应时，Rust 会先停止该进程，再仅对当前请求降级到 `request`；
+业务错误响应不会重复执行。`vision.worker` 和 `vision.request` 日志可用于比较模式与
+耗时。
 
 ## processScreenshot
 

@@ -52,11 +52,12 @@ queued ──► processing ──► archive_pending ──► completed
 
 ## Python AI 协议
 
-Rust 当前通过版本化 JSON 请求启动 Python 单图任务。Python 同时提供常驻 `worker`
-命令，以 JSON Lines 串行处理多个请求并复用 YuNet、SFace 和 ArcFace 模型实例；Rust
-Worker Manager 接入前，桌面端仍默认使用一次性 `request`。两种模式的标准输出都只能
-包含机器可读响应，日志和带 `SVPROGRESS` 前缀的阶段进度写入标准错误；Rust 将进度
-转发为 Tauri 事件。
+Rust 通过版本化 JSON 协议调用常驻 Python `worker`，以 JSON Lines 串行处理多个请求
+并复用 YuNet、SFace 和 ArcFace 模型实例。Worker Manager 在第一次视觉请求时惰性
+启动并完成健康握手；设置变化、进程退出或传输错误会终止旧进程，下一请求重新启动。
+当前请求遇到 worker 超时或崩溃时，在确认旧进程已停止后降级到一次性 `request`，避免
+截图任务丢失。两种模式的标准输出都只能包含机器可读响应，日志和带 `SVPROGRESS`
+前缀的阶段进度写入标准错误；Rust 将进度转发为 Tauri 事件。
 
 ```text
 Rust AI Service
@@ -71,6 +72,9 @@ Python Provider
 Python 每次只处理 Rust 指定的一张图片及本地输出路径。它不扫描来源目录、不读取角色
 名单、不修改 SQLite，也不把半成品写到 NAS。协议字段和错误码见
 [Python AI 协议](../python/README.md)。
+
+Worker 由全局 single-flight 管理器拥有，不与 `capture_items` 状态机竞争任务所有权。
+应用退出时先取消活动请求并关闭 stdin，短暂等待后仍未退出才强制终止子进程。
 
 ## 本地日志与诊断
 

@@ -10,7 +10,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -169,6 +169,14 @@ pub fn run() {
             commands::diagnostics::get_diagnostic_summary,
             commands::window::set_window_always_on_top,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Scene Vault");
+        .build(tauri::generate_context!())
+        .expect("error while building Scene Vault");
+    app.run(|_, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            tauri::async_runtime::block_on(services::vision_worker_service::shutdown());
+        }
+    });
 }

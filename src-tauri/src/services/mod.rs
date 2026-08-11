@@ -18,6 +18,7 @@ pub mod shortcuts;
 pub mod thumbnail_service;
 pub mod vision_engine_service;
 pub mod vision_settings_service;
+pub mod vision_worker_service;
 
 #[cfg(test)]
 pub mod test_support;
