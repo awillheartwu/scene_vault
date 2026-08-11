@@ -246,7 +246,15 @@ impl WorkerProcess {
             .as_deref()
             .ok_or_else(|| AppError::Vision("Python module root is not configured".to_owned()))?;
         log_service::info("vision.worker", "state=starting");
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // This GUI process has no console; without this flag Windows opens
+            // a visible cmd window for the python worker.
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = command
             .arg("-m")
             .arg("scene_vault_ai")
             .arg("worker")

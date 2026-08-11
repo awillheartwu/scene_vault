@@ -552,7 +552,15 @@ async fn invoke_with_progress(
         .ok_or_else(|| AppError::Vision("Python module root is not configured".to_owned()))?;
     let invocation_started = Instant::now();
     let spawn_started = Instant::now();
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // This GUI process has no console; without this flag Windows opens a
+        // visible cmd window for every spawned python.exe.
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .arg("-m")
         .arg("scene_vault_ai")
         .arg(command_name)
