@@ -49,7 +49,7 @@ pub async fn process_once(
 ) -> Result<(), AppError> {
     let vision_settings = vision_settings_service::get(pool).await?;
     let processing_settings = processing_settings_service::get(pool).await?;
-    let engine_configured = vision_settings_service::is_configured(&vision_settings);
+    let engine_configured = vision_settings_service::is_engine_available(&vision_settings);
     let recognition = recognition_settings_service::get(pool).await?;
     // Person items are never skipped: without a configured Python engine they
     // are archived raw through the degraded path instead of waiting forever.

@@ -103,6 +103,15 @@ async fn autoconfigure_bundled_with(
         settings.sface_model_path = Some(sface.to_string_lossy().into_owned());
         changed = true;
     }
+    // An arcface recognizer without its model file is a broken configuration;
+    // the bundled SFace model is always available, so fall back to it.
+    if settings.recognizer.as_deref() == Some("arcface")
+        && settings.arcface_model_path.is_none()
+        && settings.sface_model_path.is_some()
+    {
+        settings.recognizer = Some("sface".to_owned());
+        changed = true;
+    }
     if settings.font_path.is_none() {
         let bundled_font = resources.join(BUNDLED_FONTS_REL).join("SmileySans-Oblique.ttf");
         if bundled_font.is_file() {
@@ -392,5 +401,31 @@ mod tests {
             settings.sface_model_path,
             Some(sface.to_string_lossy().into_owned())
         );
+
+        // An arcface recognizer without its model file falls back to the
+        // bundled SFace model on the next startup.
+        let broken = VisionSettings {
+            python_executable_path: None,
+            python_module_root: None,
+            yunet_model_path: Some(custom_yunet.to_string_lossy().into_owned()),
+            sface_model_path: None,
+            recognizer: Some("arcface".to_owned()),
+            arcface_model_path: None,
+            font_path: None,
+        };
+        update(
+            &pool,
+            UpdateVisionSettingsInput {
+                settings: broken.clone(),
+            },
+        )
+        .await
+        .expect("save broken");
+        autoconfigure_bundled_with(&pool, app_local.path(), &sidecar)
+            .await
+            .expect("autoconfigure broken");
+        let settings = get(&pool).await.expect("read broken");
+        assert_eq!(settings.recognizer.as_deref(), Some("sface"));
+        assert!(settings.sface_model_path.is_some());
     }
 }
