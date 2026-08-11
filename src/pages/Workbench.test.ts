@@ -1,9 +1,12 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useToasts } from "@/lib/toast";
+import { resetWorkbenchSnapshot } from "@/lib/workbench-cache";
 
-const { api, eventHandlers } = vi.hoisted(() => ({
-  api: {
+const { api, eventHandlers, listenMock } = vi.hoisted(() => {
+  const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
+  return {
+    api: {
     listProjects: vi.fn(),
     listProjectCharacterSummaries: vi.fn(),
     listCharacters: vi.fn(),
@@ -29,17 +32,21 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     revealPath: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
-  },
-  eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
-}));
+    },
+    eventHandlers,
+    listenMock: vi.fn(
+      async (name: string, handler: (event: { payload: unknown }) => void) => {
+        eventHandlers.set(name, handler);
+        return () => {
+          eventHandlers.delete(name);
+        };
+      },
+    ),
+  };
+});
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(
-    async (name: string, handler: (event: { payload: unknown }) => void) => {
-      eventHandlers.set(name, handler);
-      return () => eventHandlers.delete(name);
-    },
-  ),
+  listen: listenMock,
 }));
 
 vi.mock("@/lib/capture-api", () => ({
@@ -155,6 +162,16 @@ const sample = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  listenMock.mockImplementation(
+    async (name: string, handler: (event: { payload: unknown }) => void) => {
+      eventHandlers.set(name, handler);
+      return () => {
+        eventHandlers.delete(name);
+      };
+    },
+  );
+  localStorage.clear();
+  resetWorkbenchSnapshot();
   api.listProjects.mockResolvedValue([project]);
   api.listProjectCharacterSummaries.mockResolvedValue(summaries);
   api.listCharacters.mockResolvedValue(characters);
@@ -220,15 +237,116 @@ describe("Workbench", () => {
     expect(wrapper.text()).toContain("Ava");
     expect(wrapper.text()).toContain("Bella");
     expect(api.listProjectCharacterSummaries).toHaveBeenCalledWith("project-1");
+    expect(api.listProjectCharacterSummaries).toHaveBeenCalledTimes(1);
     expect(api.listCharacterCaptureItems).toHaveBeenCalledWith({
       projectId: "project-1",
       characterId: "character-1",
     });
+    expect(api.listCharacterCaptureItems).toHaveBeenCalledTimes(1);
+    expect(api.listCharacterFaceSamples).toHaveBeenCalledTimes(1);
     // The pending suggestion badge shows on Ava's card and the item grid
     // renders the queued capture with its suggestion chip.
     expect(wrapper.find(".pending-badge").text()).toBe("1");
     expect(wrapper.text()).toContain("queued");
     expect(wrapper.text()).toContain("建议待确认");
+  });
+
+  it("shows a stable loading skeleton instead of a false empty workbench", async () => {
+    let resolveSummaries!: (value: typeof summaries) => void;
+    api.listProjectCharacterSummaries.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSummaries = resolve;
+      }),
+    );
+
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(wrapper.find(".workbench-character-skeletons").exists()).toBe(true);
+    expect(wrapper.findAll(".workbench-grid-skeleton-card")).toHaveLength(6);
+    expect(wrapper.find(".workbench-detail-skeleton").exists()).toBe(true);
+    expect(wrapper.text()).toContain("正在加载人物…");
+    expect(wrapper.text()).not.toContain("未选择角色");
+    expect(wrapper.text()).not.toContain("选择一张截图查看详情");
+
+    resolveSummaries(summaries);
+    await flushPromises();
+
+    expect(wrapper.find(".workbench-character-skeletons").exists()).toBe(false);
+    expect(wrapper.text()).toContain("Ava");
+  });
+
+  it("starts loading data without waiting for Tauri listener registration", async () => {
+    let resolveListener!: (value: () => void) => void;
+    const pendingListener = new Promise<() => void>((resolve) => {
+      resolveListener = resolve;
+    });
+    listenMock.mockReturnValue(pendingListener);
+
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(listenMock.mock.calls.map(([name]) => name)).toEqual(
+      expect.arrayContaining([
+        "capture:item-updated",
+        "capture:face-bank-rebuilt",
+        "capture:face-bank-rebuild-progress",
+      ]),
+    );
+    expect(api.listProjects).toHaveBeenCalledTimes(1);
+    expect(api.listProjectCharacterSummaries).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("Ava");
+
+    resolveListener(() => undefined);
+    await flushPromises();
+  });
+
+  it("loads the saved character payload in parallel with project summaries", async () => {
+    localStorage.setItem("scene-vault.capture.project", "project-1");
+    localStorage.setItem("scene-vault.workbench.character.project-1", "character-1");
+    let resolveSummaries!: (value: typeof summaries) => void;
+    api.listProjectCharacterSummaries.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSummaries = resolve;
+      }),
+    );
+
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(api.listProjects).toHaveBeenCalledTimes(1);
+    expect(api.listProjectCharacterSummaries).toHaveBeenCalledTimes(1);
+    expect(api.listCharacterCaptureItems).toHaveBeenCalledWith({
+      projectId: "project-1",
+      characterId: "character-1",
+    });
+    expect(api.listCharacterFaceSamples).toHaveBeenCalledWith("character-1");
+
+    resolveSummaries(summaries);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Ava");
+  });
+
+  it("renders the previous workbench snapshot immediately while refreshing", async () => {
+    const first = mount(Workbench);
+    await flushPromises();
+    expect(first.text()).toContain("Ava");
+    first.unmount();
+
+    let resolveSummaries!: (value: typeof summaries) => void;
+    api.listProjectCharacterSummaries.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSummaries = resolve;
+      }),
+    );
+    const second = mount(Workbench);
+
+    expect(second.text()).toContain("Ava");
+    expect(second.find(".workbench-character-skeletons").exists()).toBe(false);
+
+    resolveSummaries(summaries);
+    await flushPromises();
+    expect(second.text()).toContain("Ava");
   });
 
   it("accepts a pending recognition suggestion from the detail panel", async () => {
@@ -421,7 +539,7 @@ describe("Workbench", () => {
     ).toBe(true);
   });
 
-  it("keeps the sample summary in one row and hides avatar restore behind the more menu", async () => {
+  it("shows avatar restore directly only when a manual avatar exists", async () => {
     api.listProjectCharacterSummaries.mockResolvedValue([
       { ...summaries[0], avatarAssetId: "asset-1", avatarCaptureItemId: "item-1" },
       summaries[1],
@@ -436,8 +554,8 @@ describe("Workbench", () => {
     const directRestore = bar
       .findAll("button")
       .find((button) => button.text().includes("恢复自动头像"));
-    expect(directRestore).toBeUndefined();
-    expect(wrapper.find('button[aria-label="更多头像操作"]').exists()).toBe(true);
+    expect(directRestore).toBeDefined();
+    expect(wrapper.find('button[aria-label="更多头像操作"]').exists()).toBe(false);
   });
 
   it("disables avatar assignment for an unarchived capture and can clear an existing avatar", async () => {
@@ -449,23 +567,7 @@ describe("Workbench", () => {
       ...characters[0],
       avatarAssetId: null,
     });
-    // reka-ui menus do not open in jsdom, so the dropdown shell is stubbed
-    // inline and the menu item is asserted to call the same handler the
-    // production MoreHorizontal menu invokes.
-    const wrapper = mount(Workbench, {
-      global: {
-        stubs: {
-          DropdownMenu: { template: "<div><slot /></div>" },
-          DropdownMenuTrigger: { template: "<div><slot /></div>" },
-          DropdownMenuContent: { template: "<div><slot /></div>" },
-          DropdownMenuItem: {
-            emits: ["select"],
-            template:
-              '<button type="button" @click="$emit(\'select\')"><slot /></button>',
-          },
-        },
-      },
-    });
+    const wrapper = mount(Workbench);
     await flushPromises();
 
     const setAvatar = wrapper
@@ -508,37 +610,63 @@ describe("Workbench", () => {
     expect(wrapper.find(".sample-strip-toggle").exists()).toBe(false);
   });
 
-  it("lays out the grid header as a title row plus grouped action row", async () => {
+  it("lays out the grid header as a title row plus an adaptive action grid", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
 
     const titleRow = wrapper.find(".workbench-grid-header-title");
     expect(titleRow.text()).toContain("Ava");
     expect(titleRow.text()).toContain("1 张截图");
-    const groups = wrapper.findAll(".workbench-action-group");
-    expect(groups).toHaveLength(3);
-    expect(groups[0].text()).toContain("合并角色");
-    expect(groups[1].text()).toContain("批量拒绝并登记 (1)");
-    expect(groups[2].text()).toContain("当前角色重新识别 (0)");
-    expect(groups[2].text()).toContain("全部重新识别 (0)");
     const actions = wrapper.findAll(".workbench-grid-actions button");
-    expect(actions).toHaveLength(4);
-    const current = actions.find((button) => button.text().includes("当前角色重新识别 (0)"));
-    const all = actions.find((button) => button.text().includes("全部重新识别 (0)"));
-    expect(current?.attributes("disabled")).toBeDefined();
-    expect(all?.attributes("disabled")).toBeDefined();
+    expect(actions).toHaveLength(2);
+    expect(actions.map((button) => button.text())).toEqual([
+      "合并角色",
+      "批量拒绝并登记 (1)",
+    ]);
+    expect(actions.every((button) => button.classes("compact-action"))).toBe(true);
   });
 
-  it("shows all conditional character actions so their crowded state can be reviewed", async () => {
+  it("shows conditional character actions only when matching work exists", async () => {
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], pendingReviewCount: 2, degradedCount: 1 },
+      { ...summaries[1], degradedCount: 2 },
+    ]);
     const wrapper = mount(Workbench);
     await flushPromises();
 
     const actions = wrapper.findAll(".workbench-grid-actions button");
-    expect(actions.some((button) => button.text().includes("批量拒绝并登记 (1)"))).toBe(true);
-    const current = actions.find((button) => button.text().includes("当前角色重新识别 (0)"));
-    const all = actions.find((button) => button.text().includes("全部重新识别 (0)"));
-    expect(current?.attributes("disabled")).toBeDefined();
-    expect(all?.attributes("disabled")).toBeDefined();
+    expect(actions.map((button) => button.text())).toEqual([
+      "合并角色",
+      "批量拒绝并登记 (2)",
+      "当前角色重新识别 (1)",
+      "全部重新识别 (3)",
+    ]);
+  });
+
+  it("keeps only merge visible when there are no pending or degraded captures", async () => {
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], pendingReviewCount: 0, degradedCount: 0 },
+      summaries[1],
+    ]);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(wrapper.findAll(".workbench-grid-actions button").map((button) => button.text())).toEqual([
+      "合并角色",
+    ]);
+  });
+
+  it("separates correction fields from an auto-fitting action group", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(wrapper.findAll(".action-card-fields label")).toHaveLength(2);
+    const actions = wrapper.findAll(".action-card-actions button");
+    expect(actions.map((button) => button.text())).toEqual([
+      "重新提取人脸特征",
+      "标记可疑",
+      "设为项目封面",
+    ]);
   });
 
   it("explains a detected but low-quality face in Chinese and marks the card", async () => {

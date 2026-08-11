@@ -53,19 +53,30 @@ import {
   type Project,
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
+import {
+  readWorkbenchSnapshot,
+  writeWorkbenchSnapshot,
+} from "@/lib/workbench-cache";
 
-const projects = ref<Project[]>([]);
-const summaries = ref<CharacterSummary[]>([]);
-const characters = ref<Character[]>([]);
-const projectId = ref("");
+const persistedProjectId = localStorage.getItem("scene-vault.capture.project");
+const cachedWorkbench = readWorkbenchSnapshot(persistedProjectId);
+const projects = ref<Project[]>(cachedWorkbench?.projects ?? []);
+const summaries = ref<CharacterSummary[]>(cachedWorkbench?.summaries ?? []);
+const characters = ref<Character[]>(cachedWorkbench?.characters ?? []);
+const projectId = ref(cachedWorkbench?.projectId ?? persistedProjectId ?? "");
 const rebuildProgress = ref<{ processed: number; total: number } | null>(null);
-const modelStatus = ref<FaceBankModelStatus | null>(null);
-const selectedCharacterId = ref<string | null>(null);
-const items = ref<CaptureItem[]>([]);
-const samples = ref<FaceSample[]>([]);
-const selectedItemId = ref<string | null>(null);
+const modelStatus = ref<FaceBankModelStatus | null>(cachedWorkbench?.modelStatus ?? null);
+const selectedCharacterId = ref<string | null>(
+  cachedWorkbench?.selectedCharacterId ??
+    (projectId.value
+      ? localStorage.getItem(`scene-vault.workbench.character.${projectId.value}`)
+      : null),
+);
+const items = ref<CaptureItem[]>(cachedWorkbench?.items ?? []);
+const samples = ref<FaceSample[]>(cachedWorkbench?.samples ?? []);
+const selectedItemId = ref<string | null>(cachedWorkbench?.selectedItemId ?? null);
 const previewVariant = ref<"source" | "annotated" | "avatar" | "destination">("source");
-const loading = ref(false);
+const loading = ref(!cachedWorkbench);
 const busy = ref(false);
 const renameOpen = ref(false);
 const renameName = ref("");
@@ -74,17 +85,19 @@ const mergeOpen = ref(false);
 const detailOpen = ref(false);
 const mergeButton = ref<HTMLButtonElement | null>(null);
 let unlisteners: UnlistenFn[] = [];
+let initialized = false;
+let componentActive = true;
 
 type WorkbenchView = "characters" | "unclassified" | "scene" | "private";
 const view = ref<WorkbenchView>("characters");
 const panelCollapsed = ref(false);
-const showPrivate = ref(false);
+const showPrivate = ref(cachedWorkbench?.showPrivate ?? false);
 const characterMenu = useContextMenu();
 const itemMenu = useContextMenu();
 
 function onCharacterContext(event: MouseEvent, summary: CharacterSummary) {
   if (!characterMenu.open(event, buildCharacterItems(summary))) return;
-  selectedCharacterId.value = summary.id;
+  void selectCharacter(summary.id);
 }
 
 function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
@@ -388,6 +401,16 @@ function openItemDetail(id: string) {
   detailOpen.value = true;
 }
 
+async function selectCharacter(characterId: string) {
+  if (selectedCharacterId.value === characterId) return;
+  selectedCharacterId.value = characterId;
+  if (projectId.value) {
+    localStorage.setItem(`scene-vault.workbench.character.${projectId.value}`, characterId);
+  }
+  selectedItemId.value = null;
+  await loadItems();
+}
+
 function summaryThumbnailItemId(summary: CharacterSummary): string {
   return summary.avatarCaptureItemId ?? summary.latestCaptureItemId ?? "";
 }
@@ -399,24 +422,87 @@ function canReprocess(item: CaptureItem): boolean {
 }
 
 async function initialize() {
-  projects.value = await captureApi.listProjects();
-  const savedProject = localStorage.getItem("scene-vault.capture.project");
-  projectId.value = projects.value.some((project) => project.id === savedProject)
-    ? savedProject!
-    : projects.value[0]?.id ?? "";
-  if (projectId.value) {
-    localStorage.setItem("scene-vault.capture.project", projectId.value);
-  }
+  const initialProjectId = projectId.value;
+  if (!cachedWorkbench) loading.value = true;
   try {
-    const settings = await captureApi.getAppSettings();
-    showPrivate.value = settings.showPrivateByDefault;
-  } catch {
-    // Keep the default hidden state when the backend is unavailable.
+    const projectsLoad = captureApi.listProjects();
+    const settingsLoad = captureApi.getAppSettings()
+      .then((settings) => {
+        showPrivate.value = settings.showPrivateByDefault;
+      })
+      .catch(() => {
+        // Keep the default hidden state when settings are unavailable.
+      });
+    const dataLoad = initialProjectId
+      ? loadCharacterData({ manageLoading: false })
+      : Promise.resolve();
+    const [nextProjects] = await Promise.all([projectsLoad, settingsLoad, dataLoad]);
+    projects.value = nextProjects;
+    const resolvedProjectId = nextProjects.some((project) => project.id === initialProjectId)
+      ? initialProjectId
+      : nextProjects[0]?.id ?? "";
+    if (resolvedProjectId !== projectId.value) {
+      projectId.value = resolvedProjectId;
+      selectedCharacterId.value = resolvedProjectId
+        ? localStorage.getItem(`scene-vault.workbench.character.${resolvedProjectId}`)
+        : null;
+      await loadCharacterData({ manageLoading: false });
+    }
+    if (projectId.value) localStorage.setItem("scene-vault.capture.project", projectId.value);
+    cacheCurrentWorkbench();
+  } catch (error) {
+    toast.error(normalizeError(error));
+  } finally {
+    initialized = true;
+    loading.value = false;
   }
-  await loadCharacterData();
 }
 
-async function loadCharacterData() {
+interface LoadedWorkbenchItems {
+  items: CaptureItem[];
+  samples: FaceSample[];
+}
+
+async function fetchWorkbenchItems(
+  projectIdValue: string,
+  viewValue: WorkbenchView,
+  characterIdValue: string | null,
+): Promise<LoadedWorkbenchItems> {
+  if (viewValue === "characters") {
+    if (!characterIdValue) return { items: [], samples: [] };
+    const [nextItems, nextSamples] = await Promise.all([
+      captureApi.listCharacterCaptureItems({
+        projectId: projectIdValue,
+        characterId: characterIdValue,
+      }),
+      captureApi.listCharacterFaceSamples(characterIdValue),
+    ]);
+    return { items: nextItems, samples: nextSamples };
+  }
+  const nextItems = await captureApi.listCategoryItems({
+    projectId: projectIdValue,
+    category: viewValue,
+  });
+  return { items: nextItems, samples: [] };
+}
+
+function cacheCurrentWorkbench() {
+  if (!projectId.value || view.value !== "characters") return;
+  writeWorkbenchSnapshot({
+    projectId: projectId.value,
+    projects: projects.value,
+    summaries: summaries.value,
+    characters: characters.value,
+    modelStatus: modelStatus.value,
+    selectedCharacterId: selectedCharacterId.value,
+    items: items.value,
+    samples: samples.value,
+    selectedItemId: selectedItemId.value,
+    showPrivate: showPrivate.value,
+  });
+}
+
+async function loadCharacterData(options: { manageLoading?: boolean } = {}) {
   if (!projectId.value) {
     summaries.value = [];
     characters.value = [];
@@ -425,25 +511,50 @@ async function loadCharacterData() {
     selectedItemId.value = null;
     return;
   }
-  loading.value = true;
+  const manageLoading = options.manageLoading ?? true;
+  const projectIdValue = projectId.value;
+  const viewValue = view.value;
+  const requestedCharacterId = selectedCharacterId.value;
+  if (manageLoading) loading.value = true;
   try {
-    [summaries.value, characters.value, modelStatus.value] = await Promise.all([
-      captureApi.listProjectCharacterSummaries(projectId.value),
-      captureApi.listCharacters(projectId.value),
-      (captureApi.getFaceBankModelStatus?.(projectId.value) ??
+    const [nextSummaries, nextCharacters, nextModelStatus, requestedItems] = await Promise.all([
+      captureApi.listProjectCharacterSummaries(projectIdValue),
+      captureApi.listCharacters(projectIdValue),
+      (captureApi.getFaceBankModelStatus?.(projectIdValue) ??
         Promise.resolve(null)).catch(() => null),
+      fetchWorkbenchItems(projectIdValue, viewValue, requestedCharacterId),
     ]);
-    if (
-      !selectedCharacterId.value ||
-      !summaries.value.some((summary) => summary.id === selectedCharacterId.value)
-    ) {
-      selectedCharacterId.value = summaries.value[0]?.id ?? null;
+    if (projectId.value !== projectIdValue || view.value !== viewValue) return;
+    const resolvedCharacterId =
+      requestedCharacterId && nextSummaries.some((summary) => summary.id === requestedCharacterId)
+        ? requestedCharacterId
+        : nextSummaries[0]?.id ?? null;
+    const loadedItems =
+      viewValue === "characters" && resolvedCharacterId !== requestedCharacterId
+        ? await fetchWorkbenchItems(projectIdValue, viewValue, resolvedCharacterId)
+        : requestedItems;
+    if (projectId.value !== projectIdValue || view.value !== viewValue) return;
+
+    summaries.value = nextSummaries;
+    characters.value = nextCharacters;
+    modelStatus.value = nextModelStatus;
+    selectedCharacterId.value = resolvedCharacterId;
+    items.value = loadedItems.items;
+    samples.value = loadedItems.samples;
+    if (resolvedCharacterId) {
+      localStorage.setItem(
+        `scene-vault.workbench.character.${projectIdValue}`,
+        resolvedCharacterId,
+      );
     }
-    await loadItems();
+    if (!items.value.some((item) => item.id === selectedItemId.value)) {
+      selectedItemId.value = items.value[0]?.id ?? null;
+    }
+    cacheCurrentWorkbench();
   } catch (error) {
     toast.error(normalizeError(error));
   } finally {
-    loading.value = false;
+    if (manageLoading) loading.value = false;
   }
 }
 
@@ -455,37 +566,25 @@ async function loadItems() {
     return;
   }
   const projectIdValue = projectId.value;
+  const viewValue = view.value;
+  const characterIdValue = selectedCharacterId.value;
   loading.value = true;
   try {
-    if (view.value === "characters" && !selectedCharacterId.value) {
-      items.value = [];
-      samples.value = [];
-      selectedItemId.value = null;
-    } else if (view.value === "characters") {
-      // The first branch already returned for character views without a
-      // selection, so this is logically non-null.
-      const characterIdValue = selectedCharacterId.value!;
-      [items.value, samples.value] = await Promise.all([
-        captureApi.listCharacterCaptureItems({
-          projectId: projectIdValue,
-          characterId: characterIdValue,
-        }),
-        captureApi.listCharacterFaceSamples(characterIdValue),
-      ]);
-    } else {
-      const category = view.value as "unclassified" | "scene" | "private";
-      items.value = await captureApi.listCategoryItems({
-        projectId: projectIdValue,
-        category,
-      });
-      samples.value = [];
-    }
+    const loaded = await fetchWorkbenchItems(projectIdValue, viewValue, characterIdValue);
+    if (
+      projectId.value !== projectIdValue ||
+      view.value !== viewValue ||
+      selectedCharacterId.value !== characterIdValue
+    ) return;
+    items.value = loaded.items;
+    samples.value = loaded.samples;
     if (
       items.value.length &&
       !items.value.some((item) => item.id === selectedItemId.value)
     ) {
       selectedItemId.value = items.value[0]?.id ?? null;
     }
+    cacheCurrentWorkbench();
   } catch (error) {
     toast.error(normalizeError(error));
   } finally {
@@ -728,51 +827,66 @@ async function rebuildFaceBank() {
 }
 
 watch(projectId, async () => {
+  if (!initialized) return;
   if (projectId.value) {
     localStorage.setItem("scene-vault.capture.project", projectId.value);
   }
-  selectedCharacterId.value = null;
+  summaries.value = [];
+  characters.value = [];
+  items.value = [];
+  samples.value = [];
+  selectedItemId.value = null;
+  selectedCharacterId.value = projectId.value
+    ? localStorage.getItem(`scene-vault.workbench.character.${projectId.value}`)
+    : null;
   await loadCharacterData();
 });
 watch(view, async () => {
   selectedItemId.value = null;
   await loadItems();
 });
-watch(selectedCharacterId, loadItems);
 watch(selectedItemId, () => {
   previewVariant.value = "source";
 });
-onMounted(async () => {
-  try {
-    // Items change state while the worker processes them (reprocess, archive,
-    // face-bank suggestions); the workbench is pull-based otherwise, so it
-    // refreshes whenever any capture item changes.
-    unlisteners.push(
-      await listen("capture:item-updated", () => {
-        void loadCharacterData();
-      }),
-      await listen("capture:face-bank-rebuilt", () => {
-        // A rebuild refreshed features and suggestions for many items; the
-        // completion event is the only signal, so reload the whole view.
-        void loadCharacterData();
-      }),
-    );
-    unlisteners.push(
-      await listen<{ processed: number; total: number }>(
-        "capture:face-bank-rebuild-progress",
-        (event) => {
-          rebuildProgress.value = event.payload;
-        },
-      ),
-    );
-  } catch {
-    // Browser previews do not expose the Tauri event bridge.
+async function registerWorkbenchListeners() {
+  // Listener registration crosses the Tauri bridge. It must never delay the
+  // first data request, and all three registrations can run concurrently.
+  const registrations = await Promise.allSettled([
+    listen("capture:item-updated", () => {
+      if (initialized) void loadCharacterData();
+    }),
+    listen("capture:face-bank-rebuilt", () => {
+      // A rebuild refreshed features and suggestions for many items; the
+      // completion event is the only signal, so reload the whole view.
+      if (initialized) void loadCharacterData();
+    }),
+    listen<{ processed: number; total: number }>(
+      "capture:face-bank-rebuild-progress",
+      (event) => {
+        rebuildProgress.value = event.payload;
+      },
+    ),
+  ]);
+  const listeners = registrations.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  if (componentActive) {
+    unlisteners.push(...listeners);
+  } else {
+    listeners.forEach((unlisten) => unlisten());
   }
-  await initialize();
+}
+
+onMounted(() => {
+  componentActive = true;
+  void registerWorkbenchListeners();
+  void initialize();
 });
 
 onBeforeUnmount(() => {
+  componentActive = false;
   unlisteners.forEach((unlisten) => unlisten());
+  unlisteners = [];
 });
 </script>
 
@@ -786,13 +900,13 @@ onBeforeUnmount(() => {
       <template #actions>
         <label class="workbench-project">
           项目
-          <select v-model="projectId">
+          <select v-model="projectId" :disabled="loading">
             <option v-for="project in projects" :key="project.id" :value="project.id">
               {{ project.name }}
             </option>
           </select>
         </label>
-        <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData">
+        <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData()">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
         </button>
         <DropdownMenu>
@@ -876,15 +990,30 @@ onBeforeUnmount(() => {
         </div>
         <template v-if="view === 'characters'">
         <div class="workbench-characters-title">
-          <Users :size="16" /><span>角色</span><span class="count">{{ summaries.length }}</span>
+          <Users :size="16" /><span>角色</span><span class="count">{{ loading && !summaries.length ? "…" : summaries.length }}</span>
         </div>
+        <div
+          v-if="loading && !summaries.length"
+          class="workbench-character-skeletons"
+          aria-label="正在加载角色"
+          aria-live="polite"
+        >
+          <div v-for="index in 6" :key="index" class="character-card-skeleton" aria-hidden="true">
+            <span class="workbench-skeleton character-skeleton-avatar" />
+            <span class="character-skeleton-copy">
+              <span class="workbench-skeleton character-skeleton-name" />
+              <span class="workbench-skeleton character-skeleton-meta" />
+            </span>
+          </div>
+        </div>
+        <template v-else>
         <button
           v-for="summary in summaries"
           :key="summary.id"
           type="button"
           class="character-card"
           :class="{ selected: selectedCharacterId === summary.id }"
-          @click="selectedCharacterId = summary.id"
+          @click="selectCharacter(summary.id)"
           @contextmenu="onCharacterContext($event, summary)"
         >
           <span class="character-avatar">
@@ -920,6 +1049,7 @@ onBeforeUnmount(() => {
           还没有角色，先在捕获流程创建角色并标记截图。
         </div>
         </template>
+        </template>
         <div v-else class="workbench-category-note">
           <strong>{{ viewLabel }}</strong>
           <span>{{ items.length }} 张截图</span>
@@ -943,7 +1073,7 @@ onBeforeUnmount(() => {
                 <ChevronsRight v-if="panelCollapsed" :size="15" />
                 <ChevronsLeft v-else :size="15" />
               </button>
-              {{ viewLabel }}
+              {{ loading && !selectedCharacter ? "正在加载人物…" : viewLabel }}
               <button
                 v-if="view === 'characters' && selectedCharacter"
                 type="button"
@@ -955,54 +1085,71 @@ onBeforeUnmount(() => {
                 <Pencil :size="14" />
               </button>
             </h2>
-            <span class="workbench-screenshot-count">{{ items.length }} 张截图</span>
+            <span class="workbench-screenshot-count">{{ loading && !items.length ? "—" : items.length }} 张截图</span>
           </div>
           <div v-if="view === 'characters' && selectedCharacter" class="workbench-grid-actions">
-            <div class="workbench-action-group">
-              <button
-                ref="mergeButton"
-                type="button"
-                class="secondary-action compact-action"
-                :disabled="busy || summaries.length <= 1"
-                :title="summaries.length > 1 ? `将 ${selectedCharacter.name} 合并到另一个角色` : '当前项目只有一个角色，无法合并'"
-                @click="mergeOpen = true"
-              >
-                <Users :size="14" />合并角色
-              </button>
-            </div>
-            <div class="workbench-action-group">
-              <button
-                type="button"
-                class="secondary-action compact-action"
-                :disabled="busy || selectedCharacter.pendingReviewCount === 0"
-                title="否决当前角色全部待确认建议，并把对应人脸登记进该角色样本库"
-                @click="batchRejectAndEnroll"
-              >
-                <Ban :size="14" />批量拒绝并登记 ({{ selectedCharacter.pendingReviewCount }})
-              </button>
-            </div>
-            <div class="workbench-action-group">
-              <button
-                type="button"
-                class="secondary-action compact-action"
-                :disabled="busy || selectedCharacter.degradedCount === 0"
-                @click="batchReprocess(selectedCharacter.id)"
-              >
-                <Sparkles :size="14" />当前角色重新识别 ({{ selectedCharacter.degradedCount }})
-              </button>
-              <button
-                type="button"
-                class="secondary-action compact-action"
-                :disabled="busy || projectDegradedCount === 0"
-                @click="batchReprocess(null)"
-              >
-                <Sparkles :size="14" />全部重新识别 ({{ projectDegradedCount }})
-              </button>
-            </div>
+            <button
+              ref="mergeButton"
+              type="button"
+              class="secondary-action compact-action"
+              :disabled="busy || summaries.length <= 1"
+              :title="summaries.length > 1 ? `将 ${selectedCharacter.name} 合并到另一个角色` : '当前项目只有一个角色，无法合并'"
+              @click="mergeOpen = true"
+            >
+              <Users :size="14" />合并角色
+            </button>
+            <button
+              v-if="selectedCharacter.pendingReviewCount > 0"
+              type="button"
+              class="secondary-action compact-action"
+              :disabled="busy"
+              title="否决当前角色全部待确认建议，并把对应人脸登记进该角色样本库"
+              @click="batchRejectAndEnroll"
+            >
+              <Ban :size="14" />批量拒绝并登记 ({{ selectedCharacter.pendingReviewCount }})
+            </button>
+            <button
+              v-if="selectedCharacter.degradedCount > 0"
+              type="button"
+              class="secondary-action compact-action"
+              :disabled="busy"
+              @click="batchReprocess(selectedCharacter.id)"
+            >
+              <Sparkles :size="14" />当前角色重新识别 ({{ selectedCharacter.degradedCount }})
+            </button>
+            <button
+              v-if="projectDegradedCount > 0"
+              type="button"
+              class="secondary-action compact-action"
+              :disabled="busy"
+              @click="batchReprocess(null)"
+            >
+              <Sparkles :size="14" />全部重新识别 ({{ projectDegradedCount }})
+            </button>
           </div>
         </div>
         <CaptureProgress />
-        <div class="workbench-grid" role="list" aria-label="角色截图网格">
+        <div
+          class="workbench-grid"
+          role="list"
+          aria-label="角色截图网格"
+          :aria-busy="loading && !items.length"
+        >
+          <template v-if="loading && !items.length">
+            <div
+              v-for="index in 6"
+              :key="`loading-${index}`"
+              class="workbench-grid-skeleton-card"
+              aria-hidden="true"
+            >
+              <span class="workbench-skeleton workbench-grid-skeleton-image" />
+              <span class="workbench-grid-skeleton-copy">
+                <span class="workbench-skeleton workbench-grid-skeleton-name" />
+                <span class="workbench-skeleton workbench-grid-skeleton-chip" />
+              </span>
+            </div>
+          </template>
+          <template v-else>
           <button
             v-for="item in items"
             :key="item.id"
@@ -1038,6 +1185,7 @@ onBeforeUnmount(() => {
             </span>
           </button>
           <div v-if="!items.length && !loading" class="workbench-empty">该角色名下还没有截图。</div>
+          </template>
         </div>
       </div>
 
@@ -1070,27 +1218,16 @@ onBeforeUnmount(() => {
             >
               <UserRound :size="15" />{{ selectedItemIsRepresentativeAvatar ? "当前代表头像" : "设为代表头像" }}
             </button>
-            <DropdownMenu>
-              <DropdownMenuTrigger as-child>
-                <button
-                  type="button"
-                  class="icon-action compact-icon-action"
-                  aria-label="更多头像操作"
-                  title="更多头像操作"
-                >
-                  <MoreHorizontal :size="16" aria-hidden="true" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" class="workbench-avatar-menu">
-                <DropdownMenuItem
-                  title="清除手工代表头像，改由最近一张完成归档的人物图自动担任"
-                  :disabled="busy || !selectedCharacter.avatarAssetId"
-                  @select="setRepresentativeAvatar(null)"
-                >
-                  <RotateCcw :size="15" aria-hidden="true" />恢复自动头像
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <button
+              v-if="selectedCharacter.avatarAssetId"
+              type="button"
+              class="secondary-action compact-action avatar-restore-action"
+              title="清除手工代表头像，改由最近一张完成归档的人物图自动担任"
+              :disabled="busy"
+              @click="setRepresentativeAvatar(null)"
+            >
+              <RotateCcw :size="15" aria-hidden="true" />恢复自动头像
+            </button>
           </div>
         </section>
 
@@ -1203,69 +1340,73 @@ onBeforeUnmount(() => {
 
           <section class="action-card">
             <span class="action-card-title">改判</span>
-            <div class="action-card-body">
-              <label>
-                改判角色
-                <select
-                  :value="selectedItem.characterId ?? ''"
-                  :disabled="busy"
-                  @change="onRelabelCharacter"
+            <div class="action-card-body correction-card-body">
+              <div class="action-card-fields">
+                <label>
+                  改判角色
+                  <select
+                    :value="selectedItem.characterId ?? ''"
+                    :disabled="busy"
+                    @change="onRelabelCharacter"
+                  >
+                    <option value="">未标记</option>
+                    <option v-for="character in characters" :key="character.id" :value="character.id">
+                      {{ character.name }}
+                    </option>
+                  </select>
+                </label>
+                <label>
+                  改分类
+                  <select
+                    :value="selectedItem.classification"
+                    :disabled="busy"
+                    @change="onRelabelClassification"
+                  >
+                    <option value="person">人物</option>
+                    <option value="scene">游戏截图</option>
+                    <option value="private">收藏图</option>
+                  </select>
+                </label>
+              </div>
+              <div class="action-card-actions">
+                <button
+                  type="button"
+                  class="secondary-action face-feature-action"
+                  :disabled="busy || !canRefreshFaceFeature(selectedItem)"
+                  title="只重新提取这张截图的人脸特征：保留当前角色与分类，不生成标注/头像，也不重新归档；完成后按当前匹配参数刷新建议"
+                  @click="refreshFaceFeature(selectedItem)"
                 >
-                  <option value="">未标记</option>
-                  <option v-for="character in characters" :key="character.id" :value="character.id">
-                    {{ character.name }}
-                  </option>
-                </select>
-              </label>
-              <label>
-                改分类
-                <select
-                  :value="selectedItem.classification"
+                  <RefreshCw :size="16" />重新提取人脸特征
+                </button>
+                <button
+                  v-if="selectedItemSample"
+                  type="button"
+                  class="secondary-action"
                   :disabled="busy"
-                  @change="onRelabelClassification"
+                  :title="
+                    selectedItemSample.flagged
+                      ? '取消可疑标记，让这张样本重新参与匹配与相似度计算'
+                      : '把这张样本标记为可疑，不再参与匹配；确认无误后可在修正卡恢复'
+                  "
+                  @click="toggleSampleFlagged(selectedItemSample)"
                 >
-                  <option value="person">人物</option>
-                  <option value="scene">游戏截图</option>
-                  <option value="private">收藏图</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                class="secondary-action"
-                :disabled="busy || !canRefreshFaceFeature(selectedItem)"
-                title="只重新提取这张截图的人脸特征：保留当前角色与分类，不生成标注/头像，也不重新归档；完成后按当前匹配参数刷新建议"
-                @click="refreshFaceFeature(selectedItem)"
-              >
-                <RefreshCw :size="16" />重新提取人脸特征
-              </button>
-              <button
-                v-if="selectedItemSample"
-                type="button"
-                class="secondary-action"
-                :disabled="busy"
-                :title="
-                  selectedItemSample.flagged
-                    ? '取消可疑标记，让这张样本重新参与匹配与相似度计算'
-                    : '把这张样本标记为可疑，不再参与匹配；确认无误后可在修正卡恢复'
-                "
-                @click="toggleSampleFlagged(selectedItemSample)"
-              >
-                <Flag :size="16" />{{ selectedItemSample.flagged ? "恢复参与匹配" : "标记可疑" }}
-              </button>
-              <button
-                v-if="selectedItem.classification !== 'private'"
-                type="button"
-                class="secondary-action"
-                :disabled="busy"
-                :title="
-                  selectedIsProjectCover
-                    ? '清除自定义封面，首页恢复为最近截图'
-                    : '把当前截图设为项目封面（首页网格与列表都会使用这张图；收藏图不会作为封面）'
-                "
-                @click="toggleProjectCover"
-              >
-                <Image :size="16" />{{ selectedIsProjectCover ? "取消项目封面" : "设为项目封面" }}
-              </button>
+                  <Flag :size="16" />{{ selectedItemSample.flagged ? "恢复参与匹配" : "标记可疑" }}
+                </button>
+                <button
+                  v-if="selectedItem.classification !== 'private'"
+                  type="button"
+                  class="secondary-action"
+                  :disabled="busy"
+                  :title="
+                    selectedIsProjectCover
+                      ? '清除自定义封面，首页恢复为最近截图'
+                      : '把当前截图设为项目封面（首页网格与列表都会使用这张图；收藏图不会作为封面）'
+                  "
+                  @click="toggleProjectCover"
+                >
+                  <Image :size="16" />{{ selectedIsProjectCover ? "取消项目封面" : "设为项目封面" }}
+                </button>
+              </div>
             </div>
           </section>
 
@@ -1300,6 +1441,19 @@ onBeforeUnmount(() => {
           </section>
         </div>
       </ResponsiveDetailPanel>
+      <aside
+        v-else-if="loading"
+        class="workbench-detail empty loading"
+        aria-label="正在加载截图详情"
+        aria-live="polite"
+      >
+        <div class="workbench-detail-skeleton" aria-hidden="true">
+          <span class="workbench-skeleton detail-skeleton-toolbar" />
+          <span class="workbench-skeleton detail-skeleton-preview" />
+          <span v-for="index in 5" :key="index" class="workbench-skeleton detail-skeleton-line" />
+        </div>
+        <span class="sr-only">正在加载人物资料</span>
+      </aside>
       <aside v-else class="workbench-detail empty">选择一张截图查看详情。</aside>
     </div>
 
