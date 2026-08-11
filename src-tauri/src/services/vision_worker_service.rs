@@ -18,7 +18,7 @@ use tokio::{
 use crate::{
     error::AppError,
     models::vision::{VisionProcessData, VisionSettings},
-    services::{log_service, vision_engine_service::EngineResponse},
+    services::{log_service, vision_engine_service::EngineResponse, vision_settings_service},
 };
 
 use super::vision_engine_service::ProgressCallback;
@@ -237,16 +237,26 @@ impl WorkerProcess {
         handshake_timeout: Duration,
     ) -> Result<Self, AppError> {
         let started = Instant::now();
-        let executable = settings
-            .python_executable_path
-            .as_deref()
-            .ok_or_else(|| AppError::Vision("Python executable is not configured".to_owned()))?;
-        let module_root = settings
-            .python_module_root
-            .as_deref()
-            .ok_or_else(|| AppError::Vision("Python module root is not configured".to_owned()))?;
+        let runtime = vision_settings_service::engine_runtime(settings).ok_or_else(|| {
+            AppError::Vision(
+                "vision engine is not configured; configure Python or install the AI-enabled package"
+                    .to_owned(),
+            )
+        })?;
         log_service::info("vision.worker", "state=starting");
-        let mut command = Command::new(executable);
+        let mut command = match &runtime {
+            vision_settings_service::EngineRuntime::Python {
+                executable,
+                module_root,
+            } => {
+                let mut command = Command::new(executable);
+                command.arg("-m").arg("scene_vault_ai");
+                command.env("PYTHONPATH", module_root);
+                command
+            }
+            vision_settings_service::EngineRuntime::Sidecar { path } => Command::new(path),
+        };
+        command.arg("worker");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -255,10 +265,6 @@ impl WorkerProcess {
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = command
-            .arg("-m")
-            .arg("scene_vault_ai")
-            .arg("worker")
-            .env("PYTHONPATH", module_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

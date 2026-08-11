@@ -112,13 +112,13 @@ struct ProcessInvocationMetrics {
 }
 
 pub async fn health(settings: &VisionSettings) -> Result<VisionHealth, AppError> {
-    if !vision_settings_service::is_configured(settings) {
+    if !vision_settings_service::is_engine_available(settings) {
         return Ok(VisionHealth {
             status: "unconfigured".to_owned(),
             engine_version: None,
             python_version: None,
             process_screenshot_available: false,
-            error_message: Some("Python、模块目录或 YuNet 模型尚未配置".to_owned()),
+            error_message: Some("视觉引擎未配置：请配置 Python 与模型，或安装带 AI 组件的版本".to_owned()),
         });
     }
     let response = invoke(settings, "health", None, HEALTH_TIMEOUT).await?;
@@ -542,17 +542,27 @@ async fn invoke_with_progress(
     timeout: Duration,
     mut progress: Option<ProgressCallback>,
 ) -> Result<(EngineResponse, InvocationMetrics), AppError> {
-    let executable = settings
-        .python_executable_path
-        .as_deref()
-        .ok_or_else(|| AppError::Vision("Python executable is not configured".to_owned()))?;
-    let module_root = settings
-        .python_module_root
-        .as_deref()
-        .ok_or_else(|| AppError::Vision("Python module root is not configured".to_owned()))?;
+    let runtime = vision_settings_service::engine_runtime(settings).ok_or_else(|| {
+        AppError::Vision(
+            "vision engine is not configured; configure Python or install the AI-enabled package"
+                .to_owned(),
+        )
+    })?;
     let invocation_started = Instant::now();
     let spawn_started = Instant::now();
-    let mut command = Command::new(executable);
+    let mut command = match &runtime {
+        vision_settings_service::EngineRuntime::Python {
+            executable,
+            module_root,
+        } => {
+            let mut command = Command::new(executable);
+            command.arg("-m").arg("scene_vault_ai");
+            command.env("PYTHONPATH", module_root);
+            command
+        }
+        vision_settings_service::EngineRuntime::Sidecar { path } => Command::new(path),
+    };
+    command.arg(command_name);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -561,10 +571,6 @@ async fn invoke_with_progress(
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = command
-        .arg("-m")
-        .arg("scene_vault_ai")
-        .arg(command_name)
-        .env("PYTHONPATH", module_root)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
