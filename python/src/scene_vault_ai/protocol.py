@@ -8,7 +8,7 @@ from typing import Any
 from .errors import ErrorInfo, InvalidRequestError
 
 PROTOCOL_VERSION = 1
-_REQUEST_FIELDS = frozenset({"protocolVersion", "action", "payload"})
+_REQUEST_FIELDS = frozenset({"protocolVersion", "requestId", "action", "payload"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +16,7 @@ class Request:
     protocol_version: int
     action: str
     payload: dict[str, Any] = field(default_factory=dict)
+    request_id: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Request":
@@ -27,6 +28,7 @@ class Request:
             )
 
         protocol_version = value.get("protocolVersion")
+        request_id = value.get("requestId")
         action = value.get("action")
         payload = value.get("payload", {})
 
@@ -34,6 +36,16 @@ class Request:
             raise InvalidRequestError(
                 "protocolVersion must be an integer",
                 details={"field": "protocolVersion"},
+            )
+        if request_id is not None and (
+            not isinstance(request_id, str)
+            or not request_id
+            or request_id != request_id.strip()
+            or len(request_id) > 128
+        ):
+            raise InvalidRequestError(
+                "requestId must be a non-empty string of at most 128 characters",
+                details={"field": "requestId"},
             )
         if not isinstance(action, str) or not action or action != action.strip():
             raise InvalidRequestError(
@@ -50,6 +62,7 @@ class Request:
             protocol_version=protocol_version,
             action=action,
             payload=payload,
+            request_id=request_id,
         )
 
 
@@ -60,10 +73,12 @@ class Response:
     data: dict[str, Any] | None = None
     error: ErrorInfo | None = None
     protocol_version: int = PROTOCOL_VERSION
+    request_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "protocolVersion": self.protocol_version,
+            "requestId": self.request_id,
             "ok": self.ok,
             "action": self.action,
             "data": self.data,

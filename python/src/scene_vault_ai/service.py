@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import platform
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from time import perf_counter
 
 from . import __version__
 from .errors import (
@@ -42,6 +43,7 @@ class AiService:
                         "expected": PROTOCOL_VERSION,
                     },
                 ),
+                request_id=request.request_id,
             )
 
         if request.action == "health":
@@ -52,22 +54,40 @@ class AiService:
                         "health payload must be empty",
                         details={"field": "payload"},
                     ),
+                    request_id=request.request_id,
                 )
             return Response(
                 ok=True,
                 action="health",
                 data=self.health(),
+                request_id=request.request_id,
             )
 
         if request.action == "processScreenshot":
+            service_started = perf_counter()
             try:
                 processing_request = ProcessingRequest.from_payload(request.payload)
-                result = ScreenshotProcessor(
+                processor_started = perf_counter()
+                processor = ScreenshotProcessor(
                     processing_request,
                     progress=progress,
-                ).process()
+                )
+                processor_init_ms = _elapsed_ms(processor_started)
+                result = processor.process()
+                result = replace(
+                    result,
+                    timings=replace(
+                        result.timings,
+                        processor_init_ms=processor_init_ms,
+                        service_total_ms=_elapsed_ms(service_started),
+                    ),
+                )
             except SceneVaultAiError as error:
-                return _failure(request.action, error)
+                return _failure(
+                    request.action,
+                    error,
+                    request_id=request.request_id,
+                )
             except Exception:
                 logger.exception("unexpected screenshot-processing failure")
                 return Response(
@@ -77,11 +97,13 @@ class AiService:
                         code="internal_error",
                         message="an unexpected screenshot-processing error occurred",
                     ),
+                    request_id=request.request_id,
                 )
             return Response(
                 ok=True,
                 action=request.action,
                 data=result.to_dict(),
+                request_id=request.request_id,
             )
 
         return _failure(
@@ -90,6 +112,7 @@ class AiService:
                 "the requested action is not supported",
                 details={"action": request.action},
             ),
+            request_id=request.request_id,
         )
 
     def health(self) -> dict[str, object]:
@@ -110,9 +133,19 @@ class AiService:
         }
 
 
-def _failure(action: str, error: SceneVaultAiError) -> Response:
+def _failure(
+    action: str,
+    error: SceneVaultAiError,
+    *,
+    request_id: str | None = None,
+) -> Response:
     return Response(
         ok=False,
         action=action,
         error=error.to_info(),
+        request_id=request_id,
     )
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((perf_counter() - started) * 1000.0, 3)

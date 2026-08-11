@@ -40,15 +40,18 @@ python -m scene_vault_ai health
 ```
 
 `request` 从标准输入读取一个 JSON object。标准输出始终只有一行 JSON；日志只写入
-标准错误。成功退出码为 `0`，协议、配置或处理错误的退出码为 `1`。
+标准错误。成功退出码为 `0`，协议、配置或处理错误的退出码为 `1`。当前命令每次处理
+一个请求后退出；常驻 worker 的分阶段方案见
+[常驻 Python 视觉 Worker 决策](../docs/decisions/2026-08-11-persistent-python-worker.md)。
 
 ## processScreenshot
 
-请求顶层只允许 `protocolVersion`、`action` 和 `payload`：
+请求顶层只允许 `protocolVersion`、可选 `requestId`、`action` 和 `payload`：
 
 ```json
 {
   "protocolVersion": 1,
+  "requestId": "7d73d5f2-5536-4eb1-8fc3-f89496588a25",
   "action": "processScreenshot",
   "payload": {
     "inputPath": "D:\\Screenshots\\001.png",
@@ -110,6 +113,7 @@ python -m scene_vault_ai health
 ```json
 {
   "protocolVersion": 1,
+  "requestId": "7d73d5f2-5536-4eb1-8fc3-f89496588a25",
   "ok": true,
   "action": "processScreenshot",
   "data": {
@@ -126,7 +130,18 @@ python -m scene_vault_ai health
     "faceCount": 0,
     "faceSharpness": null,
     "faceAreaRatio": null,
-    "warnings": ["face_not_detected", "avatar_not_generated"]
+    "warnings": ["face_not_detected", "avatar_not_generated"],
+    "timings": {
+      "processorInitMs": 18.2,
+      "readMs": 12.4,
+      "detectMs": 35.6,
+      "featureMs": 0.0,
+      "annotateMs": 22.1,
+      "cropMs": 0.0,
+      "writeMs": 9.8,
+      "processTotalMs": 80.7,
+      "serviceTotalMs": 99.1
+    }
   },
   "error": null
 }
@@ -136,6 +151,8 @@ python -m scene_vault_ai health
 `faceFeatureModelId` / `faceFeatureModelVersion`；Rust 必须按这两个字段和向量维度
 隔离特征空间，不能跨模型比较。`faceCount` 是 YuNet 检出数量，建议仍基于主脸；
 `faceSharpness` 和 `faceAreaRatio` 供 Rust 判断样本是否适合登记到 Face Bank。
+`requestId` 由调用方生成并由引擎原样返回，用于关联 Rust 与 Python 日志；旧调用方可
+省略。`timings` 是诊断基线，不属于业务判断依据，单位均为毫秒。
 
 SFace 使用 `opencv-contrib-python-headless` 中的 `FaceRecognizerSF`；ArcFace 使用
 用户提供的 ONNX 模型和 5 点对齐。特征提取失败只追加识别器对应的 warning，不影响
@@ -147,6 +164,7 @@ SFace 使用 `opencv-contrib-python-headless` 中的 `FaceRecognizerSF`；ArcFac
 ```json
 {
   "protocolVersion": 1,
+  "requestId": "7d73d5f2-5536-4eb1-8fc3-f89496588a25",
   "ok": false,
   "action": "processScreenshot",
   "data": null,

@@ -142,4 +142,22 @@ pub struct VisionProcessData {
     pub face_area_ratio: Option<f64>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Python-side phase timings used to compare one-shot and persistent
+    /// worker execution. Older engines omit the object entirely.
+    #[serde(default)]
+    pub timings: Option<VisionTimings>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VisionTimings {
+    pub processor_init_ms: Option<f64>,
+    pub read_ms: Option<f64>,
+    pub detect_ms: Option<f64>,
+    pub feature_ms: Option<f64>,
+    pub annotate_ms: Option<f64>,
+    pub crop_ms: Option<f64>,
+    pub write_ms: Option<f64>,
+    pub process_total_ms: Option<f64>,
+    pub service_total_ms: Option<f64>,
 }

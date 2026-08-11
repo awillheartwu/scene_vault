@@ -19,6 +19,7 @@ class _StubService:
             ok=True,
             action="processScreenshot",
             data={"name": request.payload["characterName"]},
+            request_id=request.request_id,
         )
 
 
@@ -47,6 +48,7 @@ class CliEncodingTests(unittest.TestCase):
         service = _StubService()
         request = {
             "protocolVersion": 1,
+            "requestId": "utf8-1",
             "action": "processScreenshot",
             "payload": {"characterName": "杰德"},
         }
@@ -64,6 +66,7 @@ class CliEncodingTests(unittest.TestCase):
         self.assertEqual(service.last_payload, request["payload"])
         response = json.loads(stdout.data.decode("utf-8"))
         self.assertEqual(response["data"]["name"], "杰德")
+        self.assertEqual(response["requestId"], "utf8-1")
         self.assertIn("杰德".encode("utf-8"), stdout.data)
 
 

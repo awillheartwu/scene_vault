@@ -3,6 +3,7 @@
 from .config import ProcessingRequest
 from .processor import (
     ProcessingResult,
+    ProcessingTimings,
     ScreenshotProcessor,
     dependencies_available,
     dependency_status,
@@ -13,6 +14,7 @@ __all__ = [
     "FaceBox",
     "ProcessingRequest",
     "ProcessingResult",
+    "ProcessingTimings",
     "ScreenshotProcessor",
     "dependencies_available",
     "dependency_status",

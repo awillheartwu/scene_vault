@@ -1,4 +1,8 @@
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,6 +29,8 @@ pub type ProgressCallback = Box<dyn FnMut(&str, f64) + Send>;
 #[serde(rename_all = "camelCase")]
 struct EngineResponse {
     protocol_version: i64,
+    #[serde(default)]
+    request_id: Option<String>,
     ok: bool,
     action: String,
     data: Option<Value>,
@@ -35,6 +41,12 @@ struct EngineResponse {
 struct EngineError {
     code: String,
     message: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InvocationMetrics {
+    spawn_ms: f64,
+    total_ms: f64,
 }
 
 pub async fn health(settings: &VisionSettings) -> Result<VisionHealth, AppError> {
@@ -253,22 +265,77 @@ fn insert_number(object: &mut serde_json::Map<String, Value>, key: &str, value: 
 
 async fn invoke_process(
     settings: &VisionSettings,
-    request: Value,
+    mut request: Value,
     progress: Option<ProgressCallback>,
 ) -> Result<VisionProcessData, AppError> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    request["requestId"] = Value::String(request_id.clone());
     let stdin = serde_json::to_vec(&request)
         .map_err(|error| AppError::Vision(format!("cannot encode vision request: {error}")))?;
-    let response =
-        invoke_with_progress(settings, "request", Some(&stdin), PROCESS_TIMEOUT, progress).await?;
-    ensure_protocol(&response, "processScreenshot")?;
-    if !response.ok {
-        return Err(response_error(response));
+    let request_started = Instant::now();
+    let invocation =
+        invoke_with_progress(settings, "request", Some(&stdin), PROCESS_TIMEOUT, progress).await;
+    let (response, metrics) = match invocation {
+        Ok(result) => result,
+        Err(error) => {
+            log_request_failure(&request_id, request_started, &error);
+            return Err(error);
+        }
+    };
+    if let Err(error) = ensure_protocol(&response, "processScreenshot") {
+        log_request_failure(&request_id, request_started, &error);
+        return Err(error);
     }
-    let data = response
-        .data
-        .ok_or_else(|| AppError::Vision("processing response has no data".to_owned()))?;
-    serde_json::from_value(data)
-        .map_err(|error| AppError::Vision(format!("invalid processing response: {error}")))
+    if response
+        .request_id
+        .as_deref()
+        .is_some_and(|value| value != request_id)
+    {
+        let error = AppError::Vision(format!(
+            "Python response request ID mismatch: expected {request_id}, received {}",
+            response.request_id.as_deref().unwrap_or_default()
+        ));
+        log_request_failure(&request_id, request_started, &error);
+        return Err(error);
+    }
+    if !response.ok {
+        let error = response_error(response);
+        log_request_failure(&request_id, request_started, &error);
+        return Err(error);
+    }
+    let Some(data) = response.data else {
+        let error = AppError::Vision("processing response has no data".to_owned());
+        log_request_failure(&request_id, request_started, &error);
+        return Err(error);
+    };
+    let result: VisionProcessData = match serde_json::from_value(data) {
+        Ok(result) => result,
+        Err(error) => {
+            let error = AppError::Vision(format!("invalid processing response: {error}"));
+            log_request_failure(&request_id, request_started, &error);
+            return Err(error);
+        }
+    };
+    let timings = result.timings.as_ref();
+    log_service::debug(
+        "vision.request",
+        format!(
+            "request_id={request_id} mode=oneshot action=processScreenshot outcome=ok spawn_ms={:.3} rust_invoke_ms={:.3} rust_total_ms={:.3} processor_init_ms={} read_ms={} detect_ms={} feature_ms={} annotate_ms={} crop_ms={} write_ms={} process_total_ms={} service_total_ms={}",
+            metrics.spawn_ms,
+            metrics.total_ms,
+            elapsed_ms(request_started),
+            timing_value(timings.and_then(|value| value.processor_init_ms)),
+            timing_value(timings.and_then(|value| value.read_ms)),
+            timing_value(timings.and_then(|value| value.detect_ms)),
+            timing_value(timings.and_then(|value| value.feature_ms)),
+            timing_value(timings.and_then(|value| value.annotate_ms)),
+            timing_value(timings.and_then(|value| value.crop_ms)),
+            timing_value(timings.and_then(|value| value.write_ms)),
+            timing_value(timings.and_then(|value| value.process_total_ms)),
+            timing_value(timings.and_then(|value| value.service_total_ms)),
+        ),
+    );
+    Ok(result)
 }
 
 fn validate_python_path(path: &Path, label: &str) -> Result<(), AppError> {
@@ -290,7 +357,9 @@ async fn invoke(
     stdin: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<EngineResponse, AppError> {
-    invoke_with_progress(settings, command_name, stdin, timeout, None).await
+    invoke_with_progress(settings, command_name, stdin, timeout, None)
+        .await
+        .map(|(response, _)| response)
 }
 
 async fn invoke_with_progress(
@@ -299,7 +368,7 @@ async fn invoke_with_progress(
     stdin: Option<&[u8]>,
     timeout: Duration,
     mut progress: Option<ProgressCallback>,
-) -> Result<EngineResponse, AppError> {
+) -> Result<(EngineResponse, InvocationMetrics), AppError> {
     let executable = settings
         .python_executable_path
         .as_deref()
@@ -308,6 +377,8 @@ async fn invoke_with_progress(
         .python_module_root
         .as_deref()
         .ok_or_else(|| AppError::Vision("Python module root is not configured".to_owned()))?;
+    let invocation_started = Instant::now();
+    let spawn_started = Instant::now();
     let mut child = Command::new(executable)
         .arg("-m")
         .arg("scene_vault_ai")
@@ -323,6 +394,7 @@ async fn invoke_with_progress(
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| AppError::Vision(format!("cannot start Python: {error}")))?;
+    let spawn_ms = elapsed_ms(spawn_started);
 
     // Stream SVPROGRESS lines from stderr while stdout keeps the single JSON
     // response contract. Old Python versions never write progress lines, so
@@ -396,7 +468,13 @@ async fn invoke_with_progress(
             }
         )));
     }
-    Ok(response)
+    Ok((
+        response,
+        InvocationMetrics {
+            spawn_ms,
+            total_ms: elapsed_ms(invocation_started),
+        },
+    ))
 }
 
 /// Parses one `SVPROGRESS {"stage": "...", "percent": N}` line. Lines without
@@ -440,6 +518,28 @@ fn response_error(response: EngineResponse) -> AppError {
 
 fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn timing_value(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "na".to_owned())
+}
+
+fn log_request_failure(request_id: &str, started: Instant, error: &AppError) {
+    log_service::error(
+        "vision.request",
+        format!(
+            "request_id={request_id} mode=oneshot action=processScreenshot outcome=error rust_total_ms={:.3} error={}",
+            elapsed_ms(started),
+            truncate(&error.to_string().replace(['\r', '\n'], " | "), 500)
+        ),
+    );
 }
 
 #[cfg(test)]
@@ -524,6 +624,7 @@ mod tests {
     fn rejects_protocol_and_action_mismatches() {
         let wrong_protocol = EngineResponse {
             protocol_version: 99,
+            request_id: None,
             ok: true,
             action: "health".to_owned(),
             data: Some(json!({})),
@@ -536,6 +637,7 @@ mod tests {
 
         let wrong_action = EngineResponse {
             protocol_version: PROTOCOL_VERSION,
+            request_id: None,
             ok: true,
             action: "health".to_owned(),
             data: Some(json!({})),
@@ -551,6 +653,7 @@ mod tests {
     fn preserves_structured_python_error_codes() {
         let error = response_error(EngineResponse {
             protocol_version: PROTOCOL_VERSION,
+            request_id: None,
             ok: false,
             action: "processScreenshot".to_owned(),
             data: None,
@@ -560,6 +663,39 @@ mod tests {
             }),
         });
         assert!(error.to_string().contains("image_decode_failed"));
+    }
+
+    #[test]
+    fn parses_optional_request_id_and_python_timings() {
+        let response: EngineResponse = serde_json::from_value(json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "requestId": "vision-123",
+            "ok": true,
+            "action": "processScreenshot",
+            "data": {
+                "annotatedPath": null,
+                "avatarPath": null,
+                "faceBox": null,
+                "warnings": [],
+                "timings": {
+                    "processorInitMs": 12.5,
+                    "detectMs": 34.25,
+                    "serviceTotalMs": 50.0
+                }
+            },
+            "error": null
+        }))
+        .expect("response should deserialize");
+        let data: VisionProcessData =
+            serde_json::from_value(response.data.expect("processing data should exist"))
+                .expect("processing timings should deserialize");
+
+        assert_eq!(response.request_id.as_deref(), Some("vision-123"));
+        let timings = data.timings.expect("timings should exist");
+        assert_eq!(timings.processor_init_ms, Some(12.5));
+        assert_eq!(timings.detect_ms, Some(34.25));
+        assert_eq!(timings.service_total_ms, Some(50.0));
+        assert_eq!(timings.read_ms, None);
     }
 
     #[test]

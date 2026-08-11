@@ -6,8 +6,9 @@ import importlib.util
 import os
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from ..errors import (
@@ -57,6 +58,32 @@ def dependencies_available() -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ProcessingTimings:
+    processor_init_ms: float = 0.0
+    read_ms: float = 0.0
+    detect_ms: float = 0.0
+    feature_ms: float = 0.0
+    annotate_ms: float = 0.0
+    crop_ms: float = 0.0
+    write_ms: float = 0.0
+    process_total_ms: float = 0.0
+    service_total_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "processorInitMs": self.processor_init_ms,
+            "readMs": self.read_ms,
+            "detectMs": self.detect_ms,
+            "featureMs": self.feature_ms,
+            "annotateMs": self.annotate_ms,
+            "cropMs": self.crop_ms,
+            "writeMs": self.write_ms,
+            "processTotalMs": self.process_total_ms,
+            "serviceTotalMs": self.service_total_ms,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessingResult:
     input_path: Path
     image_width: int
@@ -71,6 +98,7 @@ class ProcessingResult:
     face_sharpness: float | None = None
     face_area_ratio: float | None = None
     warnings: tuple[str, ...] = ()
+    timings: ProcessingTimings = field(default_factory=ProcessingTimings)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -90,6 +118,7 @@ class ProcessingResult:
             "faceSharpness": self.face_sharpness,
             "faceAreaRatio": self.face_area_ratio,
             "warnings": list(self.warnings),
+            "timings": self.timings.to_dict(),
         }
 
 
@@ -143,12 +172,17 @@ class ScreenshotProcessor:
                 self.extractor_error = f"sface_feature_failed: {error}"
 
     def process(self) -> ProcessingResult:
+        process_started = perf_counter()
+        phase_started = perf_counter()
         image_bgr, image = self._load_image()
+        read_ms = _elapsed_ms(phase_started)
         image_width, image_height = image.size
         self._progress("read", 5.0)
 
         self._progress("detect_face", 20.0)
+        phase_started = perf_counter()
         faces, sharpness_values, face_count = self._detect_faces(image_bgr)
+        detect_ms = _elapsed_ms(phase_started)
         face_box = (
             select_primary_face(
                 faces,
@@ -171,10 +205,13 @@ class ScreenshotProcessor:
             else None
         )
         outputs: list[tuple[Any, Path]] = []
+        annotate_ms = 0.0
+        crop_ms = 0.0
 
         annotated_path = None
         if self.request.annotate:
             self._progress("annotate", 75.0)
+            phase_started = perf_counter()
             if (
                 self.request.character_name is None
                 or self.request.annotated_output_path is None
@@ -187,6 +224,7 @@ class ScreenshotProcessor:
             )
             annotated_path = self.request.annotated_output_path
             outputs.append((annotated, annotated_path))
+            annotate_ms = _elapsed_ms(phase_started)
 
         avatar_path = None
         if (
@@ -195,11 +233,15 @@ class ScreenshotProcessor:
             and self.request.avatar_output_path is not None
         ):
             self._progress("crop_avatar", 90.0)
+            phase_started = perf_counter()
             avatar = AvatarCropper(self.request.crop).crop(image, face_box)
             avatar_path = self.request.avatar_output_path
             outputs.append((avatar, avatar_path))
+            crop_ms = _elapsed_ms(phase_started)
 
+        phase_started = perf_counter()
         _save_images_atomically(outputs)
+        write_ms = _elapsed_ms(phase_started)
         self._progress("done", 100.0)
 
         warnings: list[str] = []
@@ -208,11 +250,13 @@ class ScreenshotProcessor:
         if self.request.crop_avatar and face_box is None:
             warnings.append("avatar_not_generated")
         face_feature: list[float] | None = None
+        feature_ms = 0.0
         if face_box is not None:
             if self.extractor_error is not None:
                 warnings.append(self.extractor_error)
             elif self.feature_extractor is not None:
                 self._progress("extract_feature", 45.0)
+                phase_started = perf_counter()
                 try:
                     face_feature = self.feature_extractor.extract(image_bgr, face_box)
                     model_id = type(self.feature_extractor).MODEL_ID
@@ -224,6 +268,7 @@ class ScreenshotProcessor:
                     face_feature = None
                     model_id = None
                     model_version = None
+                feature_ms = _elapsed_ms(phase_started)
 
         return ProcessingResult(
             input_path=self.request.input_path,
@@ -241,6 +286,15 @@ class ScreenshotProcessor:
             face_sharpness=face_sharpness,
             face_area_ratio=face_area_ratio,
             warnings=tuple(warnings),
+            timings=ProcessingTimings(
+                read_ms=read_ms,
+                detect_ms=detect_ms,
+                feature_ms=feature_ms,
+                annotate_ms=annotate_ms,
+                crop_ms=crop_ms,
+                write_ms=write_ms,
+                process_total_ms=_elapsed_ms(process_started),
+            ),
         )
 
     def _progress(self, stage: str, percent: float) -> None:
@@ -347,3 +401,7 @@ def _save_images_atomically(outputs: Sequence[tuple[Any, Path]]) -> None:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((perf_counter() - started) * 1000.0, 3)
