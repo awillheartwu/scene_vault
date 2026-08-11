@@ -395,9 +395,20 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
     )
     .fetch_optional(pool)
     .await?;
+    let sidecar = vision_settings_service::sidecar_executable();
+    log_service::info(
+        "vision.engine",
+        format!(
+            "runtime status: configured={} sidecar={sidecar:?} current_exe={:?}",
+            vision_settings_service::is_configured(&settings),
+            std::env::current_exe(),
+        ),
+    );
     Ok(CaptureRuntimeStatus {
         engine_status: if vision_settings_service::is_configured(&settings) {
             "configured".to_owned()
+        } else if sidecar.is_some() {
+            "sidecar".to_owned()
         } else {
             "unconfigured".to_owned()
         },

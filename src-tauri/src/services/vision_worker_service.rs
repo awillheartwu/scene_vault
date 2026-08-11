@@ -259,9 +259,9 @@ impl WorkerProcess {
         command.arg("worker");
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
             // This GUI process has no console; without this flag Windows opens
-            // a visible cmd window for the python worker.
+            // a visible cmd window for the engine worker. tokio's Command
+            // exposes creation_flags inherently on Windows.
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = command
