@@ -1,5 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -344,6 +344,69 @@ export interface CleanupResourceResult {
   message: string;
 }
 
+export interface DatabaseStartupStatus {
+  mode: "normal" | "recovery";
+  databasePath: string;
+  backupDirectory: string;
+  recoveryDirectory: string;
+  errorMessage: string | null;
+  pendingRestore: boolean;
+  restoredOnStartup: boolean;
+}
+
+export interface PreflightReport {
+  ok: boolean;
+  databasePath: string;
+  quickCheck: string[];
+  foreignKeyIssues: string[];
+  migrationIssues: string[];
+  schemaVersion: number | null;
+  sqliteVersion: string;
+  journalMode: string;
+  databaseSizeBytes: number;
+  walSizeBytes: number;
+  checkedAtUtc: string;
+}
+
+export interface BackupManifest {
+  engine: string;
+  contentScope: string;
+  excludesSourceImages: boolean;
+  backupFile: string;
+  appVersion: string;
+  schemaVersion: number | null;
+  sqliteVersion: string;
+  createdAtUtc: string;
+  sha256: string;
+  fileSize: number;
+  tableCounts: Record<string, number>;
+}
+
+export interface DatabaseBackupResult {
+  backupPath: string;
+  manifestPath: string;
+  manifest: BackupManifest;
+}
+
+export interface RestoreRequest {
+  engine: string;
+  sourceBackupPath: string;
+  stagedPath: string;
+  manifestPath: string;
+  sha256: string;
+  appVersion: string;
+  schemaVersion: number | null;
+  requestedAtUtc: string;
+}
+
+export interface MaintenanceReport {
+  reindexed: boolean;
+  analyzed: boolean;
+  integrityOk: boolean;
+  sqliteVersion: string;
+  ranAtUtc: string;
+}
+
 export interface VisionSettings {
   pythonExecutablePath: string | null;
   pythonModuleRoot: string | null;
@@ -657,6 +720,21 @@ export const captureApi = {
     invoke<StorageResourceStatus>("get_storage_resource_status"),
   cleanupResource: (kind: "thumbnail_cache" | "capture_output" | "expired_logs") =>
     invoke<CleanupResourceResult>("cleanup_resource", { input: { kind } }),
+  getDatabaseStartupStatus: () =>
+    invoke<DatabaseStartupStatus>("get_database_startup_status"),
+  preflightDatabase: () => invoke<PreflightReport>("preflight_database"),
+  createDatabaseBackup: (destination: string) =>
+    invoke<DatabaseBackupResult>("create_database_backup", {
+      input: { destination },
+    }),
+  stageDatabaseRestore: (backupPath: string) =>
+    invoke<RestoreRequest>("stage_database_restore", {
+      input: { backupPath },
+    }),
+  rebuildDatabaseIndexes: () =>
+    invoke<MaintenanceReport>("rebuild_database_indexes"),
+  restartAfterDatabaseRestore: () =>
+    invoke<void>("restart_after_database_restore"),
   getDiagnosticSummary: () => invoke<string>("get_diagnostic_summary"),
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   updateAppSettings: (settings: AppSettings) =>
@@ -754,6 +832,14 @@ export async function pickFile(filters?: { name: string; extensions: string[] }[
   return typeof value === "string" ? value : null;
 }
 
+export async function pickSavePath(options: {
+  defaultPath?: string;
+  filters?: { name: string; extensions: string[] }[];
+} = {}): Promise<string | null> {
+  const value = await save({ ...options });
+  return typeof value === "string" ? value : null;
+}
+
 export async function revealPath(path: string): Promise<void> {
   await revealItemInDir(path);
 }
@@ -789,6 +875,18 @@ export function captureClassificationLabel(classification: CaptureClassification
 
 export function pathFileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
+}
+
+export function pathJoin(directory: string, name: string): string {
+  if (!directory) return name;
+  const separator = directory.includes("\\") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${name}`;
+}
+
+export function pathDirectory(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return index > 0 ? trimmed.slice(0, index) : trimmed;
 }
 
 export function pathMimeType(path: string): string {
