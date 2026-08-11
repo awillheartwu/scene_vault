@@ -125,6 +125,7 @@ function buildEntryItems(entry: CaptureHistoryEntry): ContextMenuItem[] {
       label: "重新识别",
       icon: Sparkles,
       separatorBefore: true,
+      disabled: loading.value,
       action: () => reprocess(entry),
     });
   }

@@ -173,6 +173,37 @@ describe("ContextMenu", () => {
     expect(menuItems()[0]).toBe(document.activeElement);
   });
 
+  it("positions keyboard-invoked menus beside the focused item", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    vi.spyOn(opener, "getBoundingClientRect").mockReturnValue({
+      left: 40,
+      top: 70,
+      right: 140,
+      bottom: 102,
+      width: 100,
+      height: 32,
+      x: 40,
+      y: 70,
+      toJSON: () => ({}),
+    });
+    const event = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    });
+    Object.defineProperty(event, "target", { value: opener });
+    Object.defineProperty(event, "currentTarget", { value: opener });
+
+    menu.open(event, items());
+    await flushPromises();
+
+    expect(menuRoot()!.style.left).toBe("52px");
+    expect(menuRoot()!.style.top).toBe("94px");
+  });
+
   it("selects an item on click, runs its action and closes", async () => {
     await openAt();
     menuItems()[0].click();
@@ -203,11 +234,28 @@ describe("ContextMenu", () => {
   });
 
   it("closes on Escape without running an action", async () => {
-    await openAt();
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    await openAt(opener);
     menuRoot()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await flushPromises();
     expect(menuRoot()).toBeNull();
     expect(actions.first).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("closes on window blur without restoring focus", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    await openAt(opener);
+
+    window.dispatchEvent(new Event("blur"));
+    await flushPromises();
+
+    expect(menuRoot()).toBeNull();
+    expect(document.activeElement).not.toBe(opener);
   });
 
   it("closes on pointerdown outside the menu", async () => {

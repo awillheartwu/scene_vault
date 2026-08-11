@@ -88,6 +88,7 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
       id: "label",
       label: "标记角色/分类",
       icon: UserRound,
+      disabled: busy.value || importBusy.value,
       action: () => {
         void submitClassification("person");
       },
@@ -98,6 +99,7 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
       id: "retry",
       label: "重新识别",
       icon: RefreshCw,
+      disabled: busy.value || importBusy.value,
       action: () => retryItem(item),
     });
   }
@@ -105,14 +107,14 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
     id: "reveal-source",
     label: "显示原图",
     icon: Image,
-    action: () => void revealPath(item.sourcePath),
+    action: () => void reveal(item.sourcePath),
   });
   if (item.destinationPath) {
     items.push({
       id: "reveal-destination",
       label: "显示归档图",
       icon: Archive,
-      action: () => void revealPath(item.destinationPath!),
+      action: () => void reveal(item.destinationPath),
     });
   }
   if (projectId.value && item.destinationPath && item.classification !== "private") {
@@ -121,10 +123,20 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
       label: "设为项目封面",
       icon: FolderOpen,
       separatorBefore: true,
+      disabled: busy.value || importBusy.value,
       action: () => setProjectCover(item),
     });
   }
   return items;
+}
+
+async function reveal(path: string | null) {
+  if (!path) return;
+  try {
+    await revealPath(path);
+  } catch (error) {
+    toast.error(normalizeError(error));
+  }
 }
 
 function onItemContext(event: MouseEvent, item: CaptureItem) {

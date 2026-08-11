@@ -86,7 +86,7 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
   [桌面界面自适应与交互规范](decisions/2026-08-09-adaptive-desktop-ui.md)
 - [ ] 项目工程化自检：拆分大文件、优化项目结构、优化打包内容、优化加载时间、优化内存
   与项目体积
-- [ ] 应用内自定义右键菜单：通用 ContextMenu 组件（Teleport + 命中判定），第一批接入
+- [x] 应用内自定义右键菜单：通用 ContextMenu 组件（Teleport + 命中判定），第一批接入
   Home 项目卡片、History 条目、Capture 截图项；危险操作复用确认对话框；需要新增后端
   命令的删除类操作暂缓；约束见
   [自定义右键菜单决策](decisions/2026-08-10-custom-context-menu.md)

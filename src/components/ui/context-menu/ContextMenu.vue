@@ -45,7 +45,10 @@ function nextEnabled(from: number, direction: 1 | -1): number {
 }
 
 function focusItemAt(index: number) {
-  if (index < 0) return;
+  if (index < 0) {
+    root.value?.focus();
+    return;
+  }
   focusedIndex.value = index;
   itemEls.value[index]?.focus();
 }
@@ -98,6 +101,10 @@ function onResize() {
   close();
 }
 
+function onWindowBlur() {
+  props.menu.close({ restoreFocus: false });
+}
+
 watch(
   () => props.menu.state.open,
   (open) => {
@@ -105,10 +112,12 @@ watch(
       window.addEventListener("pointerdown", onPointerDown, true);
       document.addEventListener("scroll", onScroll, true);
       window.addEventListener("resize", onResize);
+      window.addEventListener("blur", onWindowBlur);
     } else {
       window.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("blur", onWindowBlur);
     }
   },
 );
@@ -128,6 +137,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", onPointerDown, true);
   document.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", onResize);
+  window.removeEventListener("blur", onWindowBlur);
 });
 </script>
 

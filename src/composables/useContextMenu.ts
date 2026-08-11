@@ -74,21 +74,46 @@ export function installContextMenuGuard(): () => void {
 
 export function useContextMenu() {
   const state = reactive<ContextMenuState>({ open: false, x: 0, y: 0, items: [] });
+  let returnFocus: HTMLElement | null = null;
+
+  function positionFor(event: MouseEvent): { x: number; y: number } {
+    const keyboardInvocation =
+      event.button === 0 && event.clientX === 0 && event.clientY === 0;
+    if (keyboardInvocation && event.currentTarget instanceof HTMLElement) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      return {
+        x: rect.left + Math.min(12, rect.width / 2),
+        y: rect.top + Math.min(24, rect.height),
+      };
+    }
+    return { x: event.clientX, y: event.clientY };
+  }
 
   /** Opens the menu for a right-click event; returns false when suppressed. */
   function open(event: MouseEvent, items: ContextMenuItem[]): boolean {
     if (isExcludedContextTarget(event)) return false;
     event.preventDefault();
+    const position = positionFor(event);
+    returnFocus = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     state.items = items;
-    state.x = event.clientX;
-    state.y = event.clientY;
+    state.x = position.x;
+    state.y = position.y;
     state.open = true;
     return true;
   }
 
-  function close() {
+  function close(options: { restoreFocus?: boolean } = {}) {
     state.open = false;
     state.items = [];
+    const target = returnFocus;
+    returnFocus = null;
+    if (
+      options.restoreFocus !== false &&
+      target?.isConnected &&
+      !target.matches(":disabled")
+    ) {
+      target.focus({ preventScroll: true });
+    }
   }
 
   function select(item: ContextMenuItem) {

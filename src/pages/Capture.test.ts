@@ -64,6 +64,7 @@ vi.mock("@/lib/capture-api", () => ({
 }));
 
 import Capture from "./Capture.vue";
+import { toast } from "@/lib/toast";
 
 const project = {
   id: "project-1",
@@ -587,6 +588,56 @@ describe("Capture item context menu", () => {
       .click();
     await flushPromises();
     expect(api.setProjectCover).toHaveBeenCalledWith("project-1", "item-1");
+    wrapper.unmount();
+  });
+
+  it("reports reveal failures instead of leaving an unhandled rejection", async () => {
+    api.revealPath.mockRejectedValueOnce(new Error("source is unavailable"));
+    const toastError = vi.spyOn(toast, "error");
+    const wrapper = mount(Capture);
+    try {
+      await flushPromises();
+      await wrapper.find(".capture-card").trigger("contextmenu", {
+        clientX: 100,
+        clientY: 60,
+      });
+      await flushPromises();
+
+      menuItems()
+        .find((entry) => entry.textContent?.includes("显示原图"))!
+        .click();
+      await flushPromises();
+
+      expect(toastError).toHaveBeenCalledWith("source is unavailable");
+    } finally {
+      toastError.mockRestore();
+      wrapper.unmount();
+    }
+  });
+
+  it("disables mutating menu actions while another operation is running", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([item("failed")]);
+    let finishRetry!: (value: ReturnType<typeof item>) => void;
+    api.retry.mockImplementationOnce(
+      () => new Promise((resolve) => { finishRetry = resolve; }),
+    );
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    menuItems()
+      .find((entry) => entry.textContent?.includes("重新识别"))!
+      .click();
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    const retry = menuItems().find((entry) => entry.textContent?.includes("重新识别"));
+    expect(retry?.hasAttribute("disabled")).toBe(true);
+
+    finishRetry(item("archive_pending"));
+    await flushPromises();
     wrapper.unmount();
   });
 });

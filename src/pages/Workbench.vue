@@ -93,6 +93,7 @@ function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
       id: "rename",
       label: "重命名…",
       icon: Pencil,
+      disabled: busy.value || renameBusy.value,
       action: () => {
         selectedCharacterId.value = summary.id;
         openRename();
@@ -102,7 +103,7 @@ function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
       id: "merge",
       label: "合并到其他角色…",
       icon: Users,
-      disabled: summaries.value.length <= 1,
+      disabled: busy.value || summaries.value.length <= 1,
       action: () => {
         selectedCharacterId.value = summary.id;
         mergeOpen.value = true;
@@ -113,7 +114,7 @@ function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
       label: "批量拒绝并登记",
       icon: Ban,
       separatorBefore: true,
-      disabled: summary.pendingReviewCount === 0,
+      disabled: busy.value || summary.pendingReviewCount === 0,
       action: () => {
         selectedCharacterId.value = summary.id;
         void batchRejectAndEnroll();
@@ -123,7 +124,7 @@ function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
       id: "reprocess",
       label: "当前角色重新识别",
       icon: Sparkles,
-      disabled: summary.degradedCount === 0,
+      disabled: busy.value || summary.degradedCount === 0,
       action: () => {
         selectedCharacterId.value = summary.id;
         void batchReprocess(summary.id);
@@ -148,18 +149,21 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
         label: "确认建议",
         icon: Check,
         separatorBefore: true,
+        disabled: busy.value,
         action: () => void acceptSuggestion(item),
       },
       {
         id: "reject",
         label: "拒绝建议",
         icon: X,
+        disabled: busy.value,
         action: () => void rejectSuggestion(item),
       },
       {
         id: "reject-enroll",
         label: "拒绝并登记",
         icon: UserPlus,
+        disabled: busy.value,
         action: () => void rejectAndEnroll(item),
       },
     );
@@ -170,6 +174,7 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       label: "重新提取人脸特征",
       icon: RefreshCw,
       separatorBefore: items.length > 1,
+      disabled: busy.value,
       action: () => void refreshFaceFeature(item),
     });
   }
@@ -178,6 +183,7 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       id: "reprocess",
       label: "重新识别",
       icon: Sparkles,
+      disabled: busy.value,
       action: () => void reprocessDegraded(item),
     });
   }
@@ -193,6 +199,7 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       label: "设为代表头像",
       icon: UserRound,
       separatorBefore: true,
+      disabled: busy.value,
       action: () => setRepresentativeAvatar(item.assetId!),
     });
   }
@@ -207,6 +214,7 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       id: "flag-sample",
       label: entrySample.flagged ? "恢复参与匹配" : "标记可疑",
       icon: Flag,
+      disabled: busy.value,
       action: () => void toggleSampleFlagged(entrySample),
     });
   }
@@ -216,6 +224,7 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       label: currentProject.value?.coverCaptureItemId === item.id ? "取消项目封面" : "设为项目封面",
       icon: Image,
       separatorBefore: true,
+      disabled: busy.value,
       action: () => void toggleProjectCover(),
     });
   }
