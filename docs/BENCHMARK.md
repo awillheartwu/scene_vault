@@ -150,7 +150,8 @@ python python\tools\face_eval_report.py `
 
 ## 常驻 Worker 性能与稳定性（2026-08-11）
 
-原始报告：[vision-worker-windows-2026-08-11.json](benchmarks/vision-worker-windows-2026-08-11.json)。
+原始报告：[SFace](benchmarks/vision-worker-windows-2026-08-11.json)、
+[ArcFace](benchmarks/vision-worker-arcface-windows-2026-08-11.json)。
 在 Windows 11、Python 3.12.3、4 个 P 核上，对同一张真实截图、同一 YuNet 与 SFace
 权重连续运行 20 次；不生成标注图或头像，比较完整 Python 进程、JSON 协议和模型处理
 链路。RSS 统计 venv 启动器及其 Python 子进程的进程树。
@@ -175,6 +176,11 @@ python python\tools\face_eval_report.py `
 Python AI sidecar/运行时与模型资源，不因本次结果迁移到 Rust 推理；低内存场景可在启动
 前设置 `SCENE_VAULT_VISION_MODE=oneshot`。基准可用
 `python/tools/benchmark_worker.py` 重跑。
+
+同机 ArcFace 20 次结果：one-shot warm median 1,341.646 ms，worker 381.961 ms，
+吞吐提升 3.513 倍；worker 稳态 Working Set 约 1,210 MiB，明显高于 SFace 的约
+521 MiB。完整的 Rust/WebView2/Python、CPU、Private Bytes 和磁盘体积调研见
+[RESOURCE_USAGE.md](RESOURCE_USAGE.md)。
 
 ## 历史教训（不要重蹈）
 

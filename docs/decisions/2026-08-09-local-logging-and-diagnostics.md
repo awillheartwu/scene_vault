@@ -29,3 +29,173 @@
 
 Windows 问题可以直接从应用内定位并复制给维护者，同时日志体积有明确上限。日志仍可能
 包含底层错误返回的本地路径，因此用户应在发送诊断摘要前确认接收方。
+
+## 2026-08-11 覆盖审计
+
+日志存储、轮转、查询、清理和 History UI 已完成，但“存在统一日志系统”不等于“业务
+操作已接入”。当前覆盖情况如下：
+
+| 层 | 已覆盖 | 主要缺口 |
+|---|---|---|
+| Rust | app startup、快捷键/弹窗、慢 discovery、视觉 worker/request | Capture 状态机、归档、项目/角色、Face Bank、设置、笔记同步、缩略图 |
+| Python | `SVPROGRESS`、未预期异常、stderr 转交 Rust | 模型加载/cache hit/miss/reload/evict、请求开始/结束、结构化等级和事件 |
+| Vue | 少量 `console.error`、toast、页面 errorMessage | 不持久化、invoke 无统一耗时/失败日志、静默 catch 缺少上下文 |
+
+当前 `LogRecord` 只有 `timestamp/level/module/message`。视觉代码把 `request_id` 和耗时
+拼入 message，能人工读取，但不能稳定按请求、截图、会话和业务事件筛选。
+
+常驻 Python worker 进一步要求区分三个生命周期：
+
+```text
+worker 生命周期
+  └─ 模型缓存生命周期
+      └─ request_id 对应的一次处理
+```
+
+不能继续把“一次 Python 进程”当成“一次图片处理”。
+
+## 目标结构
+
+Rust 继续作为唯一日志文件所有者。Python 和 Vue 不建立第二套日志目录：
+
+```text
+Vue ── record_client_event ──┐
+                             ├─ Rust log_service ── JSONL / History
+Python stderr ── SVLOG ──────┘
+```
+
+### LogRecord v2
+
+在保留旧四字段的基础上增加可选字段，并为旧 JSONL 提供 serde 默认值：
+
+```text
+event
+operation_id
+request_id
+project_id
+session_id
+capture_item_id
+note_id
+attempt
+duration_ms
+outcome
+worker_mode
+error_code
+```
+
+关联链为：
+
+```text
+operation_id → session_id → capture_item_id → request_id
+```
+
+业务 ID 用结构化字段保存；`message` 只保留简短、适合人读的摘要。
+
+### 等级规则
+
+- `debug`：高频成功、cache hit、正常 polling 汇总、性能阶段信息；
+- `info`：用户发起的重要操作成功、worker 启停、会话启停、归档完成；
+- `warn`：降级、重试、慢操作、源目录/NAS 暂时不可用、可恢复冲突；
+- `error`：操作最终失败、数据/协议损坏、重试耗尽、后台循环异常退出。
+
+不逐条持久化 progress tick，也不记录每次空轮询。
+
+### Python SVLOG
+
+Python stderr 增加与 `SVPROGRESS` 分离的单行 JSON 前缀：
+
+```text
+SVLOG {"level":"info","module":"vision.model","event":"model_loaded",
+       "requestId":"...","durationMs":123.4}
+```
+
+Rust 解析等级和字段后写入统一日志；无法解析的第三方 stderr 仍以截断后的
+`vision.python/python_stderr` 保存。建议事件：
+
+- `model_load_started/model_loaded/model_load_failed`；
+- `model_cache_hit/model_cache_miss/model_reloaded/model_evicted`；
+- `request_started/request_succeeded/request_failed`；
+- `unexpected_exception`。
+
+worker 启动日志保留 PID；请求日志必须使用 request ID，模型事件记录 model ID/version，
+不记录模型绝对路径。
+
+### Vue 客户端事件
+
+增加受限的 `record_client_event` Command 和前端封装，只允许稳定 module/event、等级、
+operation ID、duration 和已脱敏摘要。首批替换：
+
+- `PopupClassify` 加载/事件桥失败；
+- `PopupWorkbench` 操作失败；
+- `PopupNote` Markdown 与同步失败；
+- Capture/History/Workbench/Home/Settings 的 invoke 和 reveal 失败；
+- `window.unhandledrejection` 与 `window.error` 的安全摘要。
+
+toast 继续负责即时反馈，inline error 继续负责页面状态；持久化日志不能替代用户反馈，
+也不能因为 toast 和 API wrapper 同时记录而产生重复事件。
+
+## 业务事件优先级
+
+### P0：故障恢复主链路
+
+- `capture.worker`：claimed、processing_started/succeeded/failed、degraded、retry、recovered；
+- `capture.archive`：started、copy_failed、hash_verified、atomic_rename、completed、retry；
+- `capture.discovery`：discovered、imported、duplicate_skipped、source_unavailable；
+- `notes.sync`：failed、conflict_backup、retry、retry_exhausted；
+- `vision.worker/request/python`：timeout、crash、fallback、模型缓存和最终结果。
+
+重点修复当前后台吞错：notes 后台循环和 capture worker 的最终错误必须进入持久化日志。
+
+### P1：用户高影响操作
+
+- project：create、rename、delete、destination_changed、cover_changed；
+- character：create、rename、merge、avatar_changed；
+- recognition：suggestion accepted/rejected、sample status/flag、feature refresh、bank rebuild；
+- settings：配置类别和变更结果，只记录字段名，不记录 Python/模型/字体绝对路径；
+- frontend：invoke、popup、reveal、event bridge 和未处理异常。
+
+业务成功/失败应在 Service 的事务提交或最终错误处记录；Command 保持薄，避免一项操作在
+Command 和 Service 重复写两条日志。
+
+### P2：诊断体验
+
+- History 支持 event、operation/request/capture ID 和 outcome 过滤；
+- 增加“单次操作时间线”，串联 Vue → Command → Service → Python → archive；
+- 增加日志队列丢弃计数，而不只向 stderr 打印；
+- 增加慢扫描、慢推理、慢归档阈值；
+- 诊断摘要按关联 ID 输出，但继续限制条数和隐私字段。
+
+## 脱敏规则
+
+默认禁止写入：
+
+- 截图、归档、Python、模型和字体完整路径；
+- 项目名、角色名、笔记正文；
+- 人脸框、embedding、图片内容；
+- 未处理的完整 traceback。
+
+允许写入：业务 UUID、模型 ID/version、扩展名、文件大小、目录类型、attempt、duration、
+稳定错误码和截断摘要。Windows drive/UNC/`\\?\` 路径必须通过统一 sanitizer 处理，不能
+只依赖每个调用方自觉。
+
+## 实施顺序
+
+1. **Schema 与兼容**：LogRecord v2、builder/context、安全 sanitizer、旧 JSONL 查询兼容。
+2. **P0 Rust 覆盖**：Capture worker、archive、discovery、recovery、notes background；补
+   状态转换、retry、NAS 和重启测试。
+3. **Python SVLOG**：请求上下文、模型缓存事件、Rust 解析和等级映射；验证 stdout 不被
+   污染、stderr 截断和 crash/fallback 关联。
+4. **Vue bridge**：受限 Command、统一 invoke wrapper、替换 console/静默 catch；保留
+   toast/inline error，加入去重规则。
+5. **P1 业务覆盖**：项目、角色、识别、设置和清理操作。
+6. **查询与时间线**：字段筛选、关联 ID 复制、单次操作视图和诊断摘要。
+7. **Windows 验收**：worker 复用/崩溃/fallback、NAS 断线、重启恢复、日志轮转、中文与
+   UNC 路径脱敏。
+
+## 必要测试
+
+- Rust：v1/v2 日志兼容、字段过滤、并发写入、轮转、队列丢弃、路径脱敏；
+- Rust 业务：每个 Capture/归档状态转换的 event、attempt、failure stage 与关联 ID；
+- Python：成功、协议错误、模型错误、异常、cache hit/miss/reload 均保持 request ID；
+- Vue：invoke 失败同时有用户反馈和一条持久化事件，不重复、不包含敏感数据；
+- E2E：从一次分类操作追踪到 worker、归档、重试或完成的完整时间线。
