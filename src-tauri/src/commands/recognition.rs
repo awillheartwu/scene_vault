@@ -5,7 +5,7 @@ use crate::{
     db::AppState,
     error::AppError,
     models::{
-        capture::{CaptureItem, CaptureItemIdInput},
+        capture::{CaptureItem, CaptureItemIdInput, CaptureItemListResponse},
         diagnostics::{LogLevel, LogRecord},
         recognition::{
             FaceBankModelStatus, FaceBankRebuildSummary, FaceSample, ListCharacterItemsInput,
@@ -206,8 +206,21 @@ pub async fn batch_reject_and_enroll(
 pub async fn list_character_capture_items(
     state: State<'_, AppState>,
     input: ListCharacterItemsInput,
-) -> Result<Vec<CaptureItem>, AppError> {
-    recognition_service::list_character_items(&state.pool, input).await
+) -> Result<CaptureItemListResponse, AppError> {
+    let page = input.page;
+    let page_size = input.page_size;
+    match (page, page_size) {
+        (None, None) => Ok(CaptureItemListResponse::Legacy(
+            recognition_service::list_character_items(&state.pool, input).await?,
+        )),
+        (Some(page), Some(page_size)) => Ok(CaptureItemListResponse::Paged(
+            recognition_service::list_character_items_paged(&state.pool, input, page, page_size)
+                .await?,
+        )),
+        _ => Err(AppError::Validation(
+            "page and pageSize must be provided together".to_owned(),
+        )),
+    }
 }
 
 #[tauri::command]

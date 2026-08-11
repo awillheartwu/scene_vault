@@ -9,12 +9,12 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::capture::{
-        CaptureHistoryEntry, CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureSession,
-        ClassifyPopupContext, CompleteCaptureProcessingInput, EndCaptureSessionInput,
-        ImportDirectoryCapturesInput, LabelCaptureInput, ListCaptureHistoryInput,
-        ListCategoryItemsInput, MarkCaptureFailedInput, RegisterCaptureInput, RelabelCaptureInput,
-        RetryCaptureInput, SessionSourceDirectory, StartCaptureSessionInput,
-        StartCaptureSessionResult, UnimportedCapture,
+        CaptureHistoryEntry, CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureItemPage,
+        CaptureSession, ClassifyPopupContext, CompleteCaptureProcessingInput,
+        EndCaptureSessionInput, ImportDirectoryCapturesInput, LabelCaptureInput,
+        ListCaptureHistoryInput, ListCategoryItemsInput, MarkCaptureFailedInput,
+        RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput, SessionSourceDirectory,
+        StartCaptureSessionInput, StartCaptureSessionResult, UnimportedCapture,
     },
     models::character::Character,
 };
@@ -49,6 +49,30 @@ const MAX_HISTORY_LIMIT: u32 = 1_000;
 const DEFAULT_HISTORY_LIMIT: u32 = 200;
 const MAX_ERROR_MESSAGE_CHARS: usize = 4_000;
 const REGISTER_STABILITY_DELAY_MS: u64 = 200;
+const MAX_ITEM_PAGE_SIZE: u32 = 500;
+const MAX_ITEM_PAGE_OFFSET: u64 = 1_000_000;
+
+/// Validates and converts strict pagination bounds into SQL `LIMIT`/`OFFSET`
+/// values. Out-of-range values are rejected instead of clamped so callers can
+/// surface the exact problem.
+pub(crate) fn item_page_bounds(page: u32, page_size: u32) -> Result<(i64, i64), AppError> {
+    if page == 0 {
+        return Err(AppError::Validation("page must be at least 1".to_owned()));
+    }
+    if page_size == 0 || page_size > MAX_ITEM_PAGE_SIZE {
+        return Err(AppError::Validation(format!(
+            "pageSize must be between 1 and {MAX_ITEM_PAGE_SIZE}"
+        )));
+    }
+    let offset = u64::from(page - 1) * u64::from(page_size);
+    if offset > MAX_ITEM_PAGE_OFFSET {
+        return Err(AppError::Validation(
+            "page offset exceeds the maximum supported offset".to_owned(),
+        ));
+    }
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    Ok((i64::from(page_size), offset))
+}
 
 pub async fn start_session(
     pool: &SqlitePool,
@@ -386,13 +410,68 @@ pub async fn list_items(pool: &SqlitePool, session_id: &str) -> Result<Vec<Captu
             captured_at, processed_at, archived_at, created_at, updated_at
         FROM capture_items
         WHERE session_id = ?
-        ORDER BY captured_at DESC, created_at DESC
+        ORDER BY captured_at DESC, created_at DESC, id DESC
         "#,
     )
     .bind(session_id)
     .fetch_all(pool)
     .await?;
     Ok(items)
+}
+
+/// One page of a session's capture items, newest first, plus the total number
+/// of items in the session. Uses the same existence check and ordering as
+/// `list_items` with an `id` tiebreaker so pages never skip or repeat rows.
+pub async fn list_items_paged(
+    pool: &SqlitePool,
+    session_id: &str,
+    page: u32,
+    page_size: u32,
+) -> Result<CaptureItemPage, AppError> {
+    let session_id = required(session_id, "capture session id")?;
+    let (limit, offset) = item_page_bounds(page, page_size)?;
+    let session_exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM capture_sessions WHERE id = ?)")
+            .bind(session_id)
+            .fetch_one(pool)
+            .await?;
+    if session_exists == 0 {
+        return Err(AppError::NotFound("capture session".to_owned()));
+    }
+
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capture_items WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await?;
+
+    let items = sqlx::query_as::<_, CaptureItem>(
+        r#"
+        SELECT
+            id, project_id, session_id, asset_id, character_id, classification, source_path, file_size, modified_at_ms, content_hash,
+            annotated_path, avatar_path, destination_path,
+            destination_avatar_path, status, face_box_json, face_count,
+            suggested_character_id, recognition_confidence, recognition_source,
+            review_status, error_message,
+            failure_stage, attempt_count, next_retry_at, processing_warnings_json,
+            captured_at, processed_at, archived_at, created_at, updated_at
+        FROM capture_items
+        WHERE session_id = ?
+        ORDER BY captured_at DESC, created_at DESC, id DESC
+        LIMIT ?
+        OFFSET ?
+        "#,
+    )
+    .bind(session_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(CaptureItemPage {
+        items,
+        total,
+        page,
+        page_size,
+    })
 }
 
 pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupContext, AppError> {
@@ -1393,30 +1472,25 @@ pub async fn retry_degraded_captures(
     Ok(requeued)
 }
 
-/// Items of one non-person category for the workbench tabs: unclassified
-/// captures waiting for a label, or all scene/private captures of a project.
-pub async fn list_category_items(
-    pool: &SqlitePool,
-    input: ListCategoryItemsInput,
-) -> Result<Vec<CaptureItem>, AppError> {
-    let project_id = input.project_id.trim();
-    let category = input.category.trim();
-    if project_id.is_empty() {
-        return Err(AppError::Validation(
-            "project id cannot be empty".to_owned(),
-        ));
+fn category_filter(category: &str) -> Result<&'static str, AppError> {
+    match category {
+        "unclassified" => Ok("item.status = 'awaiting_label'"),
+        "scene" => Ok("item.classification = 'scene'"),
+        "private" => Ok("item.classification = 'private'"),
+        _ => Err(AppError::Validation(
+            "category must be unclassified, scene, or private".to_owned(),
+        )),
     }
-    let filter = match category {
-        "unclassified" => "item.status = 'awaiting_label'",
-        "scene" => "item.classification = 'scene'",
-        "private" => "item.classification = 'private'",
-        _ => {
-            return Err(AppError::Validation(
-                "category must be unclassified, scene, or private".to_owned(),
-            ))
-        }
+}
+
+fn category_page_query(filter: &str, paged: bool) -> String {
+    let order_and_paging = if paged {
+        "ORDER BY item.captured_at DESC, item.created_at DESC, item.id DESC
+        LIMIT ? OFFSET ?"
+    } else {
+        "ORDER BY item.captured_at DESC, item.created_at DESC, item.id DESC"
     };
-    let query = format!(
+    format!(
         r#"
         SELECT
             item.id, item.project_id, item.session_id, item.asset_id, item.character_id,
@@ -1432,14 +1506,77 @@ pub async fn list_category_items(
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ? AND {filter}
-        ORDER BY item.captured_at DESC, item.created_at DESC
+        {order_and_paging}
         "#,
-    );
+    )
+}
+
+/// Items of one non-person category for the workbench tabs: unclassified
+/// captures waiting for a label, or all scene/private captures of a project.
+pub async fn list_category_items(
+    pool: &SqlitePool,
+    input: ListCategoryItemsInput,
+) -> Result<Vec<CaptureItem>, AppError> {
+    let project_id = input.project_id.trim();
+    let category = input.category.trim();
+    if project_id.is_empty() {
+        return Err(AppError::Validation(
+            "project id cannot be empty".to_owned(),
+        ));
+    }
+    let filter = category_filter(category)?;
+    let query = category_page_query(filter, false);
     let items = sqlx::query_as::<_, CaptureItem>(&query)
         .bind(project_id)
         .fetch_all(pool)
         .await?;
     Ok(items)
+}
+
+/// One page of a non-person category for the workbench tabs, plus the total
+/// number of matching records. Validates the same inputs as
+/// `list_category_items` and shares its ordering with an `id` tiebreaker.
+pub async fn list_category_items_paged(
+    pool: &SqlitePool,
+    input: ListCategoryItemsInput,
+    page: u32,
+    page_size: u32,
+) -> Result<CaptureItemPage, AppError> {
+    let project_id = input.project_id.trim();
+    let category = input.category.trim();
+    if project_id.is_empty() {
+        return Err(AppError::Validation(
+            "project id cannot be empty".to_owned(),
+        ));
+    }
+    let filter = category_filter(category)?;
+    let (limit, offset) = item_page_bounds(page, page_size)?;
+
+    let total: i64 = sqlx::query_scalar(&format!(
+        r#"
+        SELECT COUNT(*)
+        FROM capture_items item
+        JOIN capture_sessions session ON session.id = item.session_id
+        WHERE session.project_id = ? AND {filter}
+        "#,
+    ))
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+
+    let query = category_page_query(filter, true);
+    let items = sqlx::query_as::<_, CaptureItem>(&query)
+        .bind(project_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+    Ok(CaptureItemPage {
+        items,
+        total,
+        page,
+        page_size,
+    })
 }
 
 /// Pre-existing images in the session source directory that are not yet

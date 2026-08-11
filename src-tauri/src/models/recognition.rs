@@ -65,6 +65,11 @@ pub struct ReviewRecognitionInput {
 pub struct ListCharacterItemsInput {
     pub project_id: String,
     pub character_id: String,
+    /// Optional server-side pagination. When either is provided, both must be
+    /// provided; the command then returns a `CaptureItemPage` instead of a
+    /// plain array.
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
 }
 
 /// One row of the character face-bank sample strip.

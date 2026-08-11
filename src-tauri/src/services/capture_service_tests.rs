@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     db,
     models::{
-        capture::RelabelCaptureInput,
+        capture::{CaptureItemListResponse, CaptureItemPage, RelabelCaptureInput},
         character::CreateCharacterInput,
         project::{CreateProjectInput, SetProjectCoverInput},
         recognition::SetRecognitionSuggestionInput,
@@ -65,6 +65,55 @@ async fn session_with_source(
     .expect("start capture session")
     .session;
     (workspace, session, source)
+}
+
+/// Inserts a capture row directly so pagination tests can build deep lists
+/// without the stability-delay cost of the full registration path.
+async fn insert_item(
+    pool: &SqlitePool,
+    session_id: &str,
+    project_id: &str,
+    classification: &str,
+    name: &str,
+) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO capture_items (
+            id, project_id, session_id, source_path, classification, status
+        )
+        VALUES (?, ?, ?, ?, ?, 'awaiting_label')
+        "#,
+    )
+    .bind(&id)
+    .bind(project_id)
+    .bind(session_id)
+    .bind(name)
+    .bind(classification)
+    .execute(pool)
+    .await
+    .expect("insert capture item");
+    id
+}
+
+#[test]
+fn capture_item_list_response_keeps_legacy_array_and_paged_object_shapes() {
+    let legacy = CaptureItemListResponse::Legacy(Vec::new());
+    assert_eq!(
+        serde_json::to_string(&legacy).expect("serialize legacy"),
+        "[]"
+    );
+
+    let paged = CaptureItemListResponse::Paged(CaptureItemPage {
+        items: Vec::new(),
+        total: 7,
+        page: 2,
+        page_size: 20,
+    });
+    assert_eq!(
+        serde_json::to_string(&paged).expect("serialize paged"),
+        r#"{"items":[],"total":7,"page":2,"pageSize":20}"#
+    );
 }
 
 #[tokio::test]
@@ -1585,6 +1634,8 @@ async fn category_items_list_unclassified_scene_and_private() {
         ListCategoryItemsInput {
             project_id: proj.id.clone(),
             category: "unclassified".to_owned(),
+            page: None,
+            page_size: None,
         },
     )
     .await
@@ -1597,6 +1648,8 @@ async fn category_items_list_unclassified_scene_and_private() {
         ListCategoryItemsInput {
             project_id: proj.id.clone(),
             category: "scene".to_owned(),
+            page: None,
+            page_size: None,
         },
     )
     .await
@@ -1609,6 +1662,8 @@ async fn category_items_list_unclassified_scene_and_private() {
         ListCategoryItemsInput {
             project_id: proj.id.clone(),
             category: "private".to_owned(),
+            page: None,
+            page_size: None,
         },
     )
     .await
@@ -1621,7 +1676,199 @@ async fn category_items_list_unclassified_scene_and_private() {
         ListCategoryItemsInput {
             project_id: proj.id,
             category: "everything".to_owned(),
+            page: None,
+            page_size: None,
         },
+    )
+    .await
+    .expect_err("invalid category");
+    assert!(matches!(error, AppError::Validation(_)));
+    let _ = workspace;
+}
+
+#[tokio::test]
+async fn list_items_paged_returns_pages_with_total_and_deterministic_order() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, _source) = session_with_source(&pool, &proj.id).await;
+    for index in 0..25 {
+        insert_item(
+            &pool,
+            &session.id,
+            &proj.id,
+            "unclassified",
+            &format!("{index:02}.png"),
+        )
+        .await;
+    }
+
+    let legacy = list_items(&pool, &session.id).await.expect("legacy list");
+    assert_eq!(legacy.len(), 25);
+
+    let page1 = list_items_paged(&pool, &session.id, 1, 10)
+        .await
+        .expect("page 1");
+    assert_eq!(page1.total, 25);
+    assert_eq!(page1.page, 1);
+    assert_eq!(page1.page_size, 10);
+    assert_eq!(page1.items.len(), 10);
+    assert_eq!(page1.items[0].id, legacy[0].id);
+
+    let page2 = list_items_paged(&pool, &session.id, 2, 10)
+        .await
+        .expect("page 2");
+    assert_eq!(page2.items.len(), 10);
+    assert_eq!(page2.items[0].id, legacy[10].id);
+
+    let page3 = list_items_paged(&pool, &session.id, 3, 10)
+        .await
+        .expect("page 3");
+    assert_eq!(page3.items.len(), 5);
+    assert_eq!(page3.items[0].id, legacy[20].id);
+
+    let mut paged_ids: Vec<&str> = page1
+        .items
+        .iter()
+        .chain(&page2.items)
+        .chain(&page3.items)
+        .map(|item| item.id.as_str())
+        .collect();
+    paged_ids.sort_unstable();
+    let mut legacy_ids: Vec<&str> = legacy.iter().map(|item| item.id.as_str()).collect();
+    legacy_ids.sort_unstable();
+    assert_eq!(paged_ids, legacy_ids, "pages cover every item exactly once");
+
+    let deep = list_items_paged(&pool, &session.id, 100, 10)
+        .await
+        .expect("deep page");
+    assert!(deep.items.is_empty());
+    assert_eq!(deep.total, 25);
+    let _ = workspace;
+}
+
+#[tokio::test]
+async fn list_items_paged_rejects_invalid_bounds_and_missing_session() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, _source) = session_with_source(&pool, &proj.id).await;
+    insert_item(&pool, &session.id, &proj.id, "unclassified", "one.png").await;
+
+    let zero_page = list_items_paged(&pool, &session.id, 0, 10)
+        .await
+        .expect_err("page zero");
+    assert!(matches!(zero_page, AppError::Validation(_)));
+
+    let zero_size = list_items_paged(&pool, &session.id, 1, 0)
+        .await
+        .expect_err("page size zero");
+    assert!(matches!(zero_size, AppError::Validation(_)));
+
+    let huge_size = list_items_paged(&pool, &session.id, 1, 501)
+        .await
+        .expect_err("page size above max");
+    assert!(matches!(huge_size, AppError::Validation(_)));
+
+    let huge_offset = list_items_paged(&pool, &session.id, 1_000_002, 1)
+        .await
+        .expect_err("offset above max");
+    assert!(matches!(huge_offset, AppError::Validation(_)));
+
+    let missing = list_items_paged(&pool, "no-such-session", 1, 10)
+        .await
+        .expect_err("missing session");
+    assert!(matches!(missing, AppError::NotFound(_)));
+    let _ = workspace;
+}
+
+#[tokio::test]
+async fn list_category_items_paged_returns_pages_with_total() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, _source) = session_with_source(&pool, &proj.id).await;
+    for index in 0..12 {
+        insert_item(
+            &pool,
+            &session.id,
+            &proj.id,
+            "scene",
+            &format!("scene-{index:02}.png"),
+        )
+        .await;
+    }
+    insert_item(&pool, &session.id, &proj.id, "private", "private.png").await;
+
+    let legacy = list_category_items(
+        &pool,
+        ListCategoryItemsInput {
+            project_id: proj.id.clone(),
+            category: "scene".to_owned(),
+            page: None,
+            page_size: None,
+        },
+    )
+    .await
+    .expect("legacy scene list");
+    assert_eq!(legacy.len(), 12);
+
+    let page1 = list_category_items_paged(
+        &pool,
+        ListCategoryItemsInput {
+            project_id: proj.id.clone(),
+            category: "scene".to_owned(),
+            page: None,
+            page_size: None,
+        },
+        1,
+        5,
+    )
+    .await
+    .expect("page 1");
+    assert_eq!(page1.total, 12);
+    assert_eq!(page1.items.len(), 5);
+    assert_eq!(page1.items[0].id, legacy[0].id);
+
+    let page3 = list_category_items_paged(
+        &pool,
+        ListCategoryItemsInput {
+            project_id: proj.id.clone(),
+            category: "scene".to_owned(),
+            page: None,
+            page_size: None,
+        },
+        3,
+        5,
+    )
+    .await
+    .expect("page 3");
+    assert_eq!(page3.items.len(), 2);
+    assert_eq!(page3.items[0].id, legacy[10].id);
+
+    let private = list_category_items_paged(
+        &pool,
+        ListCategoryItemsInput {
+            project_id: proj.id.clone(),
+            category: "private".to_owned(),
+            page: None,
+            page_size: None,
+        },
+        1,
+        5,
+    )
+    .await
+    .expect("private page");
+    assert_eq!(private.total, 1);
+    assert_eq!(private.items.len(), 1);
+
+    let error = list_category_items_paged(
+        &pool,
+        ListCategoryItemsInput {
+            project_id: proj.id.clone(),
+            category: "everything".to_owned(),
+            page: None,
+            page_size: None,
+        },
+        1,
+        5,
     )
     .await
     .expect_err("invalid category");

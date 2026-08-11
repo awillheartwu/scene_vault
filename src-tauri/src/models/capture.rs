@@ -214,6 +214,32 @@ pub struct ListCategoryItemsInput {
     pub project_id: String,
     /// `unclassified` (awaiting label), `scene` or `private`.
     pub category: String,
+    /// Optional server-side pagination. When either is provided, both must be
+    /// provided; the command then returns a `CaptureItemPage` instead of a
+    /// plain array.
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+/// A page of capture items plus the total number of matching records, so the
+/// UI can render page controls without a second count call.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureItemPage {
+    pub items: Vec<CaptureItem>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+/// Backward-compatible response for the capture-item list commands. Callers
+/// that omit paging options keep receiving the legacy plain array; paged
+/// callers receive a `{ items, total, page, pageSize }` object.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum CaptureItemListResponse {
+    Legacy(Vec<CaptureItem>),
+    Paged(CaptureItemPage),
 }
 
 /// One pre-existing image in the session source directory that has no

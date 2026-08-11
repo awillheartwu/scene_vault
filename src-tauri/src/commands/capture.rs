@@ -5,12 +5,12 @@ use crate::{
     error::AppError,
     models::{
         capture::{
-            CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureSession,
-            ClassifyPopupContext, CompleteCaptureProcessingInput, DiscoverCapturesInput,
-            DiscoverCapturesResult, EndCaptureSessionInput, ImportDirectoryCapturesInput,
-            ImportedRecognitionInput, LabelCaptureInput, ListCaptureHistoryInput,
-            ListCategoryItemsInput, MarkCaptureFailedInput, ReadCaptureImageInput,
-            RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput,
+            CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureItemListResponse,
+            CaptureSession, ClassifyPopupContext, CompleteCaptureProcessingInput,
+            DiscoverCapturesInput, DiscoverCapturesResult, EndCaptureSessionInput,
+            ImportDirectoryCapturesInput, ImportedRecognitionInput, LabelCaptureInput,
+            ListCaptureHistoryInput, ListCategoryItemsInput, MarkCaptureFailedInput,
+            ReadCaptureImageInput, RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput,
             RetryDegradedCapturesInput, StartCaptureSessionInput, StartCaptureSessionResult,
             UnimportedCapture,
         },
@@ -54,8 +54,20 @@ pub async fn end_capture_session(
 pub async fn list_capture_items(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<Vec<CaptureItem>, AppError> {
-    capture_service::list_items(&state.pool, &session_id).await
+    page: Option<u32>,
+    page_size: Option<u32>,
+) -> Result<CaptureItemListResponse, AppError> {
+    match (page, page_size) {
+        (None, None) => Ok(CaptureItemListResponse::Legacy(
+            capture_service::list_items(&state.pool, &session_id).await?,
+        )),
+        (Some(page), Some(page_size)) => Ok(CaptureItemListResponse::Paged(
+            capture_service::list_items_paged(&state.pool, &session_id, page, page_size).await?,
+        )),
+        _ => Err(AppError::Validation(
+            "page and pageSize must be provided together".to_owned(),
+        )),
+    }
 }
 
 #[tauri::command]
@@ -162,8 +174,20 @@ pub async fn retry_degraded_captures(
 pub async fn list_category_items(
     state: State<'_, AppState>,
     input: ListCategoryItemsInput,
-) -> Result<Vec<CaptureItem>, AppError> {
-    capture_service::list_category_items(&state.pool, input).await
+) -> Result<CaptureItemListResponse, AppError> {
+    let page = input.page;
+    let page_size = input.page_size;
+    match (page, page_size) {
+        (None, None) => Ok(CaptureItemListResponse::Legacy(
+            capture_service::list_category_items(&state.pool, input).await?,
+        )),
+        (Some(page), Some(page_size)) => Ok(CaptureItemListResponse::Paged(
+            capture_service::list_category_items_paged(&state.pool, input, page, page_size).await?,
+        )),
+        _ => Err(AppError::Validation(
+            "page and pageSize must be provided together".to_owned(),
+        )),
+    }
 }
 
 #[tauri::command]

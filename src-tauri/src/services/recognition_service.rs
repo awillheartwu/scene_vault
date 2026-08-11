@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     error::AppError,
     models::{
-        capture::{CaptureItem, RelabelCaptureInput},
+        capture::{CaptureItem, CaptureItemPage, RelabelCaptureInput},
         recognition::{
             FaceBankModelCount, FaceBankModelStatus, FaceBankRebuildSummary, FaceRow, FaceSample,
             ListCharacterItemsInput, ReviewRecognitionInput, SetFaceSampleFlaggedInput,
@@ -20,6 +20,24 @@ use crate::{
 
 const RECOGNITION_SOURCES: [&str; 3] = ["face_bank", "vision", "manual"];
 const REVIEW_DECISIONS: [&str; 2] = ["accepted", "rejected"];
+
+async fn ensure_character_in_project(
+    pool: &SqlitePool,
+    project_id: &str,
+    character_id: &str,
+) -> Result<(), AppError> {
+    let belongs_to_project: i64 = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM characters WHERE id = ? AND project_id = ?)",
+    )
+    .bind(character_id)
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    if belongs_to_project == 0 {
+        return Err(AppError::NotFound("character in project".to_owned()));
+    }
+    Ok(())
+}
 
 /// The primary face row of a capture, if any. Phase 1 writes exactly one
 /// primary row; the schema allows more for a future multi-face phase.
@@ -325,16 +343,7 @@ pub async fn list_character_items(
             "project id and character id cannot be empty".to_owned(),
         ));
     }
-    let belongs_to_project: i64 = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM characters WHERE id = ? AND project_id = ?)",
-    )
-    .bind(character_id)
-    .bind(project_id)
-    .fetch_one(pool)
-    .await?;
-    if belongs_to_project == 0 {
-        return Err(AppError::NotFound("character in project".to_owned()));
-    }
+    ensure_character_in_project(pool, project_id, character_id).await?;
 
     let items = sqlx::query_as::<_, CaptureItem>(
         r#"
@@ -354,7 +363,7 @@ pub async fn list_character_items(
         WHERE session.project_id = ?
           AND item.character_id = ?
           AND item.classification = 'person'
-        ORDER BY item.captured_at DESC, item.created_at DESC
+        ORDER BY item.captured_at DESC, item.created_at DESC, item.id DESC
         "#,
     )
     .bind(project_id)
@@ -362,6 +371,78 @@ pub async fn list_character_items(
     .fetch_all(pool)
     .await?;
     Ok(items)
+}
+
+/// One page of a character's person captures for the workbench grid, plus the
+/// total number of matching records. Validates the same inputs as
+/// `list_character_items` and shares its newest-first ordering with an `id`
+/// tiebreaker so pages never skip or repeat rows.
+pub async fn list_character_items_paged(
+    pool: &SqlitePool,
+    input: ListCharacterItemsInput,
+    page: u32,
+    page_size: u32,
+) -> Result<CaptureItemPage, AppError> {
+    let project_id = input.project_id.trim();
+    let character_id = input.character_id.trim();
+    if project_id.is_empty() || character_id.is_empty() {
+        return Err(AppError::Validation(
+            "project id and character id cannot be empty".to_owned(),
+        ));
+    }
+    ensure_character_in_project(pool, project_id, character_id).await?;
+    let (limit, offset) = capture_service::item_page_bounds(page, page_size)?;
+
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM capture_items item
+        JOIN capture_sessions session ON session.id = item.session_id
+        WHERE session.project_id = ?
+          AND item.character_id = ?
+          AND item.classification = 'person'
+        "#,
+    )
+    .bind(project_id)
+    .bind(character_id)
+    .fetch_one(pool)
+    .await?;
+
+    let items = sqlx::query_as::<_, CaptureItem>(
+        r#"
+        SELECT
+            item.id, item.project_id, item.session_id, item.asset_id, item.character_id,
+            item.classification, item.source_path, item.file_size, item.modified_at_ms, item.content_hash,
+            item.annotated_path, item.avatar_path, item.destination_path,
+            item.destination_avatar_path, item.status, item.face_box_json, item.face_count,
+            item.suggested_character_id, item.recognition_confidence,
+            item.recognition_source, item.review_status,
+            item.error_message, item.failure_stage, item.attempt_count,
+            item.next_retry_at, item.processing_warnings_json,
+            item.captured_at, item.processed_at, item.archived_at,
+            item.created_at, item.updated_at
+        FROM capture_items item
+        JOIN capture_sessions session ON session.id = item.session_id
+        WHERE session.project_id = ?
+          AND item.character_id = ?
+          AND item.classification = 'person'
+        ORDER BY item.captured_at DESC, item.created_at DESC, item.id DESC
+        LIMIT ?
+        OFFSET ?
+        "#,
+    )
+    .bind(project_id)
+    .bind(character_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(CaptureItemPage {
+        items,
+        total,
+        page,
+        page_size,
+    })
 }
 
 /// Face-bank samples of one character, newest first, for the workbench

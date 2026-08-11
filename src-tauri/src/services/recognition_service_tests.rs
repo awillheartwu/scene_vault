@@ -354,6 +354,8 @@ async fn lists_character_items_newest_first() {
         ListCharacterItemsInput {
             project_id: fixture.project_id.clone(),
             character_id: fixture.character_id.clone(),
+            page: None,
+            page_size: None,
         },
     )
     .await
@@ -367,11 +369,166 @@ async fn lists_character_items_newest_first() {
         ListCharacterItemsInput {
             project_id: fixture.project_id,
             character_id: "missing".to_owned(),
+            page: None,
+            page_size: None,
         },
     )
     .await
     .expect_err("unknown character");
     assert!(matches!(error, AppError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn lists_character_items_paged_with_total_and_deterministic_order() {
+    let pool = db::test_pool().await;
+    let fixture = fixture(&pool).await;
+    let session_id: String =
+        sqlx::query_scalar("SELECT session_id FROM capture_items WHERE id = ?")
+            .bind(&fixture.item_id)
+            .fetch_one(&pool)
+            .await
+            .expect("session id");
+    for index in 0..6 {
+        let item = insert_person_item(
+            &pool,
+            &session_id,
+            &fixture.project_id,
+            &fixture.character_id,
+            &format!("extra-{index:02}.png"),
+        )
+        .await;
+        let _ = item;
+    }
+
+    let legacy = list_character_items(
+        &pool,
+        ListCharacterItemsInput {
+            project_id: fixture.project_id.clone(),
+            character_id: fixture.character_id.clone(),
+            page: None,
+            page_size: None,
+        },
+    )
+    .await
+    .expect("legacy list");
+    assert_eq!(legacy.len(), 8);
+
+    let page1 = list_character_items_paged(
+        &pool,
+        ListCharacterItemsInput {
+            project_id: fixture.project_id.clone(),
+            character_id: fixture.character_id.clone(),
+            page: None,
+            page_size: None,
+        },
+        1,
+        3,
+    )
+    .await
+    .expect("page 1");
+    assert_eq!(page1.total, 8);
+    assert_eq!(page1.items.len(), 3);
+    assert_eq!(page1.items[0].id, legacy[0].id);
+
+    let page3 = list_character_items_paged(
+        &pool,
+        ListCharacterItemsInput {
+            project_id: fixture.project_id.clone(),
+            character_id: fixture.character_id.clone(),
+            page: None,
+            page_size: None,
+        },
+        3,
+        3,
+    )
+    .await
+    .expect("page 3");
+    assert_eq!(page3.items.len(), 2);
+    assert_eq!(page3.items[0].id, legacy[6].id);
+
+    let page2 = list_character_items_paged(
+        &pool,
+        ListCharacterItemsInput {
+            project_id: fixture.project_id.clone(),
+            character_id: fixture.character_id.clone(),
+            page: None,
+            page_size: None,
+        },
+        2,
+        3,
+    )
+    .await
+    .expect("page 2");
+    let mut paged_ids: Vec<&str> = page1
+        .items
+        .iter()
+        .chain(&page2.items)
+        .chain(&page3.items)
+        .map(|item| item.id.as_str())
+        .collect();
+    paged_ids.sort_unstable();
+    let mut legacy_ids: Vec<&str> = legacy.iter().map(|item| item.id.as_str()).collect();
+    legacy_ids.sort_unstable();
+    assert_eq!(paged_ids, legacy_ids, "pages cover every item exactly once");
+
+    let missing = list_character_items_paged(
+        &pool,
+        ListCharacterItemsInput {
+            project_id: fixture.project_id.clone(),
+            character_id: "missing".to_owned(),
+            page: None,
+            page_size: None,
+        },
+        1,
+        3,
+    )
+    .await
+    .expect_err("unknown character");
+    assert!(matches!(missing, AppError::NotFound(_)));
+
+    let zero_page = list_character_items_paged(
+        &pool,
+        ListCharacterItemsInput {
+            project_id: fixture.project_id,
+            character_id: fixture.character_id,
+            page: None,
+            page_size: None,
+        },
+        0,
+        3,
+    )
+    .await
+    .expect_err("page zero");
+    assert!(matches!(zero_page, AppError::Validation(_)));
+}
+
+/// Inserts a person capture row directly so pagination tests can build deep
+/// lists without the stability-delay cost of the full registration path.
+async fn insert_person_item(
+    pool: &SqlitePool,
+    session_id: &str,
+    project_id: &str,
+    character_id: &str,
+    name: &str,
+) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO capture_items (
+            id, project_id, session_id, source_path, classification, character_id, status
+        )
+        VALUES (?, ?, ?, ?, 'person', ?, 'queued')
+        "#,
+    )
+    .bind(&id)
+    .bind(project_id)
+    .bind(session_id)
+    .bind(name)
+    .bind(character_id)
+    .execute(pool)
+    .await
+    .expect("insert person capture item");
+    id
 }
 
 async fn set_item_feature(pool: &SqlitePool, capture_item_id: &str, feature: &str) {
