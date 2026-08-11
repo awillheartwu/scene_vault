@@ -565,9 +565,9 @@ async fn invoke_with_progress(
     command.arg(command_name);
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         // This GUI process has no console; without this flag Windows opens a
-        // visible cmd window for every spawned python.exe.
+        // visible cmd window for every spawned engine process. tokio's
+        // Command exposes creation_flags inherently on Windows.
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = command
