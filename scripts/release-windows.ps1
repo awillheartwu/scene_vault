@@ -215,6 +215,9 @@ if (-not $SkipAI) {
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SidecarExe) | Out-Null
     $DistPath = Join-Path $env:TEMP "sv-ai-dist"
+    # Remove stale artifacts from earlier runs so the poll cannot mistake them
+    # for the fresh build (this bug shipped an old installer once).
+    Remove-Item -Force (Join-Path $DistPath "scene-vault-ai.exe") -ErrorAction SilentlyContinue
     $sidecarProcess = Start-Process -FilePath $VenvPython -NoNewWindow -PassThru -ArgumentList @(
         "-m", "PyInstaller", "--noconfirm", "--clean",
         "--onefile", "--name", "scene-vault-ai",
@@ -240,9 +243,15 @@ function Build-Installer([string]$ConfigArg, [string]$OutputName) {
     $arguments = @("node_modules/@tauri-apps/cli/tauri.js", "build", "--bundles", "nsis", "--runner", $Cargo)
     if ($ConfigArg) { $arguments += @("--config", $ConfigArg) }
     Write-Host "[4/6] tauri build $ConfigArg"
-    $tauriProcess = Start-Process -FilePath $Node -ArgumentList $arguments -NoNewWindow -PassThru
 
     $nsis = Join-Path $RepoRoot "src-tauri/target/release/bundle/nsis"
+    # Remove stale installers from earlier runs: the poll below must only ever
+    # see the installer produced by THIS build.
+    if (Test-Path $nsis) {
+        Remove-Item -Force (Join-Path $nsis "*setup.exe") -ErrorAction SilentlyContinue
+    }
+    $tauriProcess = Start-Process -FilePath $Node -ArgumentList $arguments -NoNewWindow -PassThru
+
     $deadline = (Get-Date).AddMinutes(60)
     $installer = $null
     while ((Get-Date) -lt $deadline) {
@@ -251,6 +260,12 @@ function Build-Installer([string]$ConfigArg, [string]$OutputName) {
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($installer) { break }
         if ($tauriProcess.HasExited) { break }
+    }
+    # The installer file appears near the very end of the bundle step; give the
+    # CLI a short grace period to finish (signing/cleanup) before force-killing.
+    $graceDeadline = (Get-Date).AddMinutes(3)
+    while (-not $tauriProcess.HasExited -and (Get-Date) -lt $graceDeadline) {
+        Start-Sleep -Seconds 10
     }
     if (-not $tauriProcess.HasExited) { Stop-Process -Id $tauriProcess.Id -Force -ErrorAction SilentlyContinue }
     if (-not $installer) { throw "NSIS installer not found under $nsis" }
