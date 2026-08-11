@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "platform": "Windows-11-10.0.26100-SP0",
+  "pythonVersion": "3.12.3",
+  "recognizer": "sface",
+  "iterations": 20,
+  "oneShot": {
+    "firstMs": 786.598,
+    "warmMedianMs": 771.167,
+    "warmP95Ms": 782.176,
+    "totalMs": 15451.895,
+    "maxPeakRssMiB": 631.043
+  },
+  "worker": {
+    "firstMs": 610.115,
+    "warmMedianMs": 346.338,
+    "warmP95Ms": 349.307,
+    "totalMs": 7174.55,
+    "startupHealthMs": 120.924,
+    "coldTotalMs": 731.038,
+    "peakRssMiB": 775.672,
+    "rssAfterFirstMiB": 520.391,
+    "rssAfterLastMiB": 521.109,
+    "rssGrowthMiB": 0.719
+  },
+  "warmSpeedup": 2.227,
+  "responsesConsistent": true,
+  "crashRestartRecovered": true
+}

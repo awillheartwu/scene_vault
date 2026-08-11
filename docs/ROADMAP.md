@@ -45,7 +45,8 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
 - [x] 新增 JSONL 常驻 Python Worker、YuNet / SFace / ArcFace 模型缓存和逐请求隔离
 - [x] Rust Worker Manager：惰性启动、串行调用、超时/崩溃恢复、设置变更重启与
   一次性模式降级
-- [ ] Windows 相同图片与模型的 one-shot / worker A/B 性能、内存和恢复验收
+- [x] Windows 相同图片与模型的 one-shot / worker A/B 性能、内存和恢复验收；结果见
+  [BENCHMARK.md](BENCHMARK.md#常驻-worker-性能与稳定性2026-08-11)
 - [ ] 用更多真实使用数据校准 ArcFace 闭集校验带宽和建议阈值
 - [ ] Face Bank 每角色 1/3/5 样本的覆盖率实验
 - [ ] OCR Provider

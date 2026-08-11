@@ -53,6 +53,7 @@ struct InvocationMetrics {
 #[derive(Debug, Clone, Copy)]
 enum ProcessMode {
     Worker,
+    Oneshot,
     OneshotFallback,
 }
 
@@ -60,7 +61,43 @@ impl ProcessMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::Worker => "worker",
+            Self::Oneshot => "oneshot",
             Self::OneshotFallback => "oneshot_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VisionExecutionMode {
+    Worker,
+    Oneshot,
+}
+
+impl VisionExecutionMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "worker" => Some(Self::Worker),
+            "oneshot" | "one-shot" => Some(Self::Oneshot),
+            _ => None,
+        }
+    }
+
+    fn configured() -> Self {
+        match std::env::var("SCENE_VAULT_VISION_MODE") {
+            Ok(value) => match Self::parse(&value) {
+                Some(mode) => mode,
+                None => {
+                    log_service::warn(
+                        "vision.worker",
+                        format!(
+                            "state=invalid_mode value={} fallback=worker",
+                            truncate(value.trim(), 100)
+                        ),
+                    );
+                    Self::Worker
+                }
+            },
+            Err(_) => Self::Worker,
         }
     }
 }
@@ -290,24 +327,51 @@ fn insert_number(object: &mut serde_json::Map<String, Value>, key: &str, value: 
 
 pub(super) async fn invoke_process(
     settings: &VisionSettings,
+    request: Value,
+    progress: Option<ProgressCallback>,
+) -> Result<VisionProcessData, AppError> {
+    invoke_process_in_mode(
+        settings,
+        request,
+        progress,
+        VisionExecutionMode::configured(),
+    )
+    .await
+}
+
+pub(super) async fn invoke_process_in_mode(
+    settings: &VisionSettings,
     mut request: Value,
     progress: Option<ProgressCallback>,
+    execution_mode: VisionExecutionMode,
 ) -> Result<VisionProcessData, AppError> {
     let request_id = uuid::Uuid::new_v4().to_string();
     request["requestId"] = Value::String(request_id.clone());
     let request_started = Instant::now();
-    let worker_attempt_started = Instant::now();
     let mut progress = progress;
-    let worker_invocation = vision_worker_service::invoke(
-        settings,
-        &request,
-        &request_id,
-        PROCESS_TIMEOUT,
-        &mut progress,
-    )
-    .await;
+    if execution_mode == VisionExecutionMode::Oneshot {
+        log_service::debug(
+            "vision.worker",
+            format!("state=bypass request_id={request_id} mode=oneshot"),
+        );
+    }
+    let worker_attempt_started = Instant::now();
+    let worker_invocation = if execution_mode == VisionExecutionMode::Worker {
+        Some(
+            vision_worker_service::invoke(
+                settings,
+                &request,
+                &request_id,
+                PROCESS_TIMEOUT,
+                &mut progress,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let (response, metrics) = match worker_invocation {
-        Ok(invocation) => (
+        Some(Ok(invocation)) => (
             invocation.response,
             ProcessInvocationMetrics {
                 mode: ProcessMode::Worker,
@@ -317,7 +381,7 @@ pub(super) async fn invoke_process(
                 invoke_ms: invocation.total_ms,
             },
         ),
-        Err(worker_error) => {
+        Some(Err(worker_error)) => {
             if vision_worker_service::is_shutdown_requested() {
                 log_request_failure(
                     &request_id,
@@ -359,6 +423,30 @@ pub(super) async fn invoke_process(
                         ProcessMode::OneshotFallback,
                         &error,
                     );
+                    return Err(error);
+                }
+            }
+        }
+        None => {
+            let remaining = remaining_timeout(request_started, PROCESS_TIMEOUT)?;
+            let oneshot_request = legacy_oneshot_request(&request);
+            let stdin = serde_json::to_vec(&oneshot_request).map_err(|error| {
+                AppError::Vision(format!("cannot encode vision request: {error}"))
+            })?;
+            match invoke_with_progress(settings, "request", Some(&stdin), remaining, progress).await
+            {
+                Ok((response, invocation)) => (
+                    response,
+                    ProcessInvocationMetrics {
+                        mode: ProcessMode::Oneshot,
+                        spawn_ms: Some(invocation.spawn_ms),
+                        worker_startup_ms: None,
+                        worker_attempt_ms: 0.0,
+                        invoke_ms: invocation.total_ms,
+                    },
+                ),
+                Err(error) => {
+                    log_request_failure(&request_id, request_started, ProcessMode::Oneshot, &error);
                     return Err(error);
                 }
             }
@@ -880,6 +968,19 @@ mod tests {
             .expect_err("exhausted budget should time out");
 
         assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn parses_diagnostic_execution_modes() {
+        assert_eq!(
+            VisionExecutionMode::parse("worker"),
+            Some(VisionExecutionMode::Worker)
+        );
+        assert_eq!(
+            VisionExecutionMode::parse(" ONE-SHOT "),
+            Some(VisionExecutionMode::Oneshot)
+        );
+        assert_eq!(VisionExecutionMode::parse("unsupported"), None);
     }
 
     #[test]

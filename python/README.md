@@ -74,6 +74,21 @@ SFace / ArcFace 特征的 `faceFeatureModelVersion` 会附带模型文件 SHA-25
 模型路径不变，只要权重文件被替换，worker 会重新加载模型，Rust 也会将新旧 Face Bank
 样本视为不同模型空间；替换权重后需要在人物工作台重建 Face Bank。
 
+诊断或 A/B 验收时，可在启动 Scene Vault 前设置
+`SCENE_VAULT_VISION_MODE=oneshot` 强制一次性模式；`worker` 或未设置保持默认常驻模式。
+无效值会记录警告并安全回退到 worker。该环境变量只改变 Python 调用生命周期，不改变
+任务触发、串行顺序或失败恢复状态机。可复现的模型加载、推理、内存和崩溃重启基准使用：
+
+```powershell
+python\.venv\Scripts\python.exe python\tools\benchmark_worker.py `
+  --python python\.venv\Scripts\python.exe `
+  --module-root python\src `
+  --input C:\path\to\capture.png `
+  --yunet-model C:\path\to\yunet.onnx `
+  --sface-model C:\path\to\sface.onnx `
+  --iterations 10
+```
+
 ## processScreenshot
 
 请求顶层只允许 `protocolVersion`、可选 `requestId`、`action` 和 `payload`：

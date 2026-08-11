@@ -165,9 +165,14 @@ impl VisionWorkerManager {
             match WorkerProcess::start(settings, startup_timeout).await {
                 Ok(worker) => {
                     let startup_elapsed_ms = elapsed_ms(started);
+                    let pid = worker
+                        .child
+                        .id()
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_owned());
                     log_service::info(
                         "vision.worker",
-                        format!("state=ready startup_ms={startup_elapsed_ms:.3}"),
+                        format!("state=ready pid={pid} startup_ms={startup_elapsed_ms:.3}"),
                     );
                     self.worker = Some(worker);
                     startup_ms = Some(startup_elapsed_ms);
@@ -705,6 +710,7 @@ mod tests {
             fake_package.join("__main__.py"),
             r#"import json
 import sys
+import time
 
 def write_response(request, action, data):
     response = {
@@ -721,7 +727,9 @@ def write_response(request, action, data):
 if sys.argv[1] == "worker":
     health = json.loads(sys.stdin.buffer.readline().decode("utf-8"))
     write_response(health, "health", {"status": "ready"})
-    sys.stdin.buffer.readline()
+    worker_request = json.loads(sys.stdin.buffer.readline().decode("utf-8"))
+    if worker_request.get("payload", {}).get("hang"):
+        time.sleep(10)
     raise SystemExit(3)
 
 request = json.loads(sys.stdin.buffer.read().decode("utf-8"))
@@ -754,10 +762,35 @@ write_response(request, "processScreenshot", {
         .await;
         let fallback_after_restart = crate::services::vision_engine_service::invoke_process(
             &fallback_settings,
-            fallback_request,
+            fallback_request.clone(),
             None,
         )
         .await;
+        let forced_oneshot = crate::services::vision_engine_service::invoke_process_in_mode(
+            &fallback_settings,
+            fallback_request.clone(),
+            None,
+            crate::services::vision_engine_service::VisionExecutionMode::Oneshot,
+        )
+        .await;
+        let timeout_request_id = "rust-worker-timeout";
+        let timeout_request = json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "requestId": timeout_request_id,
+            "action": "processScreenshot",
+            "payload": {"hang": true}
+        });
+        let timeout_started = Instant::now();
+        let mut timeout_progress = None;
+        let timed_out = invoke(
+            &fallback_settings,
+            &timeout_request,
+            timeout_request_id,
+            Duration::from_millis(100),
+            &mut timeout_progress,
+        )
+        .await;
+        let timeout_elapsed = timeout_started.elapsed();
         reset_for_tests().await;
 
         let (first, first_output) = &invocations[0];
@@ -770,6 +803,7 @@ write_response(request, "processScreenshot", {
         let fallback = fallback.expect("one-shot fallback should preserve the request");
         let fallback_after_restart = fallback_after_restart
             .expect("next request should restart the worker and retain fallback");
+        let forced_oneshot = forced_oneshot.expect("forced one-shot mode should use legacy IPC");
         assert!(first.response.ok);
         assert!(second.response.ok);
         assert!(restarted.response.ok);
@@ -781,5 +815,11 @@ write_response(request, "processScreenshot", {
         assert!(output.is_file());
         assert!(fallback.warnings.is_empty());
         assert!(fallback_after_restart.warnings.is_empty());
+        assert!(forced_oneshot.warnings.is_empty());
+        assert!(timed_out
+            .expect_err("hanging worker request should time out")
+            .to_string()
+            .contains("timed out"));
+        assert!(timeout_elapsed < Duration::from_secs(4));
     }
 }

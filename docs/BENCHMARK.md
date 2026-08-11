@@ -148,6 +148,34 @@ python python\tools\face_eval_report.py `
 - Face Bank 样本显著扩充后（样本数量实验：1/3/5 张/角色的覆盖率曲线）；
 - 校准新游戏的建议阈值 / margin / 校验带宽。
 
+## 常驻 Worker 性能与稳定性（2026-08-11）
+
+原始报告：[vision-worker-windows-2026-08-11.json](benchmarks/vision-worker-windows-2026-08-11.json)。
+在 Windows 11、Python 3.12.3、4 个 P 核上，对同一张真实截图、同一 YuNet 与 SFace
+权重连续运行 20 次；不生成标注图或头像，比较完整 Python 进程、JSON 协议和模型处理
+链路。RSS 统计 venv 启动器及其 Python 子进程的进程树。
+
+| 指标 | one-shot | worker |
+|---|---:|---:|
+| 首次请求 | 786.598 ms | 610.115 ms |
+| worker 健康握手 | — | 120.924 ms |
+| worker 冷启动合计 | — | 731.038 ms |
+| 后续请求中位数 | 771.167 ms | **346.338 ms** |
+| 后续请求 P95 | 782.176 ms | **349.307 ms** |
+| 20 次总耗时 | 15,451.895 ms | **7,174.550 ms** |
+| 峰值 RSS | 631.043 MiB | 775.672 MiB |
+| 首次后 / 末次后 RSS | — | 520.391 / 521.109 MiB |
+
+结论：常驻模式后续请求约 **2.227 倍**快，20 次总耗时减少约 53.6%；20 次处理后的
+常驻 RSS 仅增长 0.719 MiB，没有观察到持续增长。两种模式的检测、特征和警告响应完全
+一致；强制杀死 worker 后重启处理成功。常驻进程会长期保留约 521 MiB 工作集，且模型
+加载期间峰值高于 one-shot，这是用内存换取吞吐的明确代价。
+
+因此默认模式保持 `worker`，保留 `oneshot` 诊断开关和自动降级。Windows 交付仍采用
+Python AI sidecar/运行时与模型资源，不因本次结果迁移到 Rust 推理；低内存场景可在启动
+前设置 `SCENE_VAULT_VISION_MODE=oneshot`。基准可用
+`python/tools/benchmark_worker.py` 重跑。
+
 ## 历史教训（不要重蹈）
 
 - 2026-08-06：cv2 5.0.0 的 `FaceRecognizerSF.feature()` 产生"黑图特征"，
