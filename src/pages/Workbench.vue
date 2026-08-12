@@ -1014,7 +1014,8 @@ onBeforeUnmount(() => {
         样本库共有 {{ modelStatus.sampleCount }} 条，其中
         {{ modelStatus.incompatibleSampleCount }} 条与当前识别器
         {{ modelStatus.activeModelId }}（{{ modelStatus.activeModelVersion }}）不兼容；
-        这些旧样本不会参与 AI 建议。重新提取后即可清理。
+        这些旧样本不会参与 AI 建议，切换识别器后新截图在重建前也不会产生建议。
+        重新提取后即可清理。
       </span>
       <button
         type="button"

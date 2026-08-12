@@ -155,7 +155,30 @@ pub async fn update(
     pool: &SqlitePool,
     input: UpdateVisionSettingsInput,
 ) -> Result<VisionSettings, AppError> {
+    let previous = get(pool).await?;
     let settings = normalize(input.settings)?;
+    let previous_recognizer = previous.recognizer.as_deref().unwrap_or("sface");
+    let next_recognizer = settings.recognizer.as_deref().unwrap_or("sface");
+    if previous_recognizer != next_recognizer {
+        // Pending suggestions were computed with the old recognizer model and
+        // are meaningless under the new one. Clear them so stale suggestions
+        // are never shown or accepted after a model switch; the next prelabel
+        // pass or face-bank rebuild recomputes them with the active model.
+        sqlx::query(
+            r#"
+            UPDATE capture_items
+            SET suggested_character_id = NULL,
+                recognition_confidence = NULL,
+                recognition_source = NULL,
+                review_status = 'none',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE review_status = 'pending'
+              AND suggested_character_id IS NOT NULL
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
     let value = serde_json::to_string(&settings)
         .map_err(|error| AppError::Validation(format!("cannot encode vision settings: {error}")))?;
     sqlx::query(
@@ -427,5 +450,159 @@ mod tests {
         let settings = get(&pool).await.expect("read broken");
         assert_eq!(settings.recognizer.as_deref(), Some("sface"));
         assert!(settings.sface_model_path.is_some());
+    }
+
+    #[tokio::test]
+    async fn recognizer_change_clears_pending_suggestions() {
+        use crate::{
+            models::{
+                capture::{LabelCaptureInput, RegisterCaptureInput},
+                character::CreateCharacterInput,
+                project::{
+                    AddProjectSourceDirectoryInput, CreateProjectInput, SetProjectDestinationInput,
+                },
+                recognition::SetRecognitionSuggestionInput,
+            },
+            services::{
+                capture_service, character_service, project_service, recognition_service,
+                test_support,
+            },
+        };
+        let pool = db::test_pool().await;
+        let project = project_service::create(
+            &pool,
+            CreateProjectInput {
+                name: "RecognizerSwitch".to_owned(),
+                description: None,
+                cover_asset_id: None,
+            },
+        )
+        .await
+        .expect("project");
+        let character = character_service::create(
+            &pool,
+            CreateCharacterInput {
+                project_id: project.id.clone(),
+                name: "Ava".to_owned(),
+                aliases_json: None,
+            },
+        )
+        .await
+        .expect("character");
+        let other = character_service::create(
+            &pool,
+            CreateCharacterInput {
+                project_id: project.id.clone(),
+                name: "Bella".to_owned(),
+                aliases_json: None,
+            },
+        )
+        .await
+        .expect("other");
+        let workspace = tempdir().expect("tempdir");
+        let source_directory = workspace.path().join("source-dir");
+        std::fs::create_dir(&source_directory).expect("source dir");
+        project_service::add_source_directory(
+            &pool,
+            AddProjectSourceDirectoryInput {
+                project_id: project.id.clone(),
+                directory: capture_service::path_to_string(&source_directory),
+            },
+        )
+        .await
+        .expect("add source directory");
+        let destination = workspace.path().join("archive");
+        std::fs::create_dir(&destination).expect("destination");
+        project_service::set_destination_directory(
+            &pool,
+            SetProjectDestinationInput {
+                project_id: project.id.clone(),
+                directory: capture_service::path_to_string(&destination),
+            },
+        )
+        .await
+        .expect("set destination");
+        let session = test_support::start_session(&pool, &project.id)
+            .await
+            .expect("session");
+        let source = source_directory.join("source.png");
+        std::fs::write(&source, b"image").expect("source");
+        let item = capture_service::register_capture(
+            &pool,
+            RegisterCaptureInput {
+                session_id: session.id,
+                source_path: source.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("register");
+        let item = capture_service::label_capture(
+            &pool,
+            LabelCaptureInput {
+                capture_item_id: item.id,
+                character_id: Some(character.id),
+                classification: Some("person".to_owned()),
+            },
+        )
+        .await
+        .expect("label");
+        recognition_service::set_suggestion(
+            &pool,
+            SetRecognitionSuggestionInput {
+                capture_item_id: item.id.clone(),
+                suggested_character_id: Some(other.id),
+                confidence: Some(0.8),
+                source: Some("face_bank".to_owned()),
+            },
+        )
+        .await
+        .expect("suggest");
+
+        // Saving with the same recognizer keeps the pending suggestion.
+        update(
+            &pool,
+            UpdateVisionSettingsInput {
+                settings: VisionSettings {
+                    recognizer: Some("sface".to_owned()),
+                    ..VisionSettings::default()
+                },
+            },
+        )
+        .await
+        .expect("save same recognizer");
+        let suggested: Option<String> =
+            sqlx::query_scalar("SELECT suggested_character_id FROM capture_items WHERE id = ?")
+                .bind(&item.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read suggestion");
+        assert!(suggested.is_some());
+
+        // Switching the recognizer clears it.
+        update(
+            &pool,
+            UpdateVisionSettingsInput {
+                settings: VisionSettings {
+                    recognizer: Some("arcface".to_owned()),
+                    ..VisionSettings::default()
+                },
+            },
+        )
+        .await
+        .expect("save recognizer switch");
+        let suggested: Option<String> =
+            sqlx::query_scalar("SELECT suggested_character_id FROM capture_items WHERE id = ?")
+                .bind(&item.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read cleared suggestion");
+        let review: String =
+            sqlx::query_scalar("SELECT review_status FROM capture_items WHERE id = ?")
+                .bind(&item.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read review");
+        assert!(suggested.is_none());
+        assert_eq!(review, "none");
     }
 }

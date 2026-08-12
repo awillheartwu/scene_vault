@@ -634,6 +634,25 @@ describe("Workbench", () => {
     expect(wrapper.find(".sample-strip-toggle").exists()).toBe(false);
   });
 
+  it("warns loudly when the face bank model mismatches the active recognizer", async () => {
+    api.getFaceBankModelStatus.mockResolvedValue({
+      bankModelId: "arcface-r50",
+      bankModelVersion: "w600k-r50",
+      activeModelId: "opencv-sface",
+      activeModelVersion: "2021dec",
+      sampleCount: 4,
+      incompatibleSampleCount: 4,
+      compatible: false,
+    });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const banner = wrapper.find(".model-mismatch-banner");
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain("4 条与当前识别器 opencv-sface");
+    expect(banner.text()).toContain("重建前也不会产生建议");
+  });
+
   it("lays out the grid header as a title row plus an adaptive action grid", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
