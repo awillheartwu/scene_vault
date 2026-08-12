@@ -1,7 +1,24 @@
-# Scene Vault v1.0.0 Release Notes
+# Scene Vault Release Notes
 
-> 状态：已随 [v1.0.0 Release](https://github.com/awillheartwu/scene_vault/releases/tag/v1.0.0) 正式发布（2026-08-12）。
-> 发布页附件：`scene-vault-1.0.0-setup.exe`（5.7 MB）与 `scene-vault-1.0.0-ai-setup.exe`（110 MB）。
+## v1.0.3（2026-08-13）
+
+- 新增「显式标注人物」开关（设置 → 通用设置）：关闭后识别、脸向量入库与 Face Bank
+  建议照常，仅跳过标注图生成；人物截图归档到「人物图（原图）」并按角色命名，不产生
+  带名字的副本。降级/重新识别以识别输出为信号，不受开关影响。
+- 应用标识符改为 `com.scenevault.app`（不再包含个人姓名）；应用数据目录随标识符变更，
+  旧目录数据不自动迁移。
+- 修复：打开尚不存在的应用缓存目录时自动创建再打开；目录打开失败的原因写入应用日志
+  （`ui.opener`）。
+
+## v1.0.2（2026-08-12）
+
+- 修复：设置页「资源与缓存」8 个目录打开按钮（opener scope 白名单、capability 权限、
+  Python 运行环境路径）；不存在的位置显示「尚未配置」；失败原因记入日志。
+
+## v1.0.0（2026-08-12）
+
+首次正式发布。发布页附件：`scene-vault-1.0.0-setup.exe`（5.7 MB）与
+`scene-vault-1.0.0-ai-setup.exe`（110 MB）。
 
 ## 概述
 
