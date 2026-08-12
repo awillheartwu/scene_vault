@@ -31,6 +31,10 @@ param(
     [switch]$SkipAI,
     [string]$SignCertificatePath = "",
     [string]$TimestampServer = "http://timestamp.digicert.com",
+    # Bump the unified version across the four version files before building.
+    [string]$BumpVersion = "",
+    # Create the annotated release tag (v<Version>) after a successful build.
+    [switch]$CreateTag,
     # CPU 0-3 (P-core threads) only: this build machine is a 13900K that has
     # shown instability under all-core load, so every child process is pinned
     # to these four logical CPUs. Change to 0xFF for four full P-cores if the
@@ -114,6 +118,12 @@ function Wait-ForArtifact(
 # ---------------------------------------------------------------------------
 # 1. Version consistency (app 1.0.0 must be unified everywhere)
 # ---------------------------------------------------------------------------
+if ($BumpVersion) {
+    & (Join-Path $PSScriptRoot "bump-version.ps1") -Version $BumpVersion
+    $Version = $BumpVersion
+    Write-Host "[0/6] Bumped unified version to $BumpVersion"
+}
+
 $Expected = @{
     "package.json"              = (Get-JsonValue "package.json" "version")
     "src-tauri/Cargo.toml"      = ((Get-Content "src-tauri/Cargo.toml" | Select-String '^version = "([^"]+)"').Matches[0].Groups[1].Value)
@@ -327,6 +337,11 @@ if ($SignCertificatePath) {
         $MainExe = Join-Path $RepoRoot "src-tauri/target/release/scene_vault.exe"
         if (Test-Path $MainExe) { Run-Native $Signtool ($Common + $MainExe) (Join-Path $LogDir "sign-main") }
     }
+}
+
+if ($CreateTag) {
+    git tag -a "v$Version" -m "Scene Vault $Version"
+    Write-Host "  Created tag v$Version (push with: git push github v$Version)"
 }
 
 Write-Host "[5/6] Done. Artifacts:"
