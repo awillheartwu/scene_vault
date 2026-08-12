@@ -15,7 +15,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $VenvDir = Join-Path $Root "python\.venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $ModelsDir = Join-Path $env:LOCALAPPDATA "SceneVault\models"
-$DbPath = Join-Path $env:APPDATA "com.wuhaoli.scene_vault\scene-vault.db"
+$DbPath = Join-Path $env:APPDATA "com.scenevault.app\scene-vault.db"
 
 Write-Host "== Scene Vault Windows setup =="
 Write-Host "Repo root : $Root"
@@ -77,7 +77,7 @@ if (-not (Test-Path $SfacePath)) {
 # app-local fonts directory; the settings UI lists them automatically and the
 # default annotation font is SmileySans.
 $FontPath = $null
-$FontsDir = Join-Path $env:LOCALAPPDATA "com.wuhaoli.scene-vault\fonts"
+$FontsDir = Join-Path $env:LOCALAPPDATA "com.scenevault.app\fonts"
 New-Item -ItemType Directory -Force -Path $FontsDir | Out-Null
 $SmileyZip = Join-Path $FontsDir "smiley-sans.zip"
 $SmileyFont = Join-Path $FontsDir "SmileySans-Oblique.ttf"
