@@ -221,6 +221,20 @@ async fn poll_active_sessions_once(
             .fetch_all(pool)
             .await?;
     for session_id in session_ids {
+        // Directories added to the project while this session is running are
+        // attached here (with a baseline snapshot of their pre-existing
+        // images) so scanning and the import dialog pick them up without a
+        // session restart.
+        if let Ok(session) = capture_service::get_session(pool, &session_id).await {
+            if let Err(error) =
+                capture_service::sync_session_source_directories(pool, &session).await
+            {
+                log_service::warn(
+                    "capture.discovery",
+                    format!("failed to sync session source directories: {error}"),
+                );
+            }
+        }
         // One unavailable source (for example a sleeping network share) must
         // not stop other active sessions from being reconciled.
         match discover(
@@ -488,6 +502,94 @@ mod tests {
                 .expect("deferred count"),
             1,
             "a file that predates the session must wait for the recognition button"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_picks_up_directories_added_while_running() {
+        use crate::{
+            models::project::AddProjectSourceDirectoryInput,
+            services::project_service,
+        };
+        let pool = db::test_pool().await;
+        let fixture = test_support::project_with_directories(&pool, "MidSessionDirs")
+            .await
+            .expect("fixture");
+        let session = test_support::start_session(&pool, &fixture.project_id)
+            .await
+            .expect("session");
+
+        // A second directory with pre-existing images is added mid-session.
+        let added_dir = fixture._workspace.path().join("added");
+        tokio::fs::create_dir(&added_dir).await.expect("added dir");
+        project_service::add_source_directory(
+            &pool,
+            AddProjectSourceDirectoryInput {
+                project_id: fixture.project_id.clone(),
+                directory: capture_service::path_to_string(&added_dir),
+            },
+        )
+        .await
+        .expect("add dir");
+        let old = added_dir.join("old.png");
+        tokio::fs::write(&old, b"old image").await.expect("old");
+
+        poll_active_sessions_once(&pool, None).await.expect("poll");
+
+        let attached: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM session_source_directories
+            WHERE session_id = ? AND directory = ?
+            "#,
+        )
+        .bind(&session.id)
+        .bind(capture_service::path_to_string(&added_dir))
+        .fetch_one(&pool)
+        .await
+        .expect("attached");
+        assert_eq!(attached, 1, "mid-session directory must be attached");
+        let baselined: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM capture_session_baseline_files
+            WHERE session_id = ? AND source_path = ?
+            "#,
+        )
+        .bind(&session.id)
+        .bind(capture_service::path_to_string(&old))
+        .fetch_one(&pool)
+        .await
+        .expect("baselined");
+        assert_eq!(baselined, 1, "pre-existing image must be baselined");
+
+        let discovered = discover(
+            &pool,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover old");
+        assert_eq!(
+            discovered.discovered_count, 0,
+            "baselined image must not auto-register"
+        );
+
+        // A live capture written after the attach is discovered normally.
+        let fresh = added_dir.join("fresh.png");
+        tokio::fs::write(&fresh, b"fresh image").await.expect("fresh");
+        let discovered = discover(
+            &pool,
+            DiscoverCapturesInput {
+                session_id: session.id,
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover fresh");
+        assert_eq!(
+            discovered.discovered_count, 1,
+            "live capture must be discovered"
         );
     }
 
