@@ -1,7 +1,7 @@
-# Scene Vault v1.0.0 Release Notes（初稿）
+# Scene Vault v1.0.0 Release Notes
 
-> 状态：初稿。正式发布前需补发布链接、日期与 GitHub Release 附件信息；发布时同步
-> 维护英文摘要。
+> 状态：已随 [v1.0.0 Release](https://github.com/awillheartwu/scene_vault/releases/tag/v1.0.0) 正式发布（2026-08-12）。
+> 发布页附件：`scene-vault-1.0.0-setup.exe`（5.7 MB）与 `scene-vault-1.0.0-ai-setup.exe`（110 MB）。
 
 ## 概述
 
@@ -35,8 +35,8 @@ Scene Vault 是面向各类游戏的 **Windows 本地优先**截图管理与创�
 
 | 安装包 | 内容 | 实测体积 |
 |---|---|---|
-| `scene-vault-1.0.0-setup.exe` | 应用（无 AI） | 5.7 MB |
-| `scene-vault-1.0.0-ai-setup.exe` | 应用 + 内置 AI 引擎（YuNet/SFace/字体） | 109.8 MB |
+| [scene-vault-1.0.0-setup.exe](https://github.com/awillheartwu/scene_vault/releases/download/v1.0.0/scene-vault-1.0.0-setup.exe) | 应用（无 AI） | 5.7 MB |
+| [scene-vault-1.0.0-ai-setup.exe](https://github.com/awillheartwu/scene_vault/releases/download/v1.0.0/scene-vault-1.0.0-ai-setup.exe) | 应用 + 内置 AI 引擎（YuNet/SFace/字体） | 110 MB |
 
 环境要求：Windows 10/11 x64 + WebView2（Win11 预装；Win10 安装器自动补装）。
 无需安装 Node、Rust 或 Python。
