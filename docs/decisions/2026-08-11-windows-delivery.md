@@ -55,6 +55,9 @@
 - 双包实测体积：`scene-vault-1.0.0-setup.exe` 5.7 MB；`scene-vault-1.0.0-ai-setup.exe`
   109.8 MB（sidecar 73.4 MB + YuNet/SFace 37 MB + 应用与字体）。
 - 无 AI 流程、AI 内置引擎识别、更新与卸载数据保留均已实机验收通过。
+- 实测数据（2026-08-12）：启动到可操作 P95 < 1 s（3 次冷启动，门禁 < 5 s）；
+  安装后体积 128 MB（主程序 18 MB + sidecar 71 MB + 资源 40 MB）；sidecar 常驻内存
+  sface 约 524 MB（arcface 约 2 GB，与加载模型有关）。
 - 识别器调参经验：动漫/游戏立绘脸的 ArcFace/SFace 相似度普遍低于真实人脸（同角色
   约 0.2–0.3），建议阈值 0.5 时通常无建议；可按画风降低置信度阈值与 margin，并依靠
   “建议 → 人工确认”流程兜底。
