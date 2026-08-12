@@ -2470,6 +2470,78 @@ pub(crate) async fn session_directories(
         .collect())
 }
 
+/// Attaches project source directories that are not yet part of an active
+/// session, with a baseline snapshot of their pre-existing images (the same
+/// semantics as `start_session`). Called before discovery so directories
+/// added while a session is running become visible to scanning and to the
+/// import dialog without restarting the session. Directories that cannot be
+/// canonicalized (missing or temporarily unavailable) are skipped so one
+/// broken source never blocks the rest.
+pub(crate) async fn sync_session_source_directories(
+    pool: &SqlitePool,
+    session: &CaptureSession,
+) -> Result<(), AppError> {
+    let project_dirs: Vec<String> = sqlx::query_scalar(
+        "SELECT directory FROM project_source_directories WHERE project_id = ?",
+    )
+    .bind(&session.project_id)
+    .fetch_all(pool)
+    .await?;
+    let session_dirs: Vec<String> = sqlx::query_scalar(
+        "SELECT directory FROM session_source_directories WHERE session_id = ?",
+    )
+    .bind(&session.id)
+    .fetch_all(pool)
+    .await?;
+    let missing: Vec<&String> = project_dirs
+        .iter()
+        .filter(|dir| !session_dirs.iter().any(|existing| existing == *dir))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let discovery_started_at_ms = unix_millis(SystemTime::now())?;
+    let mut transaction = pool.begin().await?;
+    for directory in missing {
+        let Ok(canonical) = canonical_existing_directory(Path::new(directory)).await else {
+            continue;
+        };
+        let baseline_files = snapshot_existing_images(&canonical).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO session_source_directories (
+                session_id, directory, enabled, discovery_started_at_ms, baseline_initialized
+            )
+            VALUES (?, ?, 1, ?, 1)
+            "#,
+        )
+        .bind(&session.id)
+        .bind(path_to_string(&canonical))
+        .bind(discovery_started_at_ms)
+        .execute(&mut *transaction)
+        .await?;
+        for baseline in baseline_files {
+            sqlx::query(
+                r#"
+                INSERT INTO capture_session_baseline_files (
+                    session_id, source_path, file_size, modified_at_ms
+                )
+                VALUES (?, ?, ?, ?)
+                "#,
+            )
+            .bind(&session.id)
+            .bind(&baseline.source_path)
+            .bind(baseline.file_size)
+            .bind(baseline.modified_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
 async fn sha256_file(path: &Path) -> Result<String, AppError> {
     let bytes = tokio::fs::read(path).await?;
     tokio::task::spawn_blocking(move || {
