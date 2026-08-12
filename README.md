@@ -37,7 +37,7 @@ Tauri 2、Rust、Vue 3 与 SQLite 构建。可选的本地 Python 视觉引擎�
 
 ## 界面预览
 
-> 截图位于 `docs/screenshots/`，各页面截图由维护者提供；缺失时显示占位。
+> 截图位于 `docs/screenshots/`（示例项目截图，不含敏感内容）。
 
 | 页面 | 截图 |
 |---|---|
