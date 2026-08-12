@@ -20,9 +20,12 @@
 已完成多来源目录、会话基线、截图发现和导入、三分类、人工角色标记、串行处理、
 可配置命名、四目录可靠归档、失败恢复、组合/拆分快捷键窗口和项目 Markdown 笔记。
 
-- [ ] Windows 原生端到端验收：真实截图、AI 处理、NAS 断线恢复、重启恢复；完成后在
-  [Capture Session 工作流](CAPTURE_WORKFLOW.md#Windows-原生端到端验收)记录日期、环境和结果
-- [ ] Python Runtime、视觉依赖、模型和字体的 Windows Sidecar 打包
+- [x] Windows 原生端到端验收：真实截图、AI 处理、NAS 断线恢复、重启恢复；
+  2026-08-12 实机通过（Windows 11 x64 / i9-13900K，限核 0-3），日期、环境和结果
+  已记录于 [Capture Session 工作流](CAPTURE_WORKFLOW.md#Windows-原生端到端验收)
+- [x] Python Runtime、视觉依赖、模型和字体的 Windows Sidecar 打包（PyInstaller
+  onefile `scene-vault-ai.exe` 73.4 MB，YuNet/SFace/得意黑随 AI 包分发，用户无需
+  安装 Python）
 
 ## M4：创作资料
 
@@ -81,7 +84,7 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
 
 - [x] 接入角色合并 UI
 - [x] 接入代表头像 UI
-- [ ] Windows 实机验收：
+- [x] Windows 实机验收（2026-08-12）：
   - 确认建议会实际改判角色、重新处理并替换 NAS 归档；
   - 改判分类会清除不再成立的角色和人脸样本；
   - 重命名、合并、代表头像操作符合项目约束；

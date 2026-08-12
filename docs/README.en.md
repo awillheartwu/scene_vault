@@ -48,7 +48,8 @@ unclassified/scene/private classifications stay manual.
 
 ## Screenshots
 
-> Images live in `docs/screenshots/`; missing ones render as placeholders.
+> Images live in `docs/screenshots/` (sample project screenshots, no sensitive
+> content).
 
 | Page | Screenshot |
 |---|---|
