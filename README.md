@@ -33,6 +33,19 @@ Tauri 2、Rust、Vue 3 与 SQLite 构建。可选的本地 Python 视觉引擎�
 “导入截图”可批量登记目录中已有的旧图。标记为“人物”后，AI 引擎会自动给出角色
 建议（低置信度仍由你人工确认）；未分类/游戏截图/收藏等分类保持人工语义。
 
+## 界面预览
+
+> 截图位于 `docs/screenshots/`，各页面截图由维护者提供；缺失时显示占位。
+
+| 页面 | 截图 |
+|---|---|
+| 项目总览（Home） | ![Home](docs/screenshots/home.png) |
+| 捕获页（Capture） | ![Capture](docs/screenshots/capture.png) |
+| 人物工作台（Workbench） | ![Workbench](docs/screenshots/workbench.png) |
+| 设置：数据安全 | ![数据安全](docs/screenshots/settings-data-safety.png) |
+| 设置：视觉引擎 | ![视觉引擎](docs/screenshots/settings-vision.png) |
+| 历史页（History） | ![History](docs/screenshots/history.png) |
+
 ## 核心特性
 
 - **截图采集**：多源目录监听、内容哈希去重（相同截图只登记一次）、稳定写入判定、
@@ -112,3 +125,21 @@ AGENTS.md             AI Agent 工作约束
 - 随包标注字体（得意黑）为 SIL OFL-1.1 许可；YuNet/SFace 模型来自 opencv_zoo。
 - ArcFace 权重（`w600k_r50.onnx`）为 non-commercial 许可，由用户自行提供，应用
   不随包分发；未提供时自动回退内置 SFace。
+
+## 常见问题
+
+- **AI 建议总是不出现？** 先确认设置页“视觉引擎”显示“内置引擎已就绪”；再确认
+  截图里能检测到人脸（无脸/过小脸会明确提示且不入样本库）。动漫/游戏立绘脸的
+  相似度普遍偏低，阈值 0.5 时可能无建议——可在“识别建议设置”中降低置信度阈值，
+  或切换到 ArcFace（效果更好但需要自备权重）。
+- **切换识别器后新截图没有建议？** 切换后需在项目里“重建人脸样本库”，待分类图会
+  自动按新模型重新提取特征；已标记人物图的重建由样本库重建完成。
+- **首次触发 AI 有点慢？** 内置引擎为单文件自解压程序，首次调用需几秒解压；之后
+  常驻 worker 复用模型，恢复正常速度。
+- **安装时提示“未知发布者”？** 安装包暂未代码签名，Windows SmartScreen 会提示，
+  点“更多信息 → 仍要运行”即可；不影响功能。
+- **如何把安装包分享给别人？** 直接分发两个安装包即可，目标机器无需安装
+  Node/Rust/Python；私有仓库的 Release 链接只有成员可见，可用 Forgejo Release 或
+  网盘托管。
+- **数据备份在哪？** 设置 → 资源与存储 → 数据安全：一键预检、备份（SHA-256 清单）、
+  恢复（两阶段 + 失败回滚）与索引维护；数据库损坏时应用会自动进入最小恢复界面。
