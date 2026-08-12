@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "@/lib/toast";
 
 const { api, pickFile, pickDirectory, openPathExternal, revealPath, leaveGuard } = vi.hoisted(() => ({
   api: {
@@ -315,6 +316,26 @@ describe("Settings category navigation", () => {
     await page.get("#settings-tab-recognition").trigger("click");
     expect((page.get("#recognition-threshold").element as HTMLInputElement).value).toBe(
       "0.55",
+    );
+  });
+
+  it("warns to rebuild the face bank when the recognizer changes on save", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#settings-tab-vision").trigger("click");
+    await page.get("#recognizer").setValue("arcface");
+    await flushPromises();
+    const saveButton = page
+      .findAll("button")
+      .find((button) => button.text().includes("保存配置"));
+    expect(saveButton).toBeDefined();
+    await saveButton!.trigger("click");
+    await flushPromises();
+
+    expect(api.updateVisionSettings).toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalledWith(
+      expect.stringContaining("识别器已切换"),
     );
   });
 

@@ -388,7 +388,11 @@ async function save() {
   busy.value = true;
   health.value = null;
   try {
+    const previousRecognizer = baseline.value?.vision?.recognizer;
     settings.value = await captureApi.updateVisionSettings(settings.value);
+    if (previousRecognizer && previousRecognizer !== settings.value.recognizer) {
+      toast.info("识别器已切换：请在各项目「重建人脸样本库」，否则新截图不会产生建议。");
+    }
     if (baseline.value) baseline.value.vision = clone(settings.value);
     toast.success("视觉引擎配置已保存。");
   } catch (error) {
