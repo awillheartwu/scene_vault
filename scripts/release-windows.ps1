@@ -36,6 +36,10 @@ param(
     # to these four logical CPUs. Change to 0xFF for four full P-cores if the
     # machine's stability profile allows it.
     [int]$AffinityMask = 0xF
+    ,
+    # Skip CPU pinning entirely (GitHub Actions runners have few vCPUs and no
+    # 13900K-style stability constraints).
+    [switch]$SkipAffinity
 )
 
 $ErrorActionPreference = "Stop"
@@ -141,12 +145,18 @@ $env:Path = "$(Split-Path -Parent $Node);$NpmGlobal;$(Split-Path -Parent $Cargo)
 $env:CARGO_BUILD_JOBS = "4"
 # Pin this PowerShell process (and therefore every child it spawns, which
 # inherit the mask) to the allowed CPUs before any heavy work starts.
-try {
-    (Get-Process -Id $PID).ProcessorAffinity = $AffinityMask
-} catch {
-    Write-Host "  WARNING: could not pin CPU affinity (0x$('{0:X}' -f $AffinityMask)): $_"
+if (-not $SkipAffinity) {
+    try {
+        (Get-Process -Id $PID).ProcessorAffinity = $AffinityMask
+    } catch {
+        Write-Host "  WARNING: could not pin CPU affinity (0x$('{0:X}' -f $AffinityMask)): $_"
+    }
 }
-Write-Host "[0/6] CPU affinity 0x$('{0:X}' -f $AffinityMask) (CPU 0-3), CARGO_BUILD_JOBS=4"
+if ($SkipAffinity) {
+    Write-Host "[0/6] CPU affinity skipped (-SkipAffinity), CARGO_BUILD_JOBS=4"
+} else {
+    Write-Host "[0/6] CPU affinity 0x$('{0:X}' -f $AffinityMask) (CPU 0-3), CARGO_BUILD_JOBS=4"
+}
 
 # ---------------------------------------------------------------------------
 # 2. Frontend production build
