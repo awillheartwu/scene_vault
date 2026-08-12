@@ -135,10 +135,20 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 # invoked through its JS entry point (node pnpm.cjs) because npm-style .cmd
 # shims break under WSL-launched PowerShell.
 $Node = Find-Tool "node" @("C:\Program Files\nodejs\node.exe")
-$PnpmJs = Join-Path (Split-Path -Parent (Find-Tool "pnpm" @("C:\Users\WuHaoli\AppData\Roaming\npm\pnpm.cmd"))) "node_modules/pnpm/bin/pnpm.cjs"
+$PnpmShim = Find-Tool "pnpm" @("C:\Users\WuHaoli\AppData\Roaming\npm\pnpm.cmd")
+# pnpm.cjs lives in a different place depending on the install layout (npm
+# global install vs. GitHub Actions standalone pnpm), so probe both locations
+# next to the discovered shim/exe instead of assuming a single layout.
+$PnpmJs = @(
+    (Join-Path (Split-Path -Parent $PnpmShim) "node_modules/pnpm/bin/pnpm.cjs"),
+    (Join-Path (Split-Path -Parent $PnpmShim) "pnpm.cjs")
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
 $Cargo = Find-Tool "cargo" @("C:\Users\WuHaoli\.cargo\bin\cargo.exe")
-if (-not (Test-Path $PnpmJs)) { throw "pnpm.js not found at $PnpmJs" }
-$NpmGlobal = Split-Path -Parent (Split-Path -Parent $PnpmJs)
+if (-not $PnpmJs) {
+    Write-Host "  WARNING: pnpm.cjs not found next to '$PnpmShim'; invoking pnpm via its command entry"
+}
+$NpmGlobal = ""
+if ($PnpmJs) { $NpmGlobal = Split-Path -Parent (Split-Path -Parent $PnpmJs) }
 $env:Path = "$(Split-Path -Parent $Node);$NpmGlobal;$(Split-Path -Parent $Cargo);" + $env:Path
 # Cargo parallelism is capped to the pinned core count (rustc is sequential
 # per job, and the affinity mask above already limits actual execution).
@@ -167,7 +177,11 @@ if ($SkipAffinity) {
 # the equivalent node invocations. `pnpm install` still resolves the store.
 Write-Host "[2/6] Building frontend"
 $env:CI = "true"
-Run-Native $Node @($PnpmJs, "install") (Join-Path $LogDir "pnpm-install")
+if ($PnpmJs) {
+    Run-Native $Node @($PnpmJs, "install") (Join-Path $LogDir "pnpm-install")
+} else {
+    Run-Native $PnpmShim @("install") (Join-Path $LogDir "pnpm-install")
+}
 Run-Native $Node @("node_modules/vue-tsc/bin/vue-tsc.js", "--noEmit") (Join-Path $LogDir "vue-tsc")
 Run-Native $Node @("node_modules/vite/bin/vite.js", "build") (Join-Path $LogDir "vite-build")
 
