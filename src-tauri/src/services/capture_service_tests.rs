@@ -2,9 +2,15 @@ use super::*;
 use crate::{
     db,
     models::{
-        capture::{CaptureItemListResponse, CaptureItemPage, RelabelCaptureInput},
+        capture::{
+            CaptureItemListResponse, CaptureItemPage, ImportDirectoryCapturesInput,
+            RelabelCaptureInput, StartCaptureSessionInput,
+        },
         character::CreateCharacterInput,
-        project::{CreateProjectInput, SetProjectCoverInput},
+        project::{
+            AddProjectSourceDirectoryInput, CreateProjectInput, SetProjectCoverInput,
+            SetProjectDestinationInput,
+        },
         recognition::SetRecognitionSuggestionInput,
     },
     services::{character_service, project_service, recognition_service, test_support},
@@ -2097,4 +2103,141 @@ async fn identical_content_in_another_directory_registers_only_once() {
             .await
             .expect("count");
     assert_eq!(total, 1);
+}
+
+#[tokio::test]
+async fn imports_baselined_images_from_a_chinese_named_directory() {
+    let pool = db::test_pool().await;
+    let project = project(&pool).await;
+    let workspace = tempdir().expect("tempdir");
+    let source = workspace.path().join("source");
+    let chinese = workspace.path().join("测试目录");
+    let destination = workspace.path().join("archive");
+    tokio::fs::create_dir(&source).await.expect("source dir");
+    tokio::fs::create_dir(&chinese).await.expect("chinese dir");
+    tokio::fs::create_dir(&destination).await.expect("destination");
+    project_service::set_destination_directory(
+        &pool,
+        SetProjectDestinationInput {
+            project_id: project.id.clone(),
+            directory: path_to_string(&destination),
+        },
+    )
+    .await
+    .expect("destination");
+    project_service::add_source_directory(
+        &pool,
+        AddProjectSourceDirectoryInput {
+            project_id: project.id.clone(),
+            directory: path_to_string(&source),
+        },
+    )
+    .await
+    .expect("add source");
+    project_service::add_source_directory(
+        &pool,
+        AddProjectSourceDirectoryInput {
+            project_id: project.id.clone(),
+            directory: path_to_string(&chinese),
+        },
+    )
+    .await
+    .expect("add chinese source");
+    for (index, name) in ["a.png", "b.png", "c.png"].iter().enumerate() {
+        tokio::fs::write(chinese.join(name), format!("distinct image {index}"))
+            .await
+            .expect("image");
+    }
+    let session = start_session(
+        &pool,
+        StartCaptureSessionInput {
+            project_id: project.id,
+        },
+    )
+    .await
+    .expect("start session")
+    .session;
+
+    let unimported = list_unimported_captures(&pool, &session.id)
+        .await
+        .expect("list unimported");
+    assert_eq!(
+        unimported.len(),
+        3,
+        "baselined images in a Chinese-named directory must appear in the import dialog"
+    );
+    let paths: Vec<String> = unimported
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .collect();
+    let imported = import_directory_captures(
+        &pool,
+        ImportDirectoryCapturesInput {
+            session_id: session.id.clone(),
+            paths,
+        },
+    )
+    .await
+    .expect("import");
+    assert_eq!(
+        imported.len(),
+        3,
+        "baselined images must import from a Chinese-named directory"
+    );
+    let registered: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM capture_items WHERE session_id = ?")
+            .bind(&session.id)
+            .fetch_one(&pool)
+            .await
+            .expect("registered count");
+    assert_eq!(registered, 3);
+}
+
+#[tokio::test]
+async fn recent_items_surface_awaiting_label_captures_from_ended_sessions() {
+    let pool = db::test_pool().await;
+    let project = project(&pool).await;
+    let (_workspace, first_session, _source) = session_with_source(&pool, &project.id).await;
+
+    // One capture stays awaiting-label in the ended session; one is archived.
+    let pending = insert_item(&pool, &first_session.id, &project.id, "person", "pending.png").await;
+    let done = insert_item(&pool, &first_session.id, &project.id, "person", "done.png").await;
+    transition_item(&pool, &done, "awaiting_label", "completed", false)
+        .await
+        .expect("complete");
+    end_session(
+        &pool,
+        EndCaptureSessionInput {
+            session_id: first_session.id.clone(),
+            status: None,
+        },
+    )
+    .await
+    .expect("end session");
+
+    // A second session starts and gets its own capture.
+    let second = start_session(
+        &pool,
+        StartCaptureSessionInput {
+            project_id: project.id.clone(),
+        },
+    )
+    .await
+    .expect("second session")
+    .session;
+    let live = insert_item(&pool, &second.id, &project.id, "person", "live.png").await;
+
+    let recent = list_project_recent_items(&pool, &project.id, 100)
+        .await
+        .expect("recent");
+    let ids: Vec<String> = recent.iter().map(|item| item.id.clone()).collect();
+    assert!(
+        ids.contains(&pending),
+        "awaiting-label capture from the ended session must stay visible"
+    );
+    assert!(
+        !ids.contains(&done),
+        "completed capture from the ended session must not reappear"
+    );
+    assert!(ids.contains(&live), "active-session capture must be visible");
 }

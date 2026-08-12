@@ -277,7 +277,11 @@ pub async fn list_project_recent_items(
             item.created_at, item.updated_at
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
-        WHERE session.project_id = ? AND session.status = 'active'
+        -- The strip shows the active session's captures plus every capture
+        -- that still awaits a label from earlier sessions of the project, so
+        -- restarting the session never hides unfinished classification work.
+        WHERE session.project_id = ?
+          AND (session.status = 'active' OR item.status = 'awaiting_label')
         ORDER BY item.captured_at DESC, item.created_at DESC
         LIMIT ?
         "#,
