@@ -699,6 +699,53 @@ describe("Workbench", () => {
     ]);
   });
 
+  it("shows the degraded reprocess card only when recognition produced no output", async () => {
+    const degradedItem = {
+      ...item,
+      status: "completed",
+      classification: "person",
+      annotatedPath: null,
+      faceBoxJson: null,
+    };
+    api.listCharacterCaptureItems.mockResolvedValue([degradedItem]);
+    api.listCharacterCaptureItemsPage.mockResolvedValue({
+      items: [degradedItem],
+      total: 1,
+      page: 1,
+      pageSize: 100,
+    });
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], degradedCount: 1 },
+      summaries[1],
+    ]);
+    const degraded = mount(Workbench);
+    await flushPromises();
+    expect(degraded.text()).toContain("重新识别");
+    degraded.unmount();
+
+    // Recognized capture (face output present) with annotation disabled:
+    // no annotatedPath by design, but never a "degraded" reprocess card.
+    const recognizedItem = {
+      ...degradedItem,
+      faceBoxJson: '{"x":10,"y":20,"width":30,"height":40}',
+    };
+    api.listCharacterCaptureItems.mockResolvedValue([recognizedItem]);
+    api.listCharacterCaptureItemsPage.mockResolvedValue({
+      items: [recognizedItem],
+      total: 1,
+      page: 1,
+      pageSize: 100,
+    });
+    api.listProjectCharacterSummaries.mockResolvedValue([
+      { ...summaries[0], degradedCount: 0 },
+      summaries[1],
+    ]);
+    const recognized = mount(Workbench);
+    await flushPromises();
+    expect(recognized.text()).not.toContain("重新识别");
+    recognized.unmount();
+  });
+
   it("separates correction fields from an auto-fitting action group", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();

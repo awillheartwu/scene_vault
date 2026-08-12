@@ -169,6 +169,8 @@ export interface ProcessingSettings {
   detection: DetectionSettings | null;
   annotation: AnnotationSettings | null;
   crop: CropSettings | null;
+  /** False skips drawing the character name onto a labeled copy. */
+  annotatePerson: boolean | null;
 }
 
 export interface CaptureSession {

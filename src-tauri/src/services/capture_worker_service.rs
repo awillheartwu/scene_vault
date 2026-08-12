@@ -300,10 +300,16 @@ async fn process_item(
     )
     .await?;
 
-    let returned_annotated = response.annotated_path.as_deref().ok_or_else(|| {
-        AppError::Vision("processing response is missing the annotated output path".to_owned())
-    })?;
-    verify_returned_path(returned_annotated, &annotated, "annotated output").await?;
+    let annotate_person = processing_settings.annotate_person.unwrap_or(true);
+    let annotated_path = if annotate_person {
+        let returned_annotated = response.annotated_path.as_deref().ok_or_else(|| {
+            AppError::Vision("processing response is missing the annotated output path".to_owned())
+        })?;
+        verify_returned_path(returned_annotated, &annotated, "annotated output").await?;
+        Some(capture_service::path_to_string(&annotated))
+    } else {
+        None
+    };
     let avatar_path = match response.avatar_path.as_deref() {
         Some(path) => {
             verify_returned_path(path, &avatar, "avatar output").await?;
@@ -315,7 +321,7 @@ async fn process_item(
         pool,
         CompleteCaptureProcessingInput {
             capture_item_id: item.id.clone(),
-            annotated_path: capture_service::path_to_string(&annotated),
+            annotated_path,
             avatar_path,
             face_box_json: response
                 .face_box

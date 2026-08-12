@@ -372,7 +372,7 @@ async function openDirectory(entry: StorageResourceEntry) {
       level: "error",
       module: "ui.opener",
       event: "open_directory_failed",
-      message: `打开${entry.label}位置失败`,
+      message: `打开${entry.label}位置失败：${normalizeError(error)}`,
       outcome: "failed",
       errorCode: error instanceof Error ? error.name : "open_directory_failed",
     });
