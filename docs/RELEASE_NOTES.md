@@ -1,5 +1,10 @@
 # Scene Vault Release Notes
 
+## v1.0.4（2026-08-13）
+
+- 应用标识符由 `com.scenevault.app` 调整为 `com.scenevault.desktop`（规避与 macOS
+  `.app` 应用包扩展名冲突的警告；应用数据目录随标识符变更，不迁移）。
+
 ## v1.0.3（2026-08-13）
 
 - 新增「显式标注人物」开关（设置 → 通用设置）：关闭后识别、脸向量入库与 Face Bank
