@@ -26,6 +26,8 @@
 - [x] Python Runtime、视觉依赖、模型和字体的 Windows Sidecar 打包（PyInstaller
   onefile `scene-vault-ai.exe` 73.4 MB，YuNet/SFace/得意黑随 AI 包分发，用户无需
   安装 Python）
+- [ ] 通用设置新增「显式标注人物」开关：关闭后识别、脸向量入库与 Face Bank 建议
+  照常，跳过标注图生成与「人物图」归档，人物截图按角色命名直接归档原图
 
 ## M4：创作资料
 
