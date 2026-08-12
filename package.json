@@ -1,7 +1,7 @@
 {
   "name": "scene_vault",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Local-first desktop app for organizing screenshots from any game.",
   "type": "module",
   "scripts": {

@@ -1308,7 +1308,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="settings-field">
         <label for="font-path">标注字体 <span>可选</span></label>
-        <p>选择内置字体或本机字体文件；留空时按系统字体顺序选择微软雅黑、黑体或 Arial。也可以把 <code>.ttf</code> 文件放进 <code>%LOCALAPPDATA%\com.scenevault.app\fonts</code> 后刷新本页。</p>
+        <p>选择内置字体或本机字体文件；留空时按系统字体顺序选择微软雅黑、黑体或 Arial。也可以把 <code>.ttf</code> 文件放进 <code>%LOCALAPPDATA%\com.scenevault.desktop\fonts</code> 后刷新本页。</p>
         <div>
           <select
             id="font-path"
