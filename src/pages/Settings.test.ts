@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "@/lib/toast";
 
-const { api, pickFile, pickDirectory, openPathExternal, revealPath, leaveGuard } = vi.hoisted(() => ({
+const { api, pickFile, pickDirectory, openDirectoryExternal, revealPath, leaveGuard, recordClientEvent } = vi.hoisted(() => ({
   api: {
     getVisionSettings: vi.fn(),
     getAppSettings: vi.fn(),
@@ -25,16 +25,17 @@ const { api, pickFile, pickDirectory, openPathExternal, revealPath, leaveGuard }
   },
   pickFile: vi.fn(),
   pickDirectory: vi.fn(),
-  openPathExternal: vi.fn(),
+  openDirectoryExternal: vi.fn(),
   revealPath: vi.fn(),
   leaveGuard: { current: null as null | ((...args: unknown[]) => unknown) },
+  recordClientEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
   pickFile,
   pickDirectory,
-  openPathExternal,
+  openDirectoryExternal,
   revealPath,
 }));
 
@@ -47,6 +48,8 @@ vi.mock("vue-router", () => ({
 vi.mock("@/lib/toast", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
+
+vi.mock("@/lib/client-log", () => ({ recordClientEvent }));
 
 import Settings from "./Settings.vue";
 
@@ -422,4 +425,33 @@ describe("Settings processing hierarchy", () => {
       }),
     );
   });
+  it("reports failures when opening the thumbnail cache directory", async () => {
+    api.getThumbnailCacheStatus.mockResolvedValue({
+      dir: "C:/cache/thumbnails",
+      totalBytes: 1024,
+      limitBytes: 1024 * 1024,
+    });
+    const page = mountSettings();
+    await flushPromises();
+
+    openDirectoryExternal.mockRejectedValueOnce(new Error("denied by scope"));
+    const button = page
+      .findAll("button")
+      .find((candidate) => candidate.text().includes("打开缓存目录"));
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(openDirectoryExternal).toHaveBeenCalledWith("C:/cache/thumbnails");
+    expect(toast.error).toHaveBeenCalledWith("无法打开缓存目录：denied by scope");
+    expect(recordClientEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "error",
+        module: "ui.opener",
+        event: "open_cache_directory_failed",
+        outcome: "failed",
+      }),
+    );
+  });
 });
+

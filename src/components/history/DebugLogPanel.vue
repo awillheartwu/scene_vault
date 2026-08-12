@@ -12,7 +12,7 @@ import {
 } from "@lucide/vue";
 import {
   captureApi,
-  openPathExternal,
+  openDirectoryExternal,
   type LogLevel,
   type LogRecord,
   type LogStatus,
@@ -170,7 +170,7 @@ async function cleanup() {
 async function openDirectory() {
   if (!status.value) return;
   try {
-    await openPathExternal(status.value.directory);
+    await openDirectoryExternal(status.value.directory);
   } catch (caught) {
     errorMessage.value = caught instanceof Error ? caught.message : String(caught);
   }

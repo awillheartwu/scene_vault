@@ -382,6 +382,7 @@ pub fn run() {
             commands::diagnostics::get_process_resource_status,
             commands::diagnostics::get_storage_resource_status,
             commands::diagnostics::cleanup_resource,
+            commands::system::open_directory,
             commands::window::set_window_always_on_top,
         ])
         .build(tauri::generate_context!())

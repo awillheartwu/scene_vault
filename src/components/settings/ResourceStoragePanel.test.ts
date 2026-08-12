@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { api, openPathExternal, revealPath, pickFile, pickSavePath, pathJoin, toast } = vi.hoisted(() => ({
+const { api, openDirectoryExternal, revealPath, pickFile, pickSavePath, pathJoin, toast, recordClientEvent } = vi.hoisted(() => ({
   api: {
     getProcessResourceStatus: vi.fn(),
     getStorageResourceStatus: vi.fn(),
@@ -15,17 +15,18 @@ const { api, openPathExternal, revealPath, pickFile, pickSavePath, pathJoin, toa
     rebuildDatabaseIndexes: vi.fn(),
     restartAfterDatabaseRestore: vi.fn(),
   },
-  openPathExternal: vi.fn(),
+  openDirectoryExternal: vi.fn(),
   revealPath: vi.fn(),
   pickFile: vi.fn(),
   pickSavePath: vi.fn(),
   pathJoin: (directory: string, name: string) => `${directory}\\${name}`,
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+  recordClientEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
-  openPathExternal,
+  openDirectoryExternal,
   revealPath,
   pickFile,
   pickSavePath,
@@ -33,6 +34,8 @@ vi.mock("@/lib/capture-api", () => ({
 }));
 
 vi.mock("@/lib/toast", () => ({ toast }));
+
+vi.mock("@/lib/client-log", () => ({ recordClientEvent }));
 
 import ResourceStoragePanel from "./ResourceStoragePanel.vue";
 
@@ -357,7 +360,54 @@ describe("ResourceStoragePanel database safety", () => {
       ?.trigger("click");
     await flushPromises();
 
-    expect(openPathExternal).toHaveBeenCalledWith("C:\\AppData\\SceneVault\\backups");
+    expect(openDirectoryExternal).toHaveBeenCalledWith("C:\\AppData\\SceneVault\\backups");
+    wrapper.unmount();
+  });
+  it("opens storage entries via the opener plugin and reports failures", async () => {
+    api.getStorageResourceStatus.mockResolvedValue({
+      ...storageStatus,
+      entries: [
+        {
+          kind: "thumbnail_cache",
+          label: "缩略图缓存",
+          path: "C:/cache/thumbnails",
+          totalBytes: 100,
+          fileCount: 2,
+          cleanupAvailable: true,
+          cleanupDescription: "可安全重建",
+        },
+        {
+          kind: "database",
+          label: "数据库",
+          path: "C:/AppData/SceneVault/scene-vault.db",
+          totalBytes: 1,
+          fileCount: 1,
+          cleanupAvailable: false,
+          cleanupDescription: null,
+        },
+      ],
+    });
+    const wrapper = mount(ResourceStoragePanel);
+    await flushPromises();
+
+    openDirectoryExternal.mockRejectedValueOnce(new Error("Not allowed to open path"));
+    await wrapper.find('button[aria-label="打开缩略图缓存位置"]').trigger("click");
+    await flushPromises();
+
+    expect(openDirectoryExternal).toHaveBeenCalledWith("C:/cache/thumbnails");
+    expect(toast.error).toHaveBeenCalledWith("无法打开资源位置：Not allowed to open path");
+    expect(recordClientEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "error",
+        module: "ui.opener",
+        event: "open_directory_failed",
+        outcome: "failed",
+      }),
+    );
+
+    await wrapper.find('button[aria-label="打开数据库位置"]').trigger("click");
+    await flushPromises();
+    expect(revealPath).toHaveBeenCalledWith("C:/AppData/SceneVault/scene-vault.db");
     wrapper.unmount();
   });
 });

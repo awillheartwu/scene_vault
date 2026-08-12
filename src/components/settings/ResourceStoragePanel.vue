@@ -14,7 +14,7 @@ import {
 } from "@lucide/vue";
 import {
   captureApi,
-  openPathExternal,
+  openDirectoryExternal,
   pathJoin,
   pickFile,
   pickSavePath,
@@ -30,6 +30,7 @@ import {
   type StorageResourceEntry,
   type StorageResourceStatus,
 } from "@/lib/capture-api";
+import { recordClientEvent } from "@/lib/client-log";
 import { toast } from "@/lib/toast";
 
 const PROCESS_SAMPLE_INTERVAL_MS = 2_000;
@@ -306,7 +307,7 @@ async function openBackupDirectory() {
     return;
   }
   try {
-    await openPathExternal(directory);
+    await openDirectoryExternal(directory);
   } catch (error) {
     toast.error(`无法打开备份目录：${normalizeError(error)}`);
   }
@@ -363,10 +364,18 @@ async function openDirectory(entry: StorageResourceEntry) {
     if (entry.kind === "database") {
       await revealPath(entry.path);
     } else {
-      await openPathExternal(entry.path);
+      await openDirectoryExternal(entry.path);
     }
   } catch (error) {
     toast.error(`无法打开资源位置：${normalizeError(error)}`);
+    void recordClientEvent({
+      level: "error",
+      module: "ui.opener",
+      event: "open_directory_failed",
+      message: `打开${entry.label}位置失败`,
+      outcome: "failed",
+      errorCode: error instanceof Error ? error.name : "open_directory_failed",
+    });
   }
 }
 

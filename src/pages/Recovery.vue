@@ -12,7 +12,7 @@ import {
 } from "@lucide/vue";
 import {
   captureApi,
-  openPathExternal,
+  openDirectoryExternal,
   pathDirectory,
   pickFile,
   type DatabaseStartupStatus,
@@ -99,7 +99,7 @@ async function restartApp() {
 async function openDataDirectory() {
   if (!dataDirectory.value) return;
   try {
-    await openPathExternal(dataDirectory.value);
+    await openDirectoryExternal(dataDirectory.value);
   } catch (error) {
     actionError.value = `无法打开数据目录：${normalizeError(error)}`;
   }
