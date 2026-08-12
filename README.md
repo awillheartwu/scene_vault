@@ -1,5 +1,7 @@
 # Scene Vault
 
+[English](docs/README.en.md) | 简体中文
+
 Scene Vault 是面向各类游戏的 **Windows 本地优先**截图管理与创作辅助桌面应用，基于
 Tauri 2、Rust、Vue 3 与 SQLite 构建。可选的本地 Python 视觉引擎提供人脸检测、
 角色名标注、头像裁剪与 Face Bank 角色建议。
