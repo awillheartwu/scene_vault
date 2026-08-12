@@ -9,8 +9,8 @@
     "sqlite_version": "3.41.2",
     "cpu_affinity": "0-3",
     "cpu_count": 32,
-    "cwd": "/mnt/c/Profile/02_projects/sv/scene_vault",
-    "repo_root": "/mnt/c/Profile/02_projects/sv/scene_vault"
+    "cwd": "<repo_root>",
+    "repo_root": "<repo_root>"
   },
   "target": {
     "capture_items": 10000,

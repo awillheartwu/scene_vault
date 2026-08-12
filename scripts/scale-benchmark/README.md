@@ -17,7 +17,7 @@
 重型运行固定到 CPU 0-3（与仓库 Windows/WSL 约定一致）：
 
 ```bash
-cd /mnt/c/Profile/02_projects/sv/scene_vault
+cd <repo_root>
 taskset -c 0-3 python3 scripts/scale-benchmark/benchmark_scale_1_0.py \
   --out docs/benchmarks/scale-1.0-report-2026-08-11.json
 ```
