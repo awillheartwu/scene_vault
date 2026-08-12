@@ -58,7 +58,7 @@ jobs:
 
       - name: Build installers (small + AI)
         shell: pwsh
-        run: ./scripts/release-windows.ps1 -SkipAffinity
+        run: ./scripts/release-windows.ps1 -SkipAffinity -Version $($env:GITHUB_REF_NAME -replace '^v','')
 
       - name: Upload installers
         uses: actions/upload-artifact@v4

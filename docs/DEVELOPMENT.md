@@ -105,6 +105,21 @@ ArcFace 是可选识别器，用户需自行提供兼容的 ONNX 权重；项目
 本机数据库、备份、模型、缓存和测试数据不得提交。不要使用会删除 ignored 评测数据的
 `git clean -fdX`。
 
+## 版本与发布
+
+版本号统一维护在 4 处（`package.json`、`src-tauri/Cargo.toml`、
+`src-tauri/tauri.conf.json`、`python/pyproject.toml`，`Cargo.lock` 根包同步）。
+发布脚本强制四处一致，不要手动单改。
+
+- **日常提交**：`.\scripts\commit.ps1 "feat(x): ..."` —— 自动把 patch 号 +1
+  （1.0.0 → 1.0.1）并提交改动；`-NoBump` 跳过版本变更，`-NoStageAll` 只提交已暂存
+  内容（工作区有其他进行中的改动时使用）。
+- **发版**：`.\scriptselease-windows.ps1 -BumpVersion 1.1.0 -CreateTag` —— 升
+  版本号（此处升 minor）、本地构建双包、成功后创建 `v1.1.0` 注解标签；也可以用
+  `-Version 1.1.0` 只校验不升文件。
+- **发布**：推送 `v*` 标签到 GitHub 即触发 Actions 构建双包挂 Release，CI 从标签名
+  读取版本号；patch 自动累加不会触发任何发布。
+
 ## 文档职责
 
 - [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)：产品定位、当前能力和非目标。
