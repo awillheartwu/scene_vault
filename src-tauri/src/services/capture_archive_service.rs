@@ -13,7 +13,7 @@ use crate::{
     },
     services::{
         archive_naming::{self, ArchiveNameContext},
-        archive_naming_settings_service, capture_service, log_service,
+        archive_naming_settings_service, capture_service, log_service, processing_settings_service,
     },
 };
 
@@ -83,6 +83,19 @@ async fn archive_pending_item(
         }
     }
     let naming = archive_naming_settings_service::get(pool).await?;
+    let character_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM characters WHERE id = ?")
+            .bind(item.character_id.as_deref())
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    // Only when explicit annotation is disabled is a missing annotated output
+    // intentional; with annotation enabled a person capture without one is the
+    // degraded fallback (engine not configured or failed).
+    let annotation_expected = processing_settings_service::get(pool)
+        .await?
+        .annotate_person
+        .unwrap_or(true);
 
     match item.classification.as_str() {
         // A person capture without an annotated output was archived through
@@ -92,11 +105,34 @@ async fn archive_pending_item(
         "person" if item.annotated_path.is_some() => {
             archive_person_item(pool, item, &destination_root, &naming).await
         }
-        "person" => {
-            archive_source_direct(pool, item, &destination_root, "人物图（未识别）", &naming).await
+        // Explicit annotation disabled: the capture is fully recognized (face
+        // vector + character) but has no labeled copy, so the raw screenshot
+        // is archived under the character name.
+        "person" if !annotation_expected => {
+            archive_source_direct(
+                pool,
+                item,
+                &destination_root,
+                "人物图（原图）",
+                character_name.as_deref(),
+                &naming,
+            )
+            .await
         }
-        "scene" => archive_source_direct(pool, item, &destination_root, "游戏截图", &naming).await,
-        "private" => archive_source_direct(pool, item, &destination_root, "收藏图", &naming).await,
+        // Degraded fallback (no Python engine configured, or engine failed
+        // before producing an annotated output): keep the raw screenshot under
+        // a clearly separated directory so a later reprocess can write the
+        // regular annotated output without conflict.
+        "person" => {
+            archive_source_direct(pool, item, &destination_root, "人物图（未识别）", None, &naming)
+                .await
+        }
+        "scene" => {
+            archive_source_direct(pool, item, &destination_root, "游戏截图", None, &naming).await
+        }
+        "private" => {
+            archive_source_direct(pool, item, &destination_root, "收藏图", None, &naming).await
+        }
         _ => Err(AppError::Validation(
             "unclassified capture cannot be archived".to_owned(),
         )),
@@ -194,6 +230,7 @@ async fn archive_source_direct(
     item: &CaptureItem,
     destination_root: &Path,
     subdirectory: &str,
+    character_name: Option<&str>,
     naming: &ArchiveNamingSettings,
 ) -> Result<CaptureItem, AppError> {
     let source = Path::new(&item.source_path);
@@ -209,7 +246,7 @@ async fn archive_source_direct(
     let directory = destination_root.join(subdirectory);
     let context = ArchiveNameContext {
         source_stem,
-        character_name: None,
+        character_name,
         capture_item_id: &item.id,
         classification: &item.classification,
         captured_at: Some(&item.captured_at),
@@ -654,7 +691,7 @@ mod tests {
             pool,
             CompleteCaptureProcessingInput {
                 capture_item_id: item.id,
-                annotated_path: capture_service::path_to_string(&annotated),
+                annotated_path: Some(capture_service::path_to_string(&annotated)),
                 avatar_path: Some(capture_service::path_to_string(&avatar)),
                 face_box_json: Some(r#"{"x":1,"y":2,"width":3,"height":4}"#.to_owned()),
                 face_feature: None,
@@ -974,7 +1011,7 @@ mod tests {
             &pool,
             CompleteCaptureProcessingInput {
                 capture_item_id: relabeled.id.clone(),
-                annotated_path: capture_service::path_to_string(&new_annotated),
+                annotated_path: Some(capture_service::path_to_string(&new_annotated)),
                 avatar_path: Some(capture_service::path_to_string(&new_avatar)),
                 face_box_json: Some(r#"{"x":1,"y":2,"width":3,"height":4}"#.to_owned()),
                 face_feature: None,
@@ -1266,6 +1303,108 @@ mod tests {
         .await
         .expect("asset character link");
         assert_eq!(linked, 1);
+        assert!(source.is_file(), "source screenshot must stay untouched");
+    }
+
+    #[tokio::test]
+    async fn archives_recognized_person_to_original_directory_when_annotation_disabled() {
+        let pool = db::test_pool().await;
+        processing_settings_service::update(
+            &pool,
+            crate::models::vision::ProcessingSettings {
+                annotate_person: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable annotation");
+        let project = test_support::project_with_directories(&pool, "NoAnnotation")
+            .await
+            .expect("project fixture");
+        let source_directory = project.source_directory.clone();
+        let source = source_directory.join("shot-005.png");
+        let session = test_support::start_session(&pool, &project.project_id)
+            .await
+            .expect("session");
+        tokio::fs::write(&source, b"raw-capture-5")
+            .await
+            .expect("source file");
+        let character = character_service::create(
+            &pool,
+            CreateCharacterInput {
+                project_id: project.project_id.clone(),
+                name: "Aurora".to_owned(),
+                aliases_json: None,
+            },
+        )
+        .await
+        .expect("character");
+        let item = capture_service::register_capture(
+            &pool,
+            RegisterCaptureInput {
+                session_id: session.id.clone(),
+                source_path: capture_service::path_to_string(&source),
+            },
+        )
+        .await
+        .expect("register");
+        let labelled = capture_service::label_capture(
+            &pool,
+            LabelCaptureInput {
+                capture_item_id: item.id.clone(),
+                character_id: Some(character.id.clone()),
+                classification: Some("person".to_owned()),
+            },
+        )
+        .await
+        .expect("label person");
+        let claimed = capture_service::mark_processing(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: labelled.id.clone(),
+            },
+        )
+        .await
+        .expect("claim processing");
+        assert_eq!(claimed.status, "processing");
+        // Simulates a successful processing pass with annotation skipped:
+        // feature/avatar data may exist, but no annotated output is written.
+        let pending = capture_service::complete_processing(
+            &pool,
+            CompleteCaptureProcessingInput {
+                capture_item_id: item.id.clone(),
+                annotated_path: None,
+                avatar_path: None,
+                face_box_json: None,
+                face_feature: None,
+                face_feature_model_id: None,
+                face_feature_model_version: None,
+                face_count: None,
+                face_sharpness: None,
+                face_area_ratio: None,
+                warnings_json: None,
+            },
+        )
+        .await
+        .expect("complete without annotation");
+        assert_eq!(pending.status, "archive_pending");
+
+        let completed = archive(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: pending.id.clone(),
+            },
+        )
+        .await
+        .expect("archive person without annotation");
+        assert_eq!(completed.status, "completed");
+        let destination = completed.destination_path.as_deref().expect("destination");
+        assert!(
+            destination.contains("人物图（原图）"),
+            "unexpected destination: {destination}"
+        );
+        assert!(destination.contains("Aurora"), "name missing: {destination}");
+        assert!(completed.annotated_path.is_none());
         assert!(source.is_file(), "source screenshot must stay untouched");
     }
 }

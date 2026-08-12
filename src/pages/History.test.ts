@@ -195,6 +195,27 @@ describe("History context menu", () => {
     wrapper.unmount();
   });
 
+  it("hides reprocess for recognized captures without annotation", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [
+        {
+          ...entry("9", "2026-08-09T00:00:00Z"),
+          classification: "person",
+          annotatedPath: null,
+          faceBoxJson: '{"x":10,"y":20,"width":30,"height":40}',
+        },
+      ],
+      total: 1,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+
+    await wrapper.find(".history-row").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).not.toContain("重新识别");
+    wrapper.unmount();
+  });
+
   it("offers reprocess for degraded person captures", async () => {
     api.listHistory.mockResolvedValue({
       entries: [

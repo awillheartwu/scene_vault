@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// plugin's reveal command) instead.
 #[tauri::command]
 pub fn open_directory(path: String) -> Result<(), String> {
-    let dir = validate_directory(&path)?;
+    let dir = ensure_directory(&path)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -36,11 +36,19 @@ pub fn open_directory(path: String) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_directory(path: &str) -> Result<PathBuf, String> {
+/// App-managed directories (thumbnail caches, logs, capture output) are
+/// created lazily and may not exist yet when the user clicks "open"; create
+/// the missing directory so the explorer can show it. Real files and paths
+/// blocked by the filesystem still fail with a clear error.
+fn ensure_directory(path: &str) -> Result<PathBuf, String> {
     let dir = PathBuf::from(path);
-    if !dir.is_dir() {
-        return Err(format!("不是有效的目录: {path}"));
+    if dir.is_dir() {
+        return Ok(dir);
     }
+    if dir.exists() {
+        return Err(format!("不是目录: {path}"));
+    }
+    std::fs::create_dir_all(&dir).map_err(|err| format!("无法创建目录 {path}: {err}"))?;
     Ok(dir)
 }
 
@@ -50,10 +58,12 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn rejects_missing_paths() {
+    fn creates_missing_directories() {
         let workspace = tempfile::tempdir().expect("tempdir");
-        let missing = workspace.path().join("nope");
-        assert!(validate_directory(missing.to_str().unwrap()).is_err());
+        let missing = workspace.path().join("nested").join("cache");
+        let created = ensure_directory(missing.to_str().unwrap()).expect("created");
+        assert_eq!(created, missing);
+        assert!(missing.is_dir());
     }
 
     #[test]
@@ -61,7 +71,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("tempdir");
         let file = workspace.path().join("x.txt");
         fs::write(&file, b"x").expect("write");
-        assert!(validate_directory(file.to_str().unwrap()).is_err());
+        assert!(ensure_directory(file.to_str().unwrap()).is_err());
     }
 
     #[test]
@@ -70,7 +80,7 @@ mod tests {
         let dir = workspace.path().join("models");
         fs::create_dir_all(&dir).expect("create dir");
         assert_eq!(
-            validate_directory(dir.to_str().unwrap()).expect("valid dir"),
+            ensure_directory(dir.to_str().unwrap()).expect("valid dir"),
             dir
         );
     }

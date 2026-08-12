@@ -101,6 +101,7 @@ class VisionProcessingTests(unittest.TestCase):
         sface_model_path: Path | None,
         recognizer: str = "sface",
         arcface_model_path: Path | None = None,
+        annotate: bool = True,
     ) -> ProcessingRequest:
         return ProcessingRequest(
             input_path=root / "输入.png",
@@ -108,7 +109,7 @@ class VisionProcessingTests(unittest.TestCase):
             avatar_output_path=None,
             character_name="星见",
             detect_face=True,
-            annotate=True,
+            annotate=annotate,
             crop_avatar=False,
             yunet=YuNetConfig(model_path=root / "yunet.onnx"),
             sface_model_path=sface_model_path,
@@ -117,6 +118,23 @@ class VisionProcessingTests(unittest.TestCase):
             annotation=AnnotationConfig(),
             crop=CropConfig(),
         )
+
+    def test_annotate_false_skips_labeled_copy(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            Image.new("RGB", (480, 270), color=(20, 30, 40)).save(root / "输入.png")
+            processor = ScreenshotProcessor(
+                self._request(root, sface_model_path=None, annotate=False),
+                detector_factory=lambda _config: FixedFaceDetector(
+                    FaceBox(x=10, y=10, width=60, height=60)
+                ),
+            )
+            result = processor.process()
+            self.assertIsNone(result.annotated_path)
+            self.assertIsNone(result.to_dict()["annotatedPath"])
+            self.assertFalse((root / "输出.png").exists())
 
     def test_face_feature_absent_without_sface_model(self) -> None:
         from PIL import Image

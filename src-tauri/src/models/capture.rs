@@ -160,7 +160,8 @@ pub struct ThumbnailCacheStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CompleteCaptureProcessingInput {
     pub capture_item_id: String,
-    pub annotated_path: String,
+    /// Absent when explicit person annotation is disabled.
+    pub annotated_path: Option<String>,
     pub avatar_path: Option<String>,
     pub face_box_json: Option<String>,
     /// SFace feature vector from the processing pass; absent when the engine
