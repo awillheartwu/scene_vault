@@ -178,6 +178,25 @@ pub async fn update(
         )
         .execute(pool)
         .await?;
+        // Awaiting-label items keep their extracted feature until it is
+        // cleared: the prelabel pass only re-picks items without a feature,
+        // so a model switch would otherwise leave them forever carrying a
+        // vector from the old recognizer. Clear theirs so the next prelabel
+        // pass re-extracts with the active model and fresh suggestions.
+        sqlx::query(
+            r#"
+            UPDATE capture_faces
+            SET feature_json = NULL,
+                feature_model_id = NULL,
+                feature_model_version = NULL,
+                feature_dim = NULL
+            WHERE capture_item_id IN (
+                SELECT id FROM capture_items WHERE status = 'awaiting_label'
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
     }
     let value = serde_json::to_string(&settings)
         .map_err(|error| AppError::Validation(format!("cannot encode vision settings: {error}")))?;
@@ -530,7 +549,7 @@ mod tests {
         let item = capture_service::register_capture(
             &pool,
             RegisterCaptureInput {
-                session_id: session.id,
+                session_id: session.id.clone(),
                 source_path: source.to_string_lossy().into_owned(),
             },
         )
@@ -546,6 +565,37 @@ mod tests {
         )
         .await
         .expect("label");
+        // A second capture stays awaiting-label with an extracted feature.
+        let awaiting_source = source_directory.join("awaiting.png");
+        std::fs::write(&awaiting_source, b"image").expect("awaiting source");
+        let awaiting = capture_service::register_capture(
+            &pool,
+            RegisterCaptureInput {
+                session_id: session.id,
+                source_path: awaiting_source.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("register awaiting");
+        sqlx::query("UPDATE capture_items SET status = 'awaiting_label' WHERE id = ?")
+            .bind(&awaiting.id)
+            .execute(&pool)
+            .await
+            .expect("awaiting status");
+        sqlx::query(
+            r#"
+            INSERT INTO capture_faces (
+                id, capture_item_id, face_index, is_primary, feature_json,
+                feature_model_id, feature_model_version, feature_dim
+            )
+            VALUES (?, ?, 0, 1, '[0.1,0.2]', 'arcface-r50', 'w600k', 2)
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&awaiting.id)
+        .execute(&pool)
+        .await
+        .expect("store awaiting feature");
         recognition_service::set_suggestion(
             &pool,
             SetRecognitionSuggestionInput {
@@ -576,7 +626,15 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("read suggestion");
+        let awaiting_feature: Option<String> = sqlx::query_scalar(
+            "SELECT feature_json FROM capture_faces WHERE capture_item_id = ?",
+        )
+        .bind(&awaiting.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read awaiting feature");
         assert!(suggested.is_some());
+        assert!(awaiting_feature.is_some());
 
         // Switching the recognizer clears it.
         update(
@@ -596,6 +654,20 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("read cleared suggestion");
+        let awaiting_feature: Option<String> = sqlx::query_scalar(
+            "SELECT feature_json FROM capture_faces WHERE capture_item_id = ?",
+        )
+        .bind(&awaiting.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read cleared awaiting feature");
+        let awaiting_model: Option<String> = sqlx::query_scalar(
+            "SELECT feature_model_id FROM capture_faces WHERE capture_item_id = ?",
+        )
+        .bind(&awaiting.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read cleared awaiting model");
         let review: String =
             sqlx::query_scalar("SELECT review_status FROM capture_items WHERE id = ?")
                 .bind(&item.id)
@@ -603,6 +675,8 @@ mod tests {
                 .await
                 .expect("read review");
         assert!(suggested.is_none());
+        assert!(awaiting_feature.is_none());
+        assert!(awaiting_model.is_none());
         assert_eq!(review, "none");
     }
 }
