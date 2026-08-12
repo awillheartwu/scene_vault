@@ -181,7 +181,6 @@ pub async fn process_screenshot(
             "avatarOutputPath": avatar_output_path.to_string_lossy(),
             "characterName": character_name,
             "detectFace": true,
-            "annotate": true,
             "cropAvatar": true,
             "yunetModelPath": settings.yunet_model_path,
             "sfaceModelPath": settings.sface_model_path,
@@ -316,6 +315,7 @@ fn processing_payload(
         }
         payload["crop"] = Value::Object(object);
     }
+    payload["annotate"] = json!(processing.annotate_person.unwrap_or(true));
     payload
 }
 
@@ -864,6 +864,7 @@ mod tests {
                 min_size: Some(256),
                 ..Default::default()
             }),
+            ..Default::default()
         };
         let payload = processing_payload(&settings, &processing, json!({ "base": true }));
         assert_eq!(payload["base"], true);
@@ -881,6 +882,35 @@ mod tests {
         assert_eq!(payload["annotation"]["textOffsetX"].as_f64(), Some(-0.3));
         assert_eq!(payload["annotation"]["textOffsetY"].as_f64(), Some(1.25));
         assert_eq!(payload["crop"]["minSize"].as_i64(), Some(256));
+        // Explicit person annotation defaults to on and can be disabled.
+        assert_eq!(payload["annotate"], true);
+    }
+
+    #[test]
+    fn processing_payload_respects_annotate_person_setting() {
+        let settings = VisionSettings::default();
+        let off = processing_payload(
+            &settings,
+            &ProcessingSettings {
+                annotate_person: Some(false),
+                ..Default::default()
+            },
+            json!({}),
+        );
+        assert_eq!(off["annotate"], false);
+
+        let on = processing_payload(
+            &settings,
+            &ProcessingSettings {
+                annotate_person: Some(true),
+                ..Default::default()
+            },
+            json!({}),
+        );
+        assert_eq!(on["annotate"], true);
+
+        let unset = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
+        assert_eq!(unset["annotate"], true);
     }
 
     #[test]

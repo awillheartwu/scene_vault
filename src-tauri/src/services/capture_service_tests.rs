@@ -393,7 +393,7 @@ async fn runs_session_label_and_processing_state_transitions() {
         &pool,
         CompleteCaptureProcessingInput {
             capture_item_id: labelled.id,
-            annotated_path: path_to_string(&annotated),
+            annotated_path: Some(path_to_string(&annotated)),
             avatar_path: None,
             face_box_json: Some(r#"{"x":10,"y":20,"width":30,"height":40}"#.to_owned()),
             face_feature: None,
@@ -478,7 +478,7 @@ async fn rejects_source_overwrite_and_invalid_transitions() {
         &pool,
         CompleteCaptureProcessingInput {
             capture_item_id: item.id,
-            annotated_path: path_to_string(&screenshot),
+            annotated_path: Some(path_to_string(&screenshot)),
             avatar_path: None,
             face_box_json: None,
             face_feature: None,

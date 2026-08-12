@@ -166,8 +166,16 @@ async function initializeSettings() {
 
 function canReprocess(entry: CaptureHistoryEntry): boolean {
   // Degraded fallback: person capture archived raw because the Python engine
-  // was not configured; a later retry re-queues it for full recognition.
-  return entry.status === "completed" && entry.classification === "person" && !entry.annotatedPath;
+  // was not configured or failed before producing any output. Missing
+  // annotation is only degraded when recognition also produced no face output
+  // (with annotation disabled, annotatedPath is absent by design while face
+  // output still exists for recognized captures).
+  return (
+    entry.status === "completed" &&
+    entry.classification === "person" &&
+    !entry.annotatedPath &&
+    !entry.faceBoxJson
+  );
 }
 
 async function reprocess(entry: CaptureHistoryEntry) {

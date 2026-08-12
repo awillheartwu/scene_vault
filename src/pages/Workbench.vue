@@ -422,8 +422,16 @@ function summaryThumbnailItemId(summary: CharacterSummary): string {
 
 function canReprocess(item: CaptureItem): boolean {
   // Degraded fallback: completed person capture archived raw because the
-  // Python engine was not configured.
-  return item.status === "completed" && item.classification === "person" && !item.annotatedPath;
+  // Python engine was not configured or failed before producing any output.
+  // Missing annotation is only degraded when recognition also produced no
+  // face output (with annotation disabled, annotatedPath is absent by design
+  // while face output still exists for recognized captures).
+  return (
+    item.status === "completed" &&
+    item.classification === "person" &&
+    !item.annotatedPath &&
+    !item.faceBoxJson
+  );
 }
 
 async function initialize() {

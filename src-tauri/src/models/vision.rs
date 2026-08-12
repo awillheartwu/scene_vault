@@ -32,6 +32,10 @@ pub struct ProcessingSettings {
     pub detection: Option<DetectionSettings>,
     pub annotation: Option<AnnotationSettings>,
     pub crop: Option<CropSettings>,
+    /// When false, the Python worker skips drawing the character name onto a
+    /// labeled copy; recognition, face features and Face Bank suggestions are
+    /// unaffected. `None` keeps the historical default (annotate on).
+    pub annotate_person: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
