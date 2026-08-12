@@ -1124,17 +1124,24 @@ pub async fn complete_processing(
         ));
     }
 
-    let annotated_path = validate_local_output(Path::new(required(
-        &input.annotated_path,
-        "annotated path",
-    )?))
-    .await?;
     let source_path = tokio::fs::canonicalize(&item.source_path).await?;
-    if annotated_path == source_path {
-        return Err(AppError::Validation(
-            "Python output cannot overwrite the source screenshot".to_owned(),
-        ));
-    }
+    let annotated_path = match input
+        .annotated_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => {
+            let path = validate_local_output(Path::new(path)).await?;
+            if path == source_path {
+                return Err(AppError::Validation(
+                    "Python output cannot overwrite the source screenshot".to_owned(),
+                ));
+            }
+            Some(path_to_string(&path))
+        }
+        None => None,
+    };
     let avatar_path = if let Some(path) = input
         .avatar_path
         .as_deref()
@@ -1228,7 +1235,7 @@ pub async fn complete_processing(
             captured_at, processed_at, archived_at, created_at, updated_at
         "#,
     )
-    .bind(path_to_string(&annotated_path))
+    .bind(annotated_path)
     .bind(avatar_path)
     .bind(face_box_json)
     .bind(warnings_json)
@@ -1447,6 +1454,7 @@ pub async fn retry_degraded_captures(
           AND item.classification = 'person'
           AND item.status = 'completed'
           AND item.annotated_path IS NULL
+          AND item.face_box_json IS NULL
           AND (? IS NULL OR item.character_id = ?)
         ORDER BY item.captured_at ASC, item.created_at ASC
         "#,

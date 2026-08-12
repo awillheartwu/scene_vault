@@ -136,6 +136,7 @@ const processingSettings = {
     scaleBottom: null,
     minSize: null,
   },
+  annotatePerson: true,
 };
 
 const cacheStatus = {
@@ -455,3 +456,20 @@ describe("Settings processing hierarchy", () => {
   });
 });
 
+describe("Settings explicit person annotation toggle", () => {
+  it("persists the toggle with general settings", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    expect((page.get("#annotate-person").element as HTMLInputElement).checked).toBe(true);
+
+    await page.get("#annotate-person").setValue(false);
+    await page.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(api.updateAppSettings).toHaveBeenCalledTimes(1);
+    expect(api.updateProcessingSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ annotatePerson: false }),
+    );
+  });
+});

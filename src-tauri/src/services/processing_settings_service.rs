@@ -196,6 +196,7 @@ mod tests {
                 aspect_ratio: Some("3:4".to_owned()),
                 ..Default::default()
             }),
+            ..Default::default()
         };
         let saved = update(&pool, settings.clone()).await.expect("save");
         assert_eq!(saved, settings);

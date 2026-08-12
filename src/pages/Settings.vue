@@ -181,10 +181,12 @@ const strokeColorHex = ref("#000000");
 const namingBusy = ref(false);
 const recognitionBusy = ref(false);
 const processingBusy = ref(false);
+const annotatePerson = ref<boolean>(true);
 const bundledFonts = ref<BundledFont[]>([]);
 
 interface SettingsBaseline {
   general: AppSettings;
+  annotatePerson: boolean;
   naming: ArchiveNamingSettings;
   recognition: RecognitionSettings;
   processing: {
@@ -221,7 +223,10 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 const generalDirty = computed(() =>
-  baseline.value ? !deepEqual(appSettings.value, baseline.value.general) : false,
+  baseline.value
+    ? !deepEqual(appSettings.value, baseline.value.general) ||
+      annotatePerson.value !== baseline.value.annotatePerson
+    : false,
 );
 const namingDirty = computed(() =>
   baseline.value ? !deepEqual(namingSettings.value, baseline.value.naming) : false,
@@ -278,11 +283,13 @@ async function initialize() {
       annotation: processing.annotation ?? emptyAnnotation(),
       crop: processing.crop ?? emptyCrop(),
     };
+    annotatePerson.value = processing.annotatePerson ?? true;
     textColorHex.value = rgbToHex(processingUi.value.annotation.textColor);
     strokeColorHex.value = rgbToHex(processingUi.value.annotation.strokeColor);
     bundledFonts.value = await captureApi.listBundledFonts().catch(() => []);
     baseline.value = {
       general: clone(appSettings.value),
+      annotatePerson: annotatePerson.value,
       naming: clone(namingSettings.value),
       recognition: clone(recognitionSettings.value),
       processing: {
@@ -352,7 +359,7 @@ async function openCacheDirectory(directory: string) {
       level: "error",
       module: "ui.opener",
       event: "open_cache_directory_failed",
-      message: "打开缓存目录失败",
+      message: `打开缓存目录失败：${normalizeError(error)}`,
       outcome: "failed",
       errorCode: error instanceof Error ? error.name : "open_cache_directory_failed",
     });
@@ -415,7 +422,15 @@ async function saveAppSettings() {
   appBusy.value = true;
   try {
     appSettings.value = await captureApi.updateAppSettings(appSettings.value);
-    if (baseline.value) baseline.value.general = clone(appSettings.value);
+    const processing = await captureApi.getProcessingSettings();
+    await captureApi.updateProcessingSettings({
+      ...processing,
+      annotatePerson: annotatePerson.value,
+    });
+    if (baseline.value) {
+      baseline.value.general = clone(appSettings.value);
+      baseline.value.annotatePerson = annotatePerson.value;
+    }
     await refreshCacheStatus();
     toast.success("通用设置已保存。");
   } catch (error) {
@@ -595,6 +610,7 @@ function buildProcessingPayload(): ProcessingSettings {
       : null,
     annotation: hasValue(annotation) ? annotation : null,
     crop: hasValue(processingUi.value.crop) ? processingUi.value.crop : null,
+    annotatePerson: annotatePerson.value,
   };
 }
 
@@ -615,6 +631,7 @@ async function saveProcessing() {
   try {
     await captureApi.updateProcessingSettings(buildProcessingPayload());
     if (baseline.value) {
+      baseline.value.annotatePerson = annotatePerson.value;
       baseline.value.processing = {
         detection: clone(processingUi.value.detection),
         annotation: clone(processingUi.value.annotation),
@@ -883,6 +900,16 @@ onBeforeUnmount(() => {
         </div>
         <label class="toggle">
           <input id="auto-close-empty-popup" v-model="appSettings.autoCloseEmptyPopup" type="checkbox" />
+          <span class="toggle-track" />
+        </label>
+      </div>
+      <div class="settings-field toggle-row">
+        <div class="toggle-text">
+          <label for="annotate-person">显式标注人物</label>
+          <p>关闭后识别、脸向量入库与人物建议照常进行，但不再生成带名字的标注图；人物截图在归档时按角色命名直接保存原图（不产生「人物图」副本）。</p>
+        </div>
+        <label class="toggle">
+          <input id="annotate-person" v-model="annotatePerson" type="checkbox" />
           <span class="toggle-track" />
         </label>
       </div>

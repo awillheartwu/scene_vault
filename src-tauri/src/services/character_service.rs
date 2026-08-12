@@ -347,6 +347,7 @@ pub async fn list_project_summaries(
                   AND degraded.classification = 'person'
                   AND degraded.status = 'completed'
                   AND degraded.annotated_path IS NULL
+                  AND degraded.face_box_json IS NULL
             ) AS degraded_count,
             MAX(item.captured_at) AS last_captured_at,
             (
