@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -863,8 +863,11 @@ export async function revealPath(path: string): Promise<void> {
   await revealItemInDir(path);
 }
 
-export async function openPathExternal(path: string): Promise<void> {
-  await openPath(path);
+// First-party alternative to the opener plugin's scope-gated open_path:
+// user-configured directories (custom models/python dirs) can never be listed
+// in a static capability scope, so directories are opened via the app command.
+export async function openDirectoryExternal(path: string): Promise<void> {
+  await invoke("open_directory", { path });
 }
 
 export function captureStatusLabel(

@@ -81,10 +81,13 @@ pub fn scan(paths: &ResourcePaths) -> StorageResourceStatus {
                 } else {
                     disk_usage(path)
                 };
+                // A missing path cannot be opened by the OS opener plugin, so it is
+                // surfaced as "not configured" (button hidden) instead of an error.
+                let exists = path.symlink_metadata().is_ok();
                 StorageResourceEntry {
                     kind: kind.to_owned(),
                     label: label.to_owned(),
-                    path: Some(path.to_string_lossy().into_owned()),
+                    path: exists.then(|| path.to_string_lossy().into_owned()),
                     total_bytes: usage.bytes,
                     file_count: usage.files,
                     cleanup_available,

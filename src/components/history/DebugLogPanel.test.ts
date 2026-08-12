@@ -1,20 +1,20 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { api, openPath, toastSuccess } = vi.hoisted(() => ({
+const { api, openDirectory, toastSuccess } = vi.hoisted(() => ({
   api: {
     listDebugLogs: vi.fn(),
     getLogStatus: vi.fn(),
     cleanupDebugLogs: vi.fn(),
     getDiagnosticSummary: vi.fn(),
   },
-  openPath: vi.fn(),
+  openDirectory: vi.fn(),
   toastSuccess: vi.fn(),
 }));
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
-  openPathExternal: openPath,
+  openDirectoryExternal: openDirectory,
 }));
 
 vi.mock("@/lib/toast", () => ({

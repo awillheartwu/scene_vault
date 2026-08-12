@@ -1,13 +1,13 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { api, openPathExternal, pickFile, pathDirectory, revealPath } = vi.hoisted(() => ({
+const { api, openDirectoryExternal, pickFile, pathDirectory, revealPath } = vi.hoisted(() => ({
   api: {
     getDatabaseStartupStatus: vi.fn(),
     stageDatabaseRestore: vi.fn(),
     restartAfterDatabaseRestore: vi.fn(),
   },
-  openPathExternal: vi.fn(),
+  openDirectoryExternal: vi.fn(),
   revealPath: vi.fn(),
   pickFile: vi.fn(),
   pathDirectory: (path: string) => path.split(/[\\/]/).slice(0, -1).join("\\") || path,
@@ -15,7 +15,7 @@ const { api, openPathExternal, pickFile, pathDirectory, revealPath } = vi.hoiste
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
-  openPathExternal,
+  openDirectoryExternal,
   revealPath,
   pickFile,
   pathDirectory,
@@ -174,7 +174,7 @@ describe("Recovery page", () => {
       ?.trigger("click");
     await flushPromises();
 
-    expect(openPathExternal).toHaveBeenCalledWith("C:\\AppData\\SceneVault");
+    expect(openDirectoryExternal).toHaveBeenCalledWith("C:\\AppData\\SceneVault");
     wrapper.unmount();
   });
 

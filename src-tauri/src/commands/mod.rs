@@ -7,5 +7,6 @@ pub mod notes;
 pub mod project;
 pub mod recognition;
 pub mod settings;
+pub mod system;
 pub mod vision;
 pub mod window;

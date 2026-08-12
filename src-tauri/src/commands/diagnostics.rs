@@ -140,6 +140,25 @@ mod tests {
             "client event contained a local path; details redacted"
         );
     }
+
+    #[test]
+    fn python_runtime_path_prefers_configured_python_then_sidecar_then_fallback() {
+        let fallback = PathBuf::from("C:/app/ai-runtime");
+        let sidecar = PathBuf::from("D:/sv/scene-vault-ai.exe");
+        assert_eq!(
+            python_runtime_path(Some("C:/py/venv/Scripts/python.exe"), None, fallback.clone()),
+            PathBuf::from("C:/py/venv")
+        );
+        assert_eq!(
+            python_runtime_path(Some("C:/py/python.exe"), None, fallback.clone()),
+            PathBuf::from("C:/py")
+        );
+        assert_eq!(
+            python_runtime_path(None, Some(&sidecar), fallback.clone()),
+            PathBuf::from("D:/sv")
+        );
+        assert_eq!(python_runtime_path(None, None, fallback.clone()), fallback);
+    }
 }
 
 #[tauri::command]
@@ -189,22 +208,30 @@ fn configured_parent(value: Option<&str>, fallback: PathBuf) -> PathBuf {
         .unwrap_or(fallback)
 }
 
-fn python_runtime_root(value: Option<&str>, fallback: PathBuf) -> PathBuf {
-    let Some(executable) = value.map(Path::new) else {
-        return fallback;
-    };
-    let Some(parent) = executable.parent() else {
-        return fallback;
-    };
-    if parent
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("scripts"))
-    {
-        parent.parent().unwrap_or(parent).to_path_buf()
-    } else {
-        parent.to_path_buf()
+fn python_runtime_path(
+    value: Option<&str>,
+    sidecar: Option<&Path>,
+    fallback: PathBuf,
+) -> PathBuf {
+    if let Some(executable) = value.map(Path::new) {
+        let Some(parent) = executable.parent() else {
+            return fallback;
+        };
+        if parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("scripts"))
+        {
+            return parent.parent().unwrap_or(parent).to_path_buf();
+        }
+        return parent.to_path_buf();
     }
+    if let Some(sidecar) = sidecar {
+        if let Some(parent) = sidecar.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    fallback
 }
 
 async fn resource_paths(
@@ -226,8 +253,9 @@ async fn resource_paths(
         capture_output: app.path().app_cache_dir()?.join("capture-output"),
         models: configured_parent(model_path, app_local.join("models")),
         fonts: app_local.join("fonts"),
-        python_runtime: python_runtime_root(
+        python_runtime: python_runtime_path(
             settings.python_executable_path.as_deref(),
+            vision_settings_service::sidecar_executable().as_deref(),
             app_local.join("ai-runtime"),
         ),
         webview_data: app_local.join("EBWebView"),

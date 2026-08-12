@@ -42,12 +42,13 @@ import {
   type VisionHealth,
   type VisionSettings,
 } from "@/lib/capture-api";
-import { openPathExternal } from "@/lib/capture-api";
+import { openDirectoryExternal } from "@/lib/capture-api";
 import ColorField from "@/components/common/ColorField.vue";
 import CornerFallbackPicker from "@/components/common/CornerFallbackPicker.vue";
 import FaceTextPositionPicker from "@/components/common/FaceTextPositionPicker.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import ResourceStoragePanel from "@/components/settings/ResourceStoragePanel.vue";
+import { recordClientEvent } from "@/lib/client-log";
 import { toast } from "@/lib/toast";
 
 const NAMING_PLACEHOLDERS: [string, string][] = [
@@ -344,9 +345,17 @@ function formatBytes(bytes: number): string {
 
 async function openCacheDirectory(directory: string) {
   try {
-    await openPathExternal(directory);
+    await openDirectoryExternal(directory);
   } catch (error) {
     toast.error(`无法打开缓存目录：${normalizeError(error)}`);
+    void recordClientEvent({
+      level: "error",
+      module: "ui.opener",
+      event: "open_cache_directory_failed",
+      message: "打开缓存目录失败",
+      outcome: "failed",
+      errorCode: error instanceof Error ? error.name : "open_cache_directory_failed",
+    });
   }
 }
 
