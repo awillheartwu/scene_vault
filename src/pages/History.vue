@@ -22,6 +22,7 @@ import {
 } from "@/lib/capture-api";
 
 const { isWideLayout } = useAdaptiveLayout();
+const CURRENT_PROJECT_KEY = "scene-vault.capture.project";
 
 const projects = ref<Project[]>([]);
 const sessions = ref<CaptureSession[]>([]);
@@ -47,7 +48,10 @@ const filtered = computed(() => entries.value);
 
 async function initialize() {
   projects.value = await captureApi.listProjects();
-  projectId.value = projects.value[0]?.id ?? "";
+  const savedProjectId = localStorage.getItem(CURRENT_PROJECT_KEY);
+  projectId.value = projects.value.some((project) => project.id === savedProjectId)
+    ? savedProjectId!
+    : projects.value[0]?.id ?? "";
   await loadProjectFilters();
 }
 
@@ -61,6 +65,7 @@ async function loadProjectFilters() {
     total.value = 0;
     return;
   }
+  localStorage.setItem(CURRENT_PROJECT_KEY, projectId.value);
   [sessions.value, characters.value] = await Promise.all([
     captureApi.listSessions(projectId.value),
     captureApi.listCharacters(projectId.value),

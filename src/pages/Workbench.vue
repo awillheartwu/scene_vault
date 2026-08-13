@@ -927,11 +927,18 @@ watch(selectedItemId, () => {
 });
 
 function onItemPageChange(page: number) {
+  // The current selection belongs to the page being left. Clear it before the
+  // request starts so the detail panel cannot retain stale state while the
+  // next page is loading; loadItems selects the first item on arrival.
+  selectedItemId.value = null;
+  detailOpen.value = false;
   itemPage.value = page;
   void loadItems();
 }
 
 function onItemPageSizeChange(size: number) {
+  selectedItemId.value = null;
+  detailOpen.value = false;
   itemPageSize.value = size;
   itemPage.value = 1;
   void loadItems();

@@ -21,6 +21,11 @@ password is read from the SIGN_CERT_PASSWORD environment variable.
 .PARAMETER TimestampServer
 Timestamp server URL used when signing (requires network at build time).
 
+.PARAMETER SmokeTest
+Runs only the release preflight: verifies unified versions and proves stale
+installer cleanup removes old setup executables. It does not build, download,
+tag, or write outside a temporary directory.
+
 .EXAMPLE
 ./scripts/release-windows.ps1 -SkipAI
 ./scripts/release-windows.ps1
@@ -43,7 +48,8 @@ param(
     ,
     # Skip CPU pinning entirely (GitHub Actions runners have few vCPUs and no
     # 13900K-style stability constraints).
-    [switch]$SkipAffinity
+    [switch]$SkipAffinity,
+    [switch]$SmokeTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,10 +57,6 @@ Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
-
-if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-    throw "This release script must run on Windows (PyInstaller and NSIS require it)."
-}
 
 function Find-Tool([string]$Name, [string[]]$Fallbacks) {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -90,6 +92,13 @@ function Run-Native([string]$FilePath, [string[]]$Arguments, [string]$LogBase) {
 function Get-JsonValue([string]$Path, [string]$Key) {
     $json = Get-Content -Raw $Path | ConvertFrom-Json
     return $json.$Key
+}
+
+function Clear-StaleInstallers([string]$Directory) {
+    if (Test-Path $Directory) {
+        Get-ChildItem $Directory -Filter "*setup.exe" -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+    }
 }
 
 # Waits for a build artifact to appear instead of relying on Start-Process
@@ -136,6 +145,25 @@ foreach ($entry in $Expected.GetEnumerator()) {
     }
 }
 Write-Host "[1/6] Versions unified at $Version"
+
+if ($SmokeTest) {
+    $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("scene-vault-release-smoke-" + [guid]::NewGuid())
+    try {
+        New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+        $stale = Join-Path $smokeRoot "scene-vault-stale-setup.exe"
+        [System.IO.File]::WriteAllText($stale, "stale")
+        Clear-StaleInstallers $smokeRoot
+        if (Test-Path $stale) { throw "Stale installer cleanup smoke test failed." }
+        Write-Host "Release preflight smoke test passed (version consistency + stale artifact cleanup)."
+    } finally {
+        Remove-Item -Recurse -Force $smokeRoot -ErrorAction SilentlyContinue
+    }
+    exit 0
+}
+
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    throw "This release script must run on Windows (PyInstaller and NSIS require it)."
+}
 
 $LogDir = Join-Path $RepoRoot "dist-release"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -281,9 +309,7 @@ function Build-Installer([string]$ConfigArg, [string]$OutputName) {
     $nsis = Join-Path $RepoRoot "src-tauri/target/release/bundle/nsis"
     # Remove stale installers from earlier runs: the poll below must only ever
     # see the installer produced by THIS build.
-    if (Test-Path $nsis) {
-        Remove-Item -Force (Join-Path $nsis "*setup.exe") -ErrorAction SilentlyContinue
-    }
+    Clear-StaleInstallers $nsis
     $tauriProcess = Start-Process -FilePath $Node -ArgumentList $arguments -NoNewWindow -PassThru
 
     $deadline = (Get-Date).AddMinutes(60)

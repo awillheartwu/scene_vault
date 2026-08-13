@@ -138,6 +138,26 @@ describe("Home project library", () => {
     wrapper.unmount();
   });
 
+  it("selects cover proportions from the number of visible grid cards", async () => {
+    api.listProjectOverviews.mockResolvedValue([projects[0]]);
+    const one = mount(Home);
+    await flushPromises();
+    expect(one.get(".project-grid").classes()).toContain("project-grid-1");
+    one.unmount();
+
+    api.listProjectOverviews.mockResolvedValue(projects.slice(0, 2));
+    const two = mount(Home);
+    await flushPromises();
+    expect(two.get(".project-grid").classes()).toContain("project-grid-2");
+    two.unmount();
+
+    api.listProjectOverviews.mockResolvedValue(projects);
+    const three = mount(Home);
+    await flushPromises();
+    expect(three.get(".project-grid").classes()).toContain("project-grid-3");
+    three.unmount();
+  });
+
   it("switches to the compact list and remembers the view", async () => {
     const wrapper = mount(Home);
     await flushPromises();

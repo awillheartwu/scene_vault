@@ -50,3 +50,42 @@ it("does not request a thumbnail until the card enters the viewport", async () =
   expect(api.readThumbnail).toHaveBeenCalledTimes(1);
   wrapper.unmount();
 });
+
+it("loads the original for an auto-sized image wider than the thumbnail threshold", async () => {
+  let onIntersect: IntersectionObserverCallback = () => undefined;
+  let onResize: ResizeObserverCallback = () => undefined;
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(callback: IntersectionObserverCallback) { onIntersect = callback; }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+    takeRecords() { return []; }
+    root = null;
+    rootMargin = "";
+    thresholds = [];
+  });
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: ResizeObserverCallback) { onResize = callback; }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  });
+
+  const wrapper = mount(CaptureThumbnail, {
+    props: {
+      item: { id: "capture-large", sourcePath: "D:\\shots\\large.png" } as never,
+      size: "auto",
+    },
+  });
+  const target = wrapper.element as Element;
+  onResize(
+    [{ target, contentRect: { width: 720 } } as ResizeObserverEntry],
+    {} as ResizeObserver,
+  );
+  onIntersect([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  await flushPromises();
+
+  expect(api.readImage).toHaveBeenCalledWith("capture-large", "source");
+  expect(api.readThumbnail).not.toHaveBeenCalled();
+  wrapper.unmount();
+});

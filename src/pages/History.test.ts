@@ -38,6 +38,11 @@ const project = {
   createdAt: "2026-08-01T00:00:00Z",
   updatedAt: "2026-08-01T00:00:00Z",
 };
+const otherProject = {
+  ...project,
+  id: "project-2",
+  name: "Other",
+};
 const session = {
   id: "session-1",
   projectId: project.id,
@@ -81,6 +86,7 @@ function entry(id: string, capturedAt: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   api.listProjects.mockResolvedValue([project]);
   api.listSessions.mockResolvedValue([session]);
   api.listCharacters.mockResolvedValue([]);
@@ -96,6 +102,38 @@ beforeEach(() => {
     retentionDays: 14,
     maxFileBytes: 5 * 1024 * 1024,
     maxArchivedFiles: 20,
+  });
+});
+
+describe("History project continuity", () => {
+  it("opens the project currently selected by Capture and Workbench", async () => {
+    localStorage.setItem("scene-vault.capture.project", otherProject.id);
+    api.listProjects.mockResolvedValue([project, otherProject]);
+    const wrapper = mount(History);
+    await flushPromises();
+
+    expect(wrapper.get(".history-filters select").element).toHaveProperty(
+      "value",
+      otherProject.id,
+    );
+    expect(api.listSessions).toHaveBeenCalledWith(otherProject.id);
+    expect(api.listCharacters).toHaveBeenCalledWith(otherProject.id);
+    expect(api.listHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: otherProject.id }),
+    );
+    wrapper.unmount();
+  });
+
+  it("falls back to the first available project when the saved project was deleted", async () => {
+    localStorage.setItem("scene-vault.capture.project", "deleted-project");
+    const wrapper = mount(History);
+    await flushPromises();
+
+    expect(api.listHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: project.id }),
+    );
+    expect(localStorage.getItem("scene-vault.capture.project")).toBe(project.id);
+    wrapper.unmount();
   });
 });
 

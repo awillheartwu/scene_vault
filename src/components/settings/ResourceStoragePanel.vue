@@ -471,84 +471,6 @@ onBeforeUnmount(() => {
       </footer>
     </section>
 
-    <section class="resource-section" aria-labelledby="data-safety-title" :aria-busy="maintenanceBusy !== null">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow">数据库</span>
-          <h2 id="data-safety-title">数据安全</h2>
-          <p>备份只包含索引与元数据（项目、角色、分类、笔记、Face Bank 和设置），不包含源截图与 NAS 归档。恢复会在应用重启后执行，并保留当前数据库的回滚快照。</p>
-        </div>
-        <button class="section-action" type="button" :disabled="maintenanceBusy !== null" @click="runPreflight">
-          <LoaderCircle v-if="maintenanceBusy === 'preflight'" class="animate-spin" :size="17" />
-          <FileCheck v-else :size="17" />
-          数据体检
-        </button>
-      </div>
-
-      <p v-if="maintenanceError" class="inline-error" role="alert">数据维护操作失败：{{ maintenanceError }}</p>
-
-      <div class="data-safety-summary" role="status" aria-live="polite">
-        <template v-if="preflightReport">
-          <strong :class="preflightReport.ok ? 'ok-text' : 'warn-text'">
-            {{ preflightReport.ok ? "体检通过" : "体检发现异常" }}
-          </strong>
-          <span>SQLite {{ preflightReport.sqliteVersion }} · Schema v{{ preflightReport.schemaVersion ?? "—" }} · {{ preflightReport.journalMode }}</span>
-          <span>{{ formatBytes(preflightReport.databaseSizeBytes) }} 数据库 + {{ formatBytes(preflightReport.walSizeBytes) }} WAL</span>
-          <span v-if="preflightReport.quickCheck.length">quick_check：{{ preflightReport.quickCheck.join("；") }}</span>
-          <span v-if="preflightReport.foreignKeyIssues.length">外键问题：{{ preflightReport.foreignKeyIssues.length }} 项</span>
-          <span v-if="preflightReport.migrationIssues.length">迁移问题：{{ preflightReport.migrationIssues.length }} 项</span>
-          <small>检查时间 {{ formatTime(preflightReport.checkedAtUtc) }}</small>
-        </template>
-        <template v-else>
-          <span>尚未运行体检。体检会检查数据库完整性、外键和迁移状态，不会修改当前数据。</span>
-        </template>
-      </div>
-
-      <div class="data-safety-actions">
-        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="backupNow">
-          <LoaderCircle v-if="maintenanceBusy === 'backup'" class="animate-spin" :size="16" />
-          <Save v-else :size="16" />
-          立即备份
-        </button>
-        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="restoreFromBackup">
-          <LoaderCircle v-if="maintenanceBusy === 'restore'" class="animate-spin" :size="16" />
-          <RotateCcw v-else :size="16" />
-          从备份恢复
-        </button>
-        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="rebuildIndexes">
-          <LoaderCircle v-if="maintenanceBusy === 'rebuild'" class="animate-spin" :size="16" />
-          <RefreshCw v-else :size="16" />
-          重建索引
-        </button>
-        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="openBackupDirectory">
-          <FolderOpen :size="16" />
-          打开备份目录
-        </button>
-      </div>
-
-      <div v-if="backupResult" class="data-safety-result" role="status">
-        <strong>备份已创建</strong>
-        <span :title="backupResult.backupPath">{{ backupResult.backupPath }}</span>
-        <small>SHA-256 {{ backupResult.manifest.sha256.slice(0, 16) }}… · {{ formatBytes(backupResult.manifest.fileSize) }}</small>
-      </div>
-
-      <div v-if="rebuildReport" class="data-safety-result" role="status">
-        <strong>索引维护完成</strong>
-        <span>{{ rebuildReport.reindexed ? "已重建索引" : "索引无需重建" }} · {{ rebuildReport.analyzed ? "已更新统计信息" : "未更新统计信息" }} · 完整性{{ rebuildReport.integrityOk ? "通过" : "异常" }}</span>
-        <small>SQLite {{ rebuildReport.sqliteVersion }} · {{ formatTime(rebuildReport.ranAtUtc) }}</small>
-      </div>
-
-      <div v-if="stagedRestore || startupStatus?.pendingRestore" class="data-safety-restore" role="alert">
-        <strong>恢复已暂存</strong>
-        <span v-if="stagedRestore">来源：{{ stagedRestore.sourceBackupPath }}</span>
-        <span>应用重启后将替换数据库，当前数据库会保留回滚快照；请保持应用运行直到重启完成。</span>
-        <button class="restart-action" type="button" :disabled="maintenanceBusy !== null" @click="restartApp">
-          <RotateCcw :size="16" />
-          立即重启应用
-        </button>
-      </div>
-    </section>
-
     <section class="resource-section" aria-labelledby="storage-resource-title">
       <div class="section-heading">
         <div>
@@ -634,6 +556,84 @@ onBeforeUnmount(() => {
       </div>
       <div v-else-if="storageLoading" class="loading-state"><LoaderCircle class="animate-spin" :size="20" />正在统计磁盘资源…</div>
     </section>
+
+    <section class="resource-section" aria-labelledby="data-safety-title" :aria-busy="maintenanceBusy !== null">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">数据库</span>
+          <h2 id="data-safety-title">数据安全</h2>
+          <p>备份只包含索引与元数据（项目、角色、分类、笔记、Face Bank 和设置），不包含源截图与 NAS 归档。恢复会在应用重启后执行，并保留当前数据库的回滚快照。</p>
+        </div>
+        <button class="section-action" type="button" :disabled="maintenanceBusy !== null" @click="runPreflight">
+          <LoaderCircle v-if="maintenanceBusy === 'preflight'" class="animate-spin" :size="17" />
+          <FileCheck v-else :size="17" />
+          数据体检
+        </button>
+      </div>
+
+      <p v-if="maintenanceError" class="inline-error" role="alert">数据维护操作失败：{{ maintenanceError }}</p>
+
+      <div class="data-safety-summary" role="status" aria-live="polite">
+        <template v-if="preflightReport">
+          <strong :class="preflightReport.ok ? 'ok-text' : 'warn-text'">
+            {{ preflightReport.ok ? "体检通过" : "体检发现异常" }}
+          </strong>
+          <span>SQLite {{ preflightReport.sqliteVersion }} · Schema v{{ preflightReport.schemaVersion ?? "—" }} · {{ preflightReport.journalMode }}</span>
+          <span>{{ formatBytes(preflightReport.databaseSizeBytes) }} 数据库 + {{ formatBytes(preflightReport.walSizeBytes) }} WAL</span>
+          <span v-if="preflightReport.quickCheck.length">quick_check：{{ preflightReport.quickCheck.join("；") }}</span>
+          <span v-if="preflightReport.foreignKeyIssues.length">外键问题：{{ preflightReport.foreignKeyIssues.length }} 项</span>
+          <span v-if="preflightReport.migrationIssues.length">迁移问题：{{ preflightReport.migrationIssues.length }} 项</span>
+          <small>检查时间 {{ formatTime(preflightReport.checkedAtUtc) }}</small>
+        </template>
+        <template v-else>
+          <span>尚未运行体检。体检会检查数据库完整性、外键和迁移状态，不会修改当前数据。</span>
+        </template>
+      </div>
+
+      <div class="data-safety-actions">
+        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="backupNow">
+          <LoaderCircle v-if="maintenanceBusy === 'backup'" class="animate-spin" :size="16" />
+          <Save v-else :size="16" />
+          立即备份
+        </button>
+        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="restoreFromBackup">
+          <LoaderCircle v-if="maintenanceBusy === 'restore'" class="animate-spin" :size="16" />
+          <RotateCcw v-else :size="16" />
+          从备份恢复
+        </button>
+        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="rebuildIndexes">
+          <LoaderCircle v-if="maintenanceBusy === 'rebuild'" class="animate-spin" :size="16" />
+          <RefreshCw v-else :size="16" />
+          重建索引
+        </button>
+        <button class="data-action" type="button" :disabled="maintenanceBusy !== null" @click="openBackupDirectory">
+          <FolderOpen :size="16" />
+          打开备份目录
+        </button>
+      </div>
+
+      <div v-if="backupResult" class="data-safety-result" role="status">
+        <strong>备份已创建</strong>
+        <span :title="backupResult.backupPath">{{ backupResult.backupPath }}</span>
+        <small>SHA-256 {{ backupResult.manifest.sha256.slice(0, 16) }}… · {{ formatBytes(backupResult.manifest.fileSize) }}</small>
+      </div>
+
+      <div v-if="rebuildReport" class="data-safety-result" role="status">
+        <strong>索引维护完成</strong>
+        <span>{{ rebuildReport.reindexed ? "已重建索引" : "索引无需重建" }} · {{ rebuildReport.analyzed ? "已更新统计信息" : "未更新统计信息" }} · 完整性{{ rebuildReport.integrityOk ? "通过" : "异常" }}</span>
+        <small>SQLite {{ rebuildReport.sqliteVersion }} · {{ formatTime(rebuildReport.ranAtUtc) }}</small>
+      </div>
+
+      <div v-if="stagedRestore || startupStatus?.pendingRestore" class="data-safety-restore" role="alert">
+        <strong>恢复已暂存</strong>
+        <span v-if="stagedRestore">来源：{{ stagedRestore.sourceBackupPath }}</span>
+        <span>应用重启后将替换数据库，当前数据库会保留回滚快照；请保持应用运行直到重启完成。</span>
+        <button class="restart-action" type="button" :disabled="maintenanceBusy !== null" @click="restartApp">
+          <RotateCcw :size="16" />
+          立即重启应用
+        </button>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -685,24 +685,27 @@ onBeforeUnmount(() => {
 .icon-only,
 .data-action,
 .restart-action {
+  box-sizing: border-box;
   display: inline-flex;
+  height: 38px;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 36px;
+  padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--background);
   color: var(--foreground);
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.section-action { flex: none; padding: 0 12px; white-space: nowrap; }
-.icon-only { width: 36px; padding: 0; }
-.cleanup-action { padding: 0 11px; color: var(--destructive); }
-.data-action,
-.restart-action { padding: 0 11px; }
+.section-action { flex: none; }
+.icon-only { width: 38px; padding: 0; }
+.cleanup-action { color: var(--destructive); }
 .section-action:hover,
 .icon-only:hover,
 .data-action:hover,
@@ -794,9 +797,13 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .warn-text { color: var(--destructive); }
 
 .data-safety-actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+}
+
+.data-safety-actions .data-action {
+  width: 100%;
 }
 
 .data-safety-result,
@@ -875,5 +882,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .storage-actions { grid-column: 1 / -1; justify-content: flex-end; }
   .log-policy-fields { grid-template-columns: 1fr; }
   .log-policy-heading { flex-direction: column; }
+}
+
+@media (max-width: 720px) {
+  .data-safety-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>

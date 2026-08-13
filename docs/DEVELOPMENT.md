@@ -117,6 +117,8 @@ ArcFace 是可选识别器，用户需自行提供兼容的 ONNX 权重；项目
 - **发版**：`.\scriptselease-windows.ps1 -BumpVersion 1.1.0 -CreateTag` —— 升
   版本号（此处升 minor）、本地构建双包、成功后创建 `v1.1.0` 注解标签；也可以用
   `-Version 1.1.0` 只校验不升文件。
+- **发布脚本冒烟**：运行 `release-windows.ps1 -Version 1.0.5 -SmokeTest`，只校验四处
+  版本一致性和陈旧安装包清理，不构建、不下载、不创建标签；把版本替换为当前版本。
 - **发布**：推送 `v*` 标签到 GitHub 即触发 Actions 构建双包挂 Release，CI 从标签名
   读取版本号；patch 自动累加不会触发任何发布。
 

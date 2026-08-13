@@ -759,6 +759,39 @@ describe("Workbench", () => {
     ]);
   });
 
+  it("clears the previous selection before loading another item page", async () => {
+    const pageTwoItem = {
+      ...item,
+      id: "item-2",
+      sourcePath: "C:\\shots\\two.png",
+    };
+    let resolvePageTwo!: (value: ReturnType<typeof paged>) => void;
+    const pageTwoResponse = new Promise<ReturnType<typeof paged>>((resolve) => {
+      resolvePageTwo = resolve;
+    });
+    api.listCharacterCaptureItemsPage
+      .mockResolvedValueOnce(paged([item], 101, 1, 100))
+      .mockReturnValueOnce(pageTwoResponse);
+
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    await wrapper.find(".workbench-cell").trigger("click");
+    expect(wrapper.find(".workbench-detail").exists()).toBe(true);
+
+    await wrapper.find('button[aria-label="下一页"]').trigger("click");
+    expect(wrapper.findAll(".workbench-cell.selected")).toHaveLength(0);
+
+    resolvePageTwo(paged([pageTwoItem], 101, 2, 100));
+    await flushPromises();
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenLastCalledWith({
+      projectId: "project-1",
+      characterId: "character-1",
+      page: 2,
+      pageSize: 100,
+    });
+    expect(wrapper.find(".workbench-cell-name").text()).toBe("two.png");
+  });
+
   it("explains a detected but low-quality face in Chinese and marks the card", async () => {
     api.listCharacterCaptureItemsPage.mockResolvedValue(paged([{
       ...item,

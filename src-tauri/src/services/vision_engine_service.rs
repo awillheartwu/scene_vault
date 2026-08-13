@@ -315,7 +315,12 @@ fn processing_payload(
         }
         payload["crop"] = Value::Object(object);
     }
-    payload["annotate"] = json!(processing.annotate_person.unwrap_or(true));
+    // Feature-only callers explicitly disable annotation because they do not
+    // provide an annotated output path. Only apply the user-facing processing
+    // preference when the caller has not already selected a request mode.
+    if payload.get("annotate").is_none() {
+        payload["annotate"] = json!(processing.annotate_person.unwrap_or(true));
+    }
     payload
 }
 
@@ -911,6 +916,27 @@ mod tests {
 
         let unset = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
         assert_eq!(unset["annotate"], true);
+    }
+
+    #[test]
+    fn processing_payload_preserves_feature_only_annotation_override() {
+        let settings = VisionSettings::default();
+        let payload = processing_payload(
+            &settings,
+            &ProcessingSettings {
+                annotate_person: Some(true),
+                ..Default::default()
+            },
+            json!({
+                "annotatedOutputPath": Value::Null,
+                "annotate": false,
+                "cropAvatar": false
+            }),
+        );
+
+        assert_eq!(payload["annotate"], false);
+        assert!(payload["annotatedOutputPath"].is_null());
+        assert_eq!(payload["cropAvatar"], false);
     }
 
     #[test]

@@ -99,6 +99,75 @@ async fn open_and_prepare_database(
     Ok((pool, recovered))
 }
 
+type DatabaseStartupResult = (sqlx::SqlitePool, u64, Option<String>, bool);
+
+/// Applies a staged restore before opening the live pool, then runs migrations
+/// and preflight. If the restored database cannot be prepared, the pre-restore
+/// snapshot is put back and opened once more. Keeping this orchestration out of
+/// the Tauri setup closure makes the startup ordering directly testable.
+async fn initialize_database_startup(
+    database_path: &std::path::Path,
+    backup_directory: &std::path::Path,
+    recovery_directory: &std::path::Path,
+    latest_schema_version: i64,
+) -> Result<DatabaseStartupResult, error::AppError> {
+    let maintenance = DataMaintenanceService::new(
+        database_path.to_path_buf(),
+        env!("CARGO_PKG_VERSION"),
+        latest_schema_version,
+    );
+    let mut restore_was_applied = false;
+    if maintenance.has_pending_restore(recovery_directory).await {
+        match maintenance.apply_pending_restore(recovery_directory).await {
+            Ok(_) => restore_was_applied = true,
+            Err(error) => services::log_service::error(
+                "data.maintenance",
+                format!("staged database restore failed: {error}"),
+            ),
+        }
+    }
+
+    match open_and_prepare_database(database_path, backup_directory).await {
+        Ok((pool, recovered)) => {
+            if restore_was_applied {
+                maintenance
+                    .discard_pre_restore_snapshot(recovery_directory)
+                    .await?;
+            }
+            Ok((pool, recovered, None, restore_was_applied))
+        }
+        Err(restore_error) if restore_was_applied => {
+            maintenance.rollback_restore(recovery_directory).await?;
+            match open_and_prepare_database(database_path, backup_directory).await {
+                Ok((pool, recovered)) => {
+                    services::log_service::error(
+                        "data.maintenance",
+                        format!(
+                            "restored database was rejected; previous database recovered: {restore_error}"
+                        ),
+                    );
+                    Ok((pool, recovered, None, false))
+                }
+                Err(rollback_error) => {
+                    let fallback = db::recovery_pool().await?;
+                    Ok((
+                        fallback,
+                        0,
+                        Some(format!(
+                            "restored database failed ({restore_error}); previous database could not reopen ({rollback_error})"
+                        )),
+                        false,
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            let fallback = db::recovery_pool().await?;
+            Ok((fallback, 0, Some(error.to_string()), false))
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -139,65 +208,12 @@ pub fn run() {
             std::fs::create_dir_all(&backup_directory)?;
             std::fs::create_dir_all(&recovery_directory)?;
             let latest_schema_version = db::latest_schema_version();
-            let startup = tauri::async_runtime::block_on(async {
-                let maintenance = DataMaintenanceService::new(
-                    database_path.clone(),
-                    env!("CARGO_PKG_VERSION"),
-                    latest_schema_version,
-                );
-                let mut restored_on_startup = false;
-                let mut restore_was_applied = false;
-                if maintenance.has_pending_restore(&recovery_directory).await {
-                    match maintenance.apply_pending_restore(&recovery_directory).await {
-                        Ok(_) => restore_was_applied = true,
-                        Err(error) => services::log_service::error(
-                            "data.maintenance",
-                            format!("staged database restore failed: {error}"),
-                        ),
-                    }
-                }
-
-                match open_and_prepare_database(&database_path, &backup_directory).await {
-                    Ok((pool, recovered)) => {
-                        if restore_was_applied {
-                            maintenance
-                                .discard_pre_restore_snapshot(&recovery_directory)
-                                .await?;
-                            restored_on_startup = true;
-                        }
-                        Ok::<_, error::AppError>((pool, recovered, None, restored_on_startup))
-                    }
-                    Err(restore_error) if restore_was_applied => {
-                        maintenance.rollback_restore(&recovery_directory).await?;
-                        match open_and_prepare_database(&database_path, &backup_directory).await {
-                            Ok((pool, recovered)) => {
-                                services::log_service::error(
-                                    "data.maintenance",
-                                    format!(
-                                        "restored database was rejected; previous database recovered: {restore_error}"
-                                    ),
-                                );
-                                Ok((pool, recovered, None, false))
-                            }
-                            Err(rollback_error) => {
-                                let fallback = db::recovery_pool().await?;
-                                Ok((
-                                    fallback,
-                                    0,
-                                    Some(format!(
-                                        "restored database failed ({restore_error}); previous database could not reopen ({rollback_error})"
-                                    )),
-                                    false,
-                                ))
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let fallback = db::recovery_pool().await?;
-                        Ok((fallback, 0, Some(error.to_string()), false))
-                    }
-                }
-            })?;
+            let startup = tauri::async_runtime::block_on(initialize_database_startup(
+                &database_path,
+                &backup_directory,
+                &recovery_directory,
+                latest_schema_version,
+            ))?;
             let (pool, recovered_items, database_error, restored_on_startup) = startup;
             let normal_mode = database_error.is_none();
             app.manage(AppState { pool: pool.clone() });
@@ -213,7 +229,9 @@ pub fn run() {
                     "data.maintenance",
                     format!(
                         "database unavailable; entering recovery mode: {}",
-                        database_error.as_deref().unwrap_or("unknown database error")
+                        database_error
+                            .as_deref()
+                            .unwrap_or("unknown database error")
                     ),
                 );
                 return Ok(());
@@ -395,4 +413,137 @@ pub fn run() {
             tauri::async_runtime::block_on(services::vision_worker_service::shutdown());
         }
     });
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    async fn create_probe_database(path: &std::path::Path, value: &str) {
+        let pool = db::connect(path, true)
+            .await
+            .expect("connect probe database");
+        db::migrate(&pool).await.expect("migrate probe database");
+        sqlx::query("CREATE TABLE startup_probe (value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create startup probe");
+        sqlx::query("INSERT INTO startup_probe (value) VALUES (?)")
+            .bind(value)
+            .execute(&pool)
+            .await
+            .expect("seed startup probe");
+        pool.close().await;
+    }
+
+    async fn probe_value(pool: &sqlx::SqlitePool) -> String {
+        sqlx::query_scalar("SELECT value FROM startup_probe")
+            .fetch_one(pool)
+            .await
+            .expect("read startup probe")
+    }
+
+    async fn stage_database(
+        live_path: &std::path::Path,
+        source_path: &std::path::Path,
+        workspace: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let backups = workspace.join("source-backups");
+        let recovery = workspace.join("recovery");
+        tokio::fs::create_dir_all(&backups)
+            .await
+            .expect("create backups");
+        tokio::fs::create_dir_all(&recovery)
+            .await
+            .expect("create recovery");
+        let source = DataMaintenanceService::new(
+            source_path.to_path_buf(),
+            env!("CARGO_PKG_VERSION"),
+            db::latest_schema_version(),
+        );
+        source
+            .create_backup(&backups)
+            .await
+            .expect("create source backup");
+        let mut entries = tokio::fs::read_dir(&backups).await.expect("read backups");
+        let mut backup = None;
+        while let Some(entry) = entries.next_entry().await.expect("read backup entry") {
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "sqlite")
+            {
+                backup = Some(entry.path());
+                break;
+            }
+        }
+        DataMaintenanceService::new(
+            live_path.to_path_buf(),
+            env!("CARGO_PKG_VERSION"),
+            db::latest_schema_version(),
+        )
+        .stage_restore(backup.expect("backup file"), &recovery)
+        .await
+        .expect("stage source backup");
+        recovery
+    }
+
+    #[tokio::test]
+    async fn startup_applies_pending_restore_before_opening_the_live_pool() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let live_path = workspace.path().join("live.db");
+        let source_path = workspace.path().join("source.db");
+        let startup_backups = workspace.path().join("startup-backups");
+        create_probe_database(&live_path, "old").await;
+        create_probe_database(&source_path, "restored").await;
+        let recovery = stage_database(&live_path, &source_path, workspace.path()).await;
+
+        let (pool, _, error, restored) = initialize_database_startup(
+            &live_path,
+            &startup_backups,
+            &recovery,
+            db::latest_schema_version(),
+        )
+        .await
+        .expect("initialize restored database");
+
+        assert!(error.is_none());
+        assert!(restored);
+        assert_eq!(probe_value(&pool).await, "restored");
+        assert!(!recovery
+            .join(models::data_maintenance::PRE_RESTORE_FILE)
+            .exists());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn startup_rolls_back_when_restored_database_fails_migration_validation() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let live_path = workspace.path().join("live.db");
+        let source_path = workspace.path().join("source.db");
+        let startup_backups = workspace.path().join("startup-backups");
+        create_probe_database(&live_path, "old").await;
+        create_probe_database(&source_path, "rejected").await;
+        let source_pool = db::connect(&source_path, false).await.expect("open source");
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'01' WHERE version = 1")
+            .execute(&source_pool)
+            .await
+            .expect("make migration checksum incompatible");
+        source_pool.close().await;
+        let recovery = stage_database(&live_path, &source_path, workspace.path()).await;
+
+        let (pool, _, error, restored) = initialize_database_startup(
+            &live_path,
+            &startup_backups,
+            &recovery,
+            db::latest_schema_version(),
+        )
+        .await
+        .expect("initialize rolled-back database");
+
+        assert!(error.is_none());
+        assert!(!restored);
+        assert_eq!(probe_value(&pool).await, "old");
+        pool.close().await;
+    }
 }
