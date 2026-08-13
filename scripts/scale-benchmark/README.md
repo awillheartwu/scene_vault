@@ -98,7 +98,8 @@ JSON 报告同时输出到 stdout；退出码 0 表示全部门禁通过，1 表
 - `src-tauri/migrations/`（schema）
 - `docs/ROADMAP.md` M6、`docs/RESOURCE_USAGE.md`（口径）
 
-报告模板见
+JSON 结构示例见
 [docs/benchmarks/scale-1.0-report.example.json](../../docs/benchmarks/scale-1.0-report.example.json)
-（示例包含全部门禁指标与代表性只读指标；完整运行输出含所有指标及
+（`"example": true`，数值仅用于展示字段，不能作为性能验收证据；完整运行输出含所有指标及
 `startup_quick_check_ms`、`history_count_ms`、`face_bank_verify_ms` 等明细）。
+正式运行时应保留带日期的输出文件、原始环境信息和 `example: false`。

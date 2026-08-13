@@ -73,9 +73,9 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
 - [ ] macOS / Linux 可行性与打包验证
 - [x] 1.0 规模守门：单项目 10,000 张截图、10,000 文件来源目录和 100 个角色的启动、
   查询、监听与 Face Bank 性能基线，12 项门禁实测全部通过；工具与阈值见
-  [scripts/scale-benchmark](../scripts/scale-benchmark/README.md)，结果见
-  [scale-1.0-report.example.json](benchmarks/scale-1.0-report.example.json)；缩略图
-  压力并入“10 万级素材库性能与存储压力测试”
+  [scripts/scale-benchmark](../scripts/scale-benchmark/README.md)。仓库中的
+  [报告示例](benchmarks/scale-1.0-report.example.json)只用于说明 JSON 输出结构，
+  不是一次实测记录；缩略图压力并入“10 万级素材库性能与存储压力测试”
 - [ ] 10 万级素材库性能与存储压力测试（1.0 后）
 - [ ] 完全无网络的全新机器离线安装支持（捆绑 WebView2 离线安装包；1.0 后，1.0
   接受依赖系统预装 WebView2，验收清单注明）

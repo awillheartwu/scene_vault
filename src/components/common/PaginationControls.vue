@@ -96,12 +96,14 @@ function go(page: number) {
 
 <style scoped>
 .pagination {
+  box-sizing: border-box;
   display: flex;
+  width: 100%;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 12px 0 2px;
+  padding: 16px 18px 14px;
 }
 
 .pagination-total {

@@ -175,9 +175,9 @@ describe("ResourceStoragePanel lifecycle", () => {
     expect(actions).toHaveLength(4);
     expect(actions.map((button) => button.text())).toEqual([
       "刷新",
-      "数据体检",
       "重新扫描",
       "保存策略",
+      "数据体检",
     ]);
     expect(wrapper.findAll("button.icon-action")).toHaveLength(0);
     expect(wrapper.text()).toContain("Python AI Worker");

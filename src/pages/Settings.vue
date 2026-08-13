@@ -905,8 +905,8 @@ onBeforeUnmount(() => {
       </div>
       <div class="settings-field toggle-row">
         <div class="toggle-text">
-          <label for="annotate-person">显式标注人物</label>
-          <p>关闭后识别、脸向量入库与人物建议照常进行，但不再生成带名字的标注图；人物截图在归档时按角色命名直接保存原图（不产生「人物图」副本）。</p>
+          <label for="annotate-person">生成人物标注图</label>
+          <p>关闭后仍会识别并给出人物建议，但归档原图，不再生成带名字的标注图。</p>
         </div>
         <label class="toggle">
           <input id="annotate-person" v-model="annotatePerson" type="checkbox" />

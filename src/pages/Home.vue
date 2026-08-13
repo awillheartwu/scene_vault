@@ -374,7 +374,12 @@ function setupLabel(project: ProjectOverviewSummary): string {
       <button type="button" class="secondary-action" @click="search = ''">清空搜索</button>
     </div>
 
-    <div v-else-if="viewMode === 'grid'" class="project-grid" aria-label="项目网格">
+    <div
+      v-else-if="viewMode === 'grid'"
+      class="project-grid"
+      :class="`project-grid-${Math.min(pagedProjects.length, 3)}`"
+      aria-label="项目网格"
+    >
       <article
         v-for="project in pagedProjects"
         :key="project.projectId"
@@ -393,6 +398,7 @@ function setupLabel(project: ProjectOverviewSummary): string {
               :item="thumbnailItem((project.coverCaptureItemId ?? project.latestCaptureItemId)!)"
               variant="source"
               fallback-variant="destination"
+              size="auto"
               :alt="`${project.name} ${project.coverCaptureItemId ? '项目封面' : '最近截图'}`"
             />
             <div v-else class="project-cover-empty">
@@ -810,9 +816,15 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .project-grid {
   display: grid;
   width: 100%;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
 }
+
+.project-grid-1 {
+  grid-template-columns: minmax(0, 880px);
+  justify-content: start;
+}
+.project-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .project-card {
   min-width: 0;
@@ -841,11 +853,14 @@ function setupLabel(project: ProjectOverviewSummary): string {
 
 .project-cover {
   position: relative;
-  height: 158px;
+  aspect-ratio: 4 / 3;
   overflow: hidden;
   border-bottom: 1px solid var(--border);
   background: var(--background);
 }
+
+.project-grid-1 .project-cover,
+.project-grid-2 .project-cover { aspect-ratio: 16 / 9; }
 
 .project-cover :deep(img) { transition: transform .28s ease, filter .28s ease; }
 .project-card:hover .project-cover :deep(img) { transform: scale(1.025); filter: brightness(1.04); }
@@ -991,10 +1006,17 @@ function setupLabel(project: ProjectOverviewSummary): string {
 }
 
 @media (max-width: 1120px) {
-  .project-grid { grid-template-columns: 1fr; }
+  .project-grid,
+  .project-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .project-grid-1 { grid-template-columns: minmax(0, 880px); }
   .project-toolbar { position: sticky; z-index: 10; top: -1px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--background) 92%, transparent); backdrop-filter: var(--panel-blur); }
   .project-search { max-width: none; flex-basis: calc(100% - 320px); }
-  .project-cover { height: 132px; }
+  .project-cover { aspect-ratio: 16 / 9; }
+}
+
+@media (max-width: 560px) {
+  .project-grid { grid-template-columns: minmax(0, 1fr); }
+  .project-grid-1 { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {
