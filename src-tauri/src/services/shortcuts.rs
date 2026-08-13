@@ -209,6 +209,15 @@ fn show_workbench_window(app: &AppHandle, label: &str, title: &str, width: f64, 
             format!("refresh event failed for {label}: {error}"),
         );
     }
+    // Popup windows are hidden rather than destroyed. Refresh the note every
+    // time either shortcut raises the shared/split workbench so a project
+    // selected after the popup's first mount replaces the stale empty state.
+    if let Err(error) = window.emit("note:refresh", ()) {
+        log_service::warn(
+            "shortcut.window",
+            format!("note refresh event failed for {label}: {error}"),
+        );
+    }
     if let Err(error) = window.emit("popup:configure", ()) {
         log_service::warn(
             "shortcut.window",

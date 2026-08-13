@@ -43,11 +43,14 @@ async function syncPane() {
 
 async function syncProjectTitle() {
   const projectId = localStorage.getItem("scene-vault.capture.project");
-  if (!projectId) return;
+  if (!projectId) {
+    projectTitle.value = "截图分类 · 快速笔记";
+    return;
+  }
   try {
     const projects = await captureApi.listProjects();
     const project = projects.find((value) => value.id === projectId);
-    if (project) projectTitle.value = project.name;
+    projectTitle.value = project?.name ?? "截图分类 · 快速笔记";
   } catch {
     // Keep the default subtitle when the bridge is unavailable.
   }
@@ -112,7 +115,10 @@ onMounted(async () => {
   await syncPane();
   void syncProjectTitle();
   try {
-    unlisteners.push(await listen("popup:configure", () => void syncPane()));
+    unlisteners.push(
+      await listen("popup:configure", () => void syncPane()),
+      await listen("note:refresh", () => void syncProjectTitle()),
+    );
   } catch {
     // Event bridge unavailable in browser previews.
   }
