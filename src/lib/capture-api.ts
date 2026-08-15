@@ -504,7 +504,7 @@ export interface AppSettings {
   splitPopupWindows: boolean;
   autoCloseEmptyPopup: boolean;
   thumbnailCacheSizeMb: number;
-  thumbnailGenerationConcurrency: number;
+  imageProcessingCoreLimit: number;
 }
 
 export interface ThumbnailCacheStatus {

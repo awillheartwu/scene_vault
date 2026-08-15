@@ -1513,6 +1513,131 @@ async fn awaiting_label_feature_pass_picks_each_item_once() {
 }
 
 #[tokio::test]
+async fn purge_capture_item_removes_row_and_related_faces() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, source) = session_with_source(&pool, &proj.id).await;
+    let screenshot = source.join("capture.png");
+    tokio::fs::write(&screenshot, b"source")
+        .await
+        .expect("screenshot");
+    let item = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id,
+            source_path: path_to_string(&screenshot),
+        },
+    )
+    .await
+    .expect("register");
+    // Give the item a face row so cascade deletion is exercised.
+    store_face_feature(
+        &pool,
+        &item.id,
+        FaceFeatureWrite {
+            feature_json: Some("[]".to_owned()),
+            face_box_json: None,
+            model_id: None,
+            model_version: None,
+            face_count: None,
+            face_sharpness: None,
+            face_area_ratio: None,
+        },
+    )
+    .await
+    .expect("store marker");
+
+    let removed = purge_capture_item(&pool, &item.id, &item.status)
+        .await
+        .expect("purge");
+    assert!(removed, "first purge removes the row");
+    let face_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM capture_faces WHERE capture_item_id = ?",
+    )
+    .bind(&item.id)
+    .fetch_one(&pool)
+    .await
+    .expect("face count");
+    assert_eq!(face_count, 0, "face rows cascade with the capture");
+
+    let again = purge_capture_item(&pool, &item.id, &item.status)
+        .await
+        .expect("purge again");
+    assert!(!again, "second purge removes nothing");
+    let _ = workspace;
+}
+
+#[tokio::test]
+async fn purge_capture_item_rejects_archived_or_state_changed_rows() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, source) = session_with_source(&pool, &proj.id).await;
+
+    let archived_path = source.join("archived.png");
+    tokio::fs::write(&archived_path, b"archived source")
+        .await
+        .expect("archived source");
+    let archived = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id.clone(),
+            source_path: path_to_string(&archived_path),
+        },
+    )
+    .await
+    .expect("register archived item");
+    sqlx::query(
+        "UPDATE capture_items SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+    )
+    .bind(&archived.id)
+    .execute(&pool)
+    .await
+    .expect("mark archived");
+    assert!(
+        !purge_capture_item(&pool, &archived.id, &archived.status)
+            .await
+            .expect("protect archived"),
+        "an archived row must never be purged"
+    );
+    get_item(&pool, &archived.id)
+        .await
+        .expect("archived row remains");
+
+    let claimed_path = source.join("claimed.png");
+    tokio::fs::write(&claimed_path, b"claimed source")
+        .await
+        .expect("claimed source");
+    let claimed = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id,
+            source_path: path_to_string(&claimed_path),
+        },
+    )
+    .await
+    .expect("register claimed item");
+    sqlx::query("UPDATE capture_items SET status = 'processing' WHERE id = ?")
+        .bind(&claimed.id)
+        .execute(&pool)
+        .await
+        .expect("claim item");
+    assert!(
+        !purge_capture_item(&pool, &claimed.id, &claimed.status)
+            .await
+            .expect("protect changed state"),
+        "a row that changed state after selection must not be purged"
+    );
+    assert_eq!(
+        get_item(&pool, &claimed.id)
+            .await
+            .expect("claimed row remains")
+            .status,
+        "processing"
+    );
+    let _ = workspace;
+}
+
+#[tokio::test]
 async fn batch_retry_requeues_degraded_captures_all_and_per_character() {
     let pool = db::test_pool().await;
     let proj = project(&pool).await;

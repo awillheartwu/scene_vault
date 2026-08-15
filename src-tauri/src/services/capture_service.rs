@@ -2554,7 +2554,7 @@ pub(crate) async fn sync_session_source_directories(
     Ok(())
 }
 
-async fn sha256_file(path: &Path) -> Result<String, AppError> {
+pub(crate) async fn sha256_file(path: &Path) -> Result<String, AppError> {
     let bytes = tokio::fs::read(path).await?;
     tokio::task::spawn_blocking(move || {
         use sha2::{Digest, Sha256};
@@ -2564,6 +2564,31 @@ async fn sha256_file(path: &Path) -> Result<String, AppError> {
     })
     .await
     .map_err(|error| AppError::Io(std::io::Error::other(error.to_string())))
+}
+
+/// Deletes an unarchived capture completely, as if it never existed, only
+/// while it remains in the state observed by the caller. The predicates are
+/// part of the DELETE so a concurrent claim or archive cannot be removed
+/// using a stale snapshot. Related face rows and face-bank samples cascade
+/// through foreign keys.
+pub(crate) async fn purge_capture_item(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    expected_status: &str,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM capture_items
+        WHERE id = ?
+          AND archived_at IS NULL
+          AND status = ?
+        "#,
+    )
+    .bind(capture_item_id)
+    .bind(expected_status)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 async fn canonical_capture_path(

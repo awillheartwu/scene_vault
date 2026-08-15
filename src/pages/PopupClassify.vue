@@ -437,6 +437,17 @@ onMounted(async () => {
           void loadPreview();
         }
       }),
+      await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
+        const purgedId = event.payload.captureItemId;
+        if (!ctx.value) return;
+        removeItem(purgedId);
+        if (!ctx.value.items.length) {
+          finishAll();
+        } else {
+          resetSelection();
+          void loadPreview();
+        }
+      }),
       await listen("capture:item-created", () => {
         // A new screenshot arrived (Rust discovery event, push-based): make it
         // appear in the open popup immediately.

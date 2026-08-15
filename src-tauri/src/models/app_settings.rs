@@ -29,10 +29,11 @@ pub struct AppSettings {
     /// evicted once the directory exceeds this size.
     #[serde(default = "default_thumbnail_cache_size_mb")]
     pub thumbnail_cache_size_mb: i64,
-    /// How many thumbnail decoding tasks may run at once. Each task uses one
-    /// CPU core while decoding, so this caps the first-load CPU spike.
-    #[serde(default = "default_thumbnail_generation_concurrency")]
-    pub thumbnail_generation_concurrency: u32,
+    /// Maximum worker threads exposed to CPU-heavy image processing
+    /// libraries. Capture jobs remain serial; this limits the parallelism
+    /// used inside one OpenCV/YuNet/SFace/ArcFace request.
+    #[serde(default = "default_image_processing_core_limit")]
+    pub image_processing_core_limit: u32,
 }
 
 impl Default for AppSettings {
@@ -45,7 +46,7 @@ impl Default for AppSettings {
             split_popup_windows: false,
             auto_close_empty_popup: false,
             thumbnail_cache_size_mb: default_thumbnail_cache_size_mb(),
-            thumbnail_generation_concurrency: default_thumbnail_generation_concurrency(),
+            image_processing_core_limit: default_image_processing_core_limit(),
         }
     }
 }
@@ -54,8 +55,8 @@ fn default_thumbnail_cache_size_mb() -> i64 {
     256
 }
 
-fn default_thumbnail_generation_concurrency() -> u32 {
-    1
+fn default_image_processing_core_limit() -> u32 {
+    4
 }
 
 fn default_classify_shortcut() -> String {

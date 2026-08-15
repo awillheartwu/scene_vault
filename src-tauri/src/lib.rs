@@ -262,6 +262,9 @@ pub fn run() {
                 let app_settings =
                     tauri::async_runtime::block_on(services::app_settings_service::get(&pool))?;
                 services::shortcuts::register(app.handle(), &app_settings)?;
+                services::vision_worker_service::set_image_processing_core_limit(
+                    app_settings.image_processing_core_limit,
+                );
             }
             {
                 // Caches live in the Local app directory; earlier builds kept

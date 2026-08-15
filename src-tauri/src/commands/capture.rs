@@ -90,11 +90,12 @@ pub async fn list_capture_history(
 
 #[tauri::command]
 pub async fn discover_captures(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: DiscoverCapturesInput,
 ) -> Result<DiscoverCapturesResult, AppError> {
     let session_id = input.session_id.clone();
-    let result = capture_discovery_service::discover(&state.pool, input).await?;
+    let result = capture_discovery_service::discover(&state.pool, Some(&app), input).await?;
     log_service::record_event(LogRecord {
         level: LogLevel::Info,
         module: "capture.discovery".to_owned(),
@@ -287,7 +288,6 @@ pub async fn read_capture_thumbnail(
     let path = capture_service::image_path(&item, variant)?;
     let cache_root = app.path().app_local_data_dir()?;
     let settings = crate::services::app_settings_service::get(&state.pool).await?;
-    thumbnail_service::set_generation_limit(settings.thumbnail_generation_concurrency);
     let limit_bytes = (settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024);
     let bytes =
         thumbnail_service::read_thumbnail(&cache_root, &item.id, variant, &path, limit_bytes)

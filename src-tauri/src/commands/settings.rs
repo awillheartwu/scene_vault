@@ -13,6 +13,7 @@ use crate::{
     services::{
         app_settings_service, archive_naming_settings_service, log_service,
         processing_settings_service, recognition_settings_service, shortcuts,
+        vision_worker_service,
     },
 };
 
@@ -29,6 +30,7 @@ pub async fn update_app_settings(
 ) -> Result<AppSettings, AppError> {
     let previous = app_settings_service::get(&state.pool).await?;
     let saved = app_settings_service::update(&state.pool, input).await?;
+    vision_worker_service::set_image_processing_core_limit(saved.image_processing_core_limit);
     shortcuts::reconfigure(&app, &previous, &saved)?;
     settings_event("app_settings_updated");
     Ok(saved)

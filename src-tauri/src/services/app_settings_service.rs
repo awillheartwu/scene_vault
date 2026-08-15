@@ -6,6 +6,8 @@ use crate::{
 };
 
 const SETTINGS_KEY: &str = "app.general";
+const MIN_IMAGE_PROCESSING_CORE_LIMIT: u32 = 1;
+const MAX_IMAGE_PROCESSING_CORE_LIMIT: u32 = 32;
 
 pub async fn get(pool: &SqlitePool) -> Result<AppSettings, AppError> {
     let value: Option<String> = sqlx::query_scalar("SELECT value_json FROM settings WHERE key = ?")
@@ -50,10 +52,10 @@ fn normalize(mut settings: AppSettings) -> Result<AppSettings, AppError> {
     settings.classify_shortcut = normalize_shortcut(&settings.classify_shortcut, "classify")?;
     settings.note_shortcut = normalize_shortcut(&settings.note_shortcut, "note")?;
     settings.thumbnail_cache_size_mb = settings.thumbnail_cache_size_mb.clamp(32, 4096);
-    // Thumbnail decoding is intentionally serial. Lazy viewport loading keeps
-    // the queue small, and one decoder prevents large imported screenshots
-    // from creating another CPU/memory spike.
-    settings.thumbnail_generation_concurrency = 1;
+    settings.image_processing_core_limit = settings.image_processing_core_limit.clamp(
+        MIN_IMAGE_PROCESSING_CORE_LIMIT,
+        MAX_IMAGE_PROCESSING_CORE_LIMIT,
+    );
     Ok(settings)
 }
 
@@ -115,22 +117,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forces_serial_thumbnail_generation() {
+    async fn clamps_image_processing_core_limit() {
         let pool = db::test_pool().await;
         let settings = AppSettings {
-            thumbnail_generation_concurrency: 16,
+            image_processing_core_limit: 128,
             ..AppSettings::default()
         };
         let saved = update(&pool, UpdateAppSettingsInput { settings })
             .await
-            .expect("save capped settings");
-        assert_eq!(saved.thumbnail_generation_concurrency, 1);
+            .expect("save clamped settings");
+        assert_eq!(saved.image_processing_core_limit, 32);
         assert_eq!(
             get(&pool)
                 .await
-                .expect("read capped settings")
-                .thumbnail_generation_concurrency,
-            1
+                .expect("read clamped settings")
+                .image_processing_core_limit,
+            32
+        );
+    }
+
+    #[tokio::test]
+    async fn old_settings_without_processing_limit_use_safe_default() {
+        let pool = db::test_pool().await;
+        sqlx::query("INSERT INTO settings (key, value_json) VALUES (?, ?)")
+            .bind(SETTINGS_KEY)
+            .bind(r#"{"classifyShortcut":"Ctrl+Shift+S","thumbnailGenerationConcurrency":1}"#)
+            .execute(&pool)
+            .await
+            .expect("store legacy settings");
+
+        assert_eq!(
+            get(&pool)
+                .await
+                .expect("read legacy settings")
+                .image_processing_core_limit,
+            4
         );
     }
 }

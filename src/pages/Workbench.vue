@@ -950,6 +950,9 @@ async function registerWorkbenchListeners() {
     listen("capture:item-updated", () => {
       if (initialized) void loadCharacterData();
     }),
+    listen("capture:item-purged", () => {
+      if (initialized) void loadCharacterData();
+    }),
     listen("capture:face-bank-rebuilt", () => {
       // A rebuild refreshed features and suggestions for many items; the
       // completion event is the only signal, so reload the whole view.

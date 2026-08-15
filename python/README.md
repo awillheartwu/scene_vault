@@ -77,7 +77,10 @@ SFace / ArcFace 特征的 `faceFeatureModelVersion` 会附带模型文件 SHA-25
 诊断或 A/B 验收时，可在启动 Scene Vault 前设置
 `SCENE_VAULT_VISION_MODE=oneshot` 强制一次性模式；`worker` 或未设置保持默认常驻模式。
 无效值会记录警告并安全回退到 worker。该环境变量只改变 Python 调用生命周期，不改变
-任务触发、串行顺序或失败恢复状态机。可复现的模型加载、推理、内存和崩溃重启基准使用：
+任务触发、串行顺序或失败恢复状态机。桌面端会根据通用设置自动写入
+`SCENE_VAULT_IMAGE_PROCESSING_THREADS`，限制 OpenCV 和数值计算库的图片处理线程数；
+直接运行 Python 模块时也可手动设置该变量（有效范围 1–32，默认 4）。可复现的模型加载、
+推理、内存和崩溃重启基准使用：
 
 ```powershell
 python\.venv\Scripts\python.exe python\tools\benchmark_worker.py `

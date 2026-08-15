@@ -21,12 +21,30 @@ use crate::{
 };
 
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// A source image that fails to decode or read this many times is treated as
+/// permanently unusable by the pre-label pass (still retried as transient
+/// before the budget is exhausted).
+const MAX_PRELABEL_RETRY_ATTEMPTS: u32 = 3;
+/// Upper bound of unarchived captures checked per missing-source sweep.
+const MISSING_SOURCE_SWEEP_LIMIT: u32 = 200;
 
 pub async fn run(pool: SqlitePool, app: AppHandle, cache_root: PathBuf) {
     let mut interval = tokio::time::interval(WORKER_POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cycle = 0_u32;
     loop {
         interval.tick().await;
+        cycle = cycle.wrapping_add(1);
+        // Every ~2 seconds, sweep unarchived captures whose source file was
+        // deleted before archive and remove them as if they never appeared.
+        if cycle.is_multiple_of(4) {
+            if let Err(error) = sweep_missing_sources(&pool, &app).await {
+                log_service::error(
+                    "capture.worker",
+                    format!("missing-source sweep failed: {error}"),
+                );
+            }
+        }
         if let Err(error) = process_once(&pool, &app, &cache_root).await {
             log_service::record_event(LogRecord {
                 level: LogLevel::Error,
@@ -79,6 +97,24 @@ pub async fn process_once(
     let Some(item) = capture_service::claim_next_queued(pool, false).await? else {
         return Ok(());
     };
+    // The source may have been deleted while the capture sat in the queue;
+    // an unarchived capture with no usable source is removed entirely so it
+    // never lingers in the recent list or retry paths. A same-named file
+    // discovered later registers as a brand-new capture.
+    match tokio::fs::metadata(&item.source_path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            purge_capture_and_emit(app, pool, &item, "source_missing").await?;
+            emit_runtime(pool, app).await?;
+            return Ok(());
+        }
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
+            purge_capture_and_emit(app, pool, &item, "source_missing").await?;
+            emit_runtime(pool, app).await?;
+            return Ok(());
+        }
+        Err(_) => {}
+    }
     emit_item(app, &item);
     capture_log(
         &item,
@@ -195,7 +231,78 @@ async fn process_awaiting_label_feature(
     .await
     {
         Ok(response) => response,
-        Err(_error) => {
+        Err(error) => {
+            // The source image no longer exists: retrying can never
+            // succeed, and the capture was never archived, so remove it
+            // entirely as if it never appeared. A same-named file
+            // discovered later registers as a brand-new capture.
+            if let Some(error_code) = vision_engine_service::permanent_source_error_code(&error) {
+                // Re-check on disk: the engine may have raced a writer that
+                // just created the file. Only purge when it is really gone.
+                match tokio::fs::metadata(&item.source_path).await {
+                    Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
+                        purge_capture_and_emit(app, pool, &item, error_code).await?;
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+                capture_log(
+                    &item,
+                    LogLevel::Warn,
+                    "prelabel_feature_failed",
+                    "retrying",
+                    "pre-label face feature extraction failed; retry scheduled",
+                    Some(error_code),
+                );
+                schedule_prelabel_retry(pool, &item.id).await?;
+                return Ok(false);
+            }
+            // The image exists but could not be read yet (still being
+            // written, locked by the writer, ...). Give it a bounded number
+            // of retries, then record the "attempted without a feature"
+            // marker so the pre-label pass never re-picks the item.
+            if let Some(error_code) =
+                vision_engine_service::bounded_retry_source_error_code(&error)
+            {
+                let next_attempt = item.attempt_count.saturating_add(1);
+                if next_attempt >= i64::from(MAX_PRELABEL_RETRY_ATTEMPTS) {
+                    capture_log(
+                        &item,
+                        LogLevel::Warn,
+                        "prelabel_feature_skipped",
+                        "skipped",
+                        "pre-label face feature extraction skipped: source image unreadable after repeated attempts",
+                        Some(error_code),
+                    );
+                    capture_service::store_face_feature(
+                        pool,
+                        &item.id,
+                        capture_service::FaceFeatureWrite {
+                            feature_json: Some("[]".to_owned()),
+                            face_box_json: None,
+                            model_id: None,
+                            model_version: None,
+                            face_count: None,
+                            face_sharpness: None,
+                            face_area_ratio: None,
+                        },
+                    )
+                    .await?;
+                    let updated = capture_service::get_item(pool, &item.id).await?;
+                    emit_item(app, &updated);
+                    return Ok(false);
+                }
+                capture_log(
+                    &item,
+                    LogLevel::Error,
+                    "prelabel_feature_failed",
+                    "retrying",
+                    "pre-label face feature extraction failed; retry scheduled",
+                    Some(error_code),
+                );
+                schedule_prelabel_retry_with_attempt(pool, &item.id, next_attempt).await?;
+                return Ok(false);
+            }
             // Engine failures are transient (broken model/env, missing
             // python, ...). Keep the item retryable instead of permanently
             // marking it "no face", and back off a minute so a broken engine
@@ -209,18 +316,7 @@ async fn process_awaiting_label_feature(
                 "pre-label face feature extraction failed; retry scheduled",
                 Some("vision_feature_error"),
             );
-            sqlx::query(
-                r#"
-                UPDATE capture_items
-                SET next_retry_at = strftime(
-                    '%Y-%m-%dT%H:%M:%fZ', 'now', '+60 seconds'
-                )
-                WHERE id = ?
-                "#,
-            )
-            .bind(&item.id)
-            .execute(pool)
-            .await?;
+            schedule_prelabel_retry(pool, &item.id).await?;
             return Ok(false);
         }
     };
@@ -441,6 +537,20 @@ async fn archive_and_emit(
     app: &AppHandle,
     item: &CaptureItem,
 ) -> Result<(), AppError> {
+    // A capture whose source was deleted before it was archived can never be
+    // copied or verified; remove it entirely instead of retrying the copy.
+    match tokio::fs::metadata(&item.source_path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            purge_capture_and_emit(app, pool, item, "source_missing").await?;
+            return Ok(());
+        }
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
+            purge_capture_and_emit(app, pool, item, "source_missing").await?;
+            return Ok(());
+        }
+        Err(_) => {}
+    }
     capture_log(
         item,
         LogLevel::Info,
@@ -481,6 +591,115 @@ async fn archive_and_emit(
             );
             emit_item(app, &scheduled);
         }
+    }
+    Ok(())
+}
+
+/// Removes an unarchived capture from the database and notifies every open
+/// window so it disappears from recent captures, queues and workbenches.
+async fn purge_capture_and_emit(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    item: &CaptureItem,
+    error_code: &str,
+) -> Result<(), AppError> {
+    let removed = capture_service::purge_capture_item(pool, &item.id, &item.status).await?;
+    if removed {
+        capture_log(
+            item,
+            LogLevel::Warn,
+            "capture_purged",
+            "purged",
+            "source image was deleted before archive; capture removed",
+            Some(error_code),
+        );
+        let _ = app.emit("capture:item-purged", json!({ "captureItemId": item.id }));
+    }
+    Ok(())
+}
+
+async fn schedule_prelabel_retry(pool: &SqlitePool, capture_item_id: &str) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE capture_items
+        SET next_retry_at = strftime(
+            '%Y-%m-%dT%H:%M:%fZ', 'now', '+60 seconds'
+        )
+        WHERE id = ?
+        "#,
+    )
+    .bind(capture_item_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn schedule_prelabel_retry_with_attempt(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    attempt_count: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE capture_items
+        SET
+            attempt_count = ?,
+            next_retry_at = strftime(
+                '%Y-%m-%dT%H:%M:%fZ', 'now', '+60 seconds'
+            )
+        WHERE id = ?
+        "#,
+    )
+    .bind(attempt_count)
+    .bind(capture_item_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Bounded sweep that removes unarchived captures whose source file no
+/// longer exists (deleted before archive). Newest first so items visible in
+/// the recent list are purged promptly; transient IO errors are ignored so
+/// a temporarily unreadable disk never destroys rows.
+async fn sweep_missing_sources(pool: &SqlitePool, app: &AppHandle) -> Result<(), AppError> {
+    let items = sqlx::query_as::<_, (String, String, String, String, String)>(
+        r#"
+        SELECT id, project_id, session_id, source_path, status
+        FROM capture_items
+        WHERE archived_at IS NULL
+          AND status NOT IN ('processing', 'completed')
+        ORDER BY updated_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(i64::from(MISSING_SOURCE_SWEEP_LIMIT))
+    .fetch_all(pool)
+    .await?;
+    for (id, project_id, session_id, source_path, status) in items {
+        let missing = match tokio::fs::metadata(&source_path).await {
+            Ok(metadata) => !metadata.is_file(),
+            Err(io_error) => io_error.kind() == std::io::ErrorKind::NotFound,
+        };
+        if !missing {
+            continue;
+        }
+        let removed = capture_service::purge_capture_item(pool, &id, &status).await?;
+        if !removed {
+            continue;
+        }
+        log_service::record_event(LogRecord {
+            level: LogLevel::Warn,
+            module: "capture.worker".to_owned(),
+            message: "source image was deleted before archive; capture removed".to_owned(),
+            event: Some("capture_purged".to_owned()),
+            project_id: Some(project_id),
+            session_id: Some(session_id),
+            capture_item_id: Some(id.clone()),
+            outcome: Some("purged".to_owned()),
+            error_code: Some("source_missing".to_owned()),
+            ..Default::default()
+        });
+        let _ = app.emit("capture:item-purged", json!({ "captureItemId": id }));
     }
     Ok(())
 }

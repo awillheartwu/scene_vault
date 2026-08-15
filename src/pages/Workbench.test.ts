@@ -1098,6 +1098,18 @@ describe("Workbench", () => {
     );
   });
 
+  it("reloads the workbench when a capture is purged", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    const callsBefore = api.listCharacterCaptureItemsPage.mock.calls.length;
+
+    eventHandlers.get("capture:item-purged")?.({ payload: { captureItemId: "item-1" } });
+    await flushPromises();
+
+    expect(api.listCharacterCaptureItemsPage.mock.calls.length).toBeGreaterThan(callsBefore);
+    wrapper.unmount();
+  });
+
   it("shows the private tab only when enabled by settings", async () => {
     api.getAppSettings.mockResolvedValue({
       classifyShortcut: "Ctrl+Shift+S",

@@ -61,6 +61,9 @@ python -m scene_vault_ai health
 
 视觉依赖使用 `opencv-contrib-python-headless>=4.10,<5`。Python 的请求字段、响应、
 错误码、测试和 Sidecar 入口由 [python/README.md](../python/README.md) 维护。
+通用设置中的“限制图片处理时的核心数”会通过
+`SCENE_VAULT_IMAGE_PROCESSING_THREADS` 传给 Python/Sidecar，并同步设置 OpenCV、OMP、
+OpenBLAS 和 MKL 的线程上限；截图处理队列和缩略图生成仍保持串行。
 
 ## Windows 一键配置
 
