@@ -170,6 +170,7 @@ pub async fn process_screenshot(
         ));
     }
     validate_python_path(input_path, "Python input")?;
+    validate_image_complete(input_path).await?;
     validate_python_path(annotated_output_path, "annotated output")?;
     validate_python_path(avatar_output_path, "avatar output")?;
     let payload = processing_payload(
@@ -210,6 +211,7 @@ pub async fn extract_face_feature(
         ));
     }
     validate_python_path(input_path, "Python input")?;
+    validate_image_complete(input_path).await?;
     let payload = processing_payload(
         settings,
         processing_settings,
@@ -529,6 +531,79 @@ fn validate_python_path(path: &Path, label: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Cheap end-marker validation that rejects obviously truncated images
+/// before the Python engine is spawned. A PNG writer emits the IEND chunk
+/// only after every pixel chunk; a JPEG writes the FFD9 marker after its
+/// payload. A bounded tail scan tolerates metadata or padding appended by
+/// capture tools. WebP and BMP are left to the engine.
+pub(crate) async fn validate_image_complete(path: &Path) -> Result<(), AppError> {
+    const END_MARKER_SCAN_BYTES: usize = 64 * 1024;
+    const PNG_IEND_CHUNK: &[u8] = b"\x00\x00\x00\x00IEND\xaeB`\x82";
+
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return Ok(());
+    };
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => {
+            let tail = read_tail(path, END_MARKER_SCAN_BYTES).await?;
+            if !tail
+                .windows(PNG_IEND_CHUNK.len())
+                .any(|window| window == PNG_IEND_CHUNK)
+            {
+                return Err(AppError::Vision(
+                    "image_decode_failed: screenshot is truncated (missing PNG IEND end marker)"
+                        .to_owned(),
+                ));
+            }
+        }
+        "jpg" | "jpeg" => {
+            let tail = read_tail(path, END_MARKER_SCAN_BYTES).await?;
+            if !tail.windows(2).any(|window| window == [0xFF, 0xD9]) {
+                return Err(AppError::Vision(
+                    "image_decode_failed: screenshot is truncated (missing JPEG end marker)"
+                        .to_owned(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn read_tail(path: &Path, bytes: usize) -> Result<Vec<u8>, AppError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(source_image_read_error)?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(source_image_read_error)?
+        .len();
+    let read_len = length.min(bytes as u64) as usize;
+    file.seek(std::io::SeekFrom::End(-(read_len as i64)))
+        .await
+        .map_err(source_image_read_error)?;
+    let mut buf = vec![0_u8; read_len];
+    file.read_exact(&mut buf)
+        .await
+        .map_err(source_image_read_error)?;
+    Ok(buf)
+}
+
+/// Normalizes Rust-side source reads to the same stable error codes emitted
+/// by the Python provider. This keeps missing files purgeable and makes file
+/// locks, sharing violations and other read failures use the bounded retry
+/// budget instead of the generic unbounded engine retry path.
+fn source_image_read_error(error: std::io::Error) -> AppError {
+    let code = if error.kind() == std::io::ErrorKind::NotFound {
+        "input_not_found"
+    } else {
+        "input_read_failed"
+    };
+    AppError::Vision(format!("{code}: cannot read screenshot: {error}"))
+}
+
 async fn invoke(
     settings: &VisionSettings,
     command_name: &str,
@@ -567,6 +642,7 @@ async fn invoke_with_progress(
         }
         vision_settings_service::EngineRuntime::Sidecar { path } => Command::new(path),
     };
+    vision_worker_service::apply_image_processing_core_limit(&mut command);
     command.arg(command_name);
     #[cfg(windows)]
     {
@@ -793,6 +869,46 @@ fn response_error(response: EngineResponse) -> AppError {
     }
 }
 
+/// Engine error code that means the source image no longer exists.
+/// Retrying the same input path can never succeed, so the pre-label pass
+/// removes the capture instead of rescheduling it.
+const PERMANENT_SOURCE_ERROR_CODES: [&str; 1] = ["input_not_found"];
+
+/// Engine error codes that usually mean the source image was still being
+/// written (or was locked) when read. They may resolve on their own, so the
+/// pre-label pass retries them a bounded number of times before skipping.
+const BOUNDED_RETRY_SOURCE_ERROR_CODES: [&str; 2] = [
+    "input_read_failed",
+    "image_decode_failed",
+];
+
+/// Returns the engine error code when error means the source image is
+/// gone for good. Any other failure (missing model, broken Python
+/// environment, timeout, ...) is treated as transient and stays retryable.
+pub(crate) fn permanent_source_error_code(error: &AppError) -> Option<&'static str> {
+    let AppError::Vision(inner) = error else {
+        return None;
+    };
+    PERMANENT_SOURCE_ERROR_CODES
+        .iter()
+        .find(|code| inner.starts_with(&format!("{code}: ")))
+        .copied()
+}
+
+/// Returns the engine error code when error means the source image was
+/// unreadable but may become readable later (still being written, locked by
+/// the writer, ...). These get a bounded number of retries before the
+/// pre-label pass gives up on the item.
+pub(crate) fn bounded_retry_source_error_code(error: &AppError) -> Option<&'static str> {
+    let AppError::Vision(inner) = error else {
+        return None;
+    };
+    BOUNDED_RETRY_SOURCE_ERROR_CODES
+        .iter()
+        .find(|code| inner.starts_with(&format!("{code}: ")))
+        .copied()
+}
+
 fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -916,6 +1032,136 @@ mod tests {
 
         let unset = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
         assert_eq!(unset["annotate"], true);
+    }
+
+    #[test]
+    fn classifies_permanent_source_errors() {
+        assert_eq!(
+            permanent_source_error_code(&AppError::Vision(
+                "input_not_found: screenshot was not found".to_owned()
+            )),
+            Some("input_not_found")
+        );
+        // Model and environment problems are transient: they may resolve
+        // after the user repairs the setup, so they must stay retryable.
+        assert_eq!(
+            permanent_source_error_code(&AppError::Vision(
+                "resource_not_found: yunet model missing".to_owned()
+            )),
+            None
+        );
+        assert_eq!(
+            permanent_source_error_code(&AppError::Vision(
+                "cannot start Python: no such file".to_owned()
+            )),
+            None
+        );
+        assert_eq!(
+            permanent_source_error_code(&AppError::Validation("bad input".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn classifies_bounded_retry_source_errors() {
+        assert_eq!(
+            bounded_retry_source_error_code(&AppError::Vision(
+                "image_decode_failed: screenshot could not be decoded".to_owned()
+            )),
+            Some("image_decode_failed")
+        );
+        assert_eq!(
+            bounded_retry_source_error_code(&AppError::Vision(
+                "input_read_failed: access is denied".to_owned()
+            )),
+            Some("input_read_failed")
+        );
+        // A missing file is permanent, not retry-bounded: the pre-label pass
+        // purges the capture instead of scheduling another attempt.
+        assert_eq!(
+            bounded_retry_source_error_code(&AppError::Vision(
+                "input_not_found: screenshot was not found".to_owned()
+            )),
+            None
+        );
+        assert_eq!(
+            bounded_retry_source_error_code(&AppError::Vision(
+                "resource_not_found: yunet model missing".to_owned()
+            )),
+            None
+        );
+        assert_eq!(
+            bounded_retry_source_error_code(&AppError::Validation("bad input".to_owned())),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn validates_image_end_markers() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        // A valid PNG contains the complete IEND chunk near its tail. Some
+        // capture tools append harmless padding after the image payload.
+        let png = dir.path().join("ok.png");
+        let mut bytes = vec![0_u8; 64];
+        bytes[40..52].copy_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
+        tokio::fs::write(&png, bytes).await.expect("write png");
+        validate_image_complete(&png).await.expect("complete png");
+
+        // Truncated PNG (no IEND) must be rejected before the engine runs.
+        let truncated = dir.path().join("truncated.png");
+        tokio::fs::write(&truncated, b"\x89PNG\r\n\x1a\n partial idat")
+            .await
+            .expect("write truncated png");
+        let error = validate_image_complete(&truncated)
+            .await
+            .expect_err("truncated png");
+        assert!(error.to_string().contains("image_decode_failed"));
+
+        // JPEG marker may likewise precede trailing padding.
+        let jpeg = dir.path().join("ok.jpg");
+        tokio::fs::write(&jpeg, [0xFF_u8, 0xD8, 1, 2, 0xFF, 0xD9, 0, 0])
+            .await
+            .expect("write jpeg");
+        validate_image_complete(&jpeg).await.expect("complete jpeg");
+
+        let truncated_jpeg = dir.path().join("cut.jpg");
+        tokio::fs::write(&truncated_jpeg, [0xFF_u8, 0xD8, 1, 2, 0xFF, 0x00])
+            .await
+            .expect("write cut jpeg");
+        let error = validate_image_complete(&truncated_jpeg)
+            .await
+            .expect_err("truncated jpeg");
+        assert!(error.to_string().contains("image_decode_failed"));
+
+        // WebP has no fixed tail marker and must pass the pre-check.
+        let webp = dir.path().join("ok.webp");
+        tokio::fs::write(&webp, b"RIFF....WEBP").await.expect("write webp");
+        validate_image_complete(&webp).await.expect("webp passes");
+    }
+
+    #[tokio::test]
+    async fn classifies_rust_side_image_read_errors_for_worker_retry_policy() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.png");
+        let missing_error = validate_image_complete(&missing)
+            .await
+            .expect_err("missing source");
+        assert_eq!(
+            permanent_source_error_code(&missing_error),
+            Some("input_not_found")
+        );
+
+        let read_error =
+            source_image_read_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            bounded_retry_source_error_code(&read_error),
+            Some("input_read_failed")
+        );
+        assert_eq!(permanent_source_error_code(&read_error), None);
     }
 
     #[test]

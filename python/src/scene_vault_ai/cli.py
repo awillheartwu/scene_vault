@@ -17,6 +17,8 @@ from .service import AiService
 
 logger = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 1024 * 1024
+DEFAULT_IMAGE_PROCESSING_THREADS = 4
+MAX_IMAGE_PROCESSING_THREADS = 32
 
 
 def _write_response(response: Response) -> None:
@@ -241,6 +243,29 @@ def _configure_logging() -> None:
     )
 
 
+def _configure_image_processing_threads() -> int:
+    raw_value = os.environ.get(
+        "SCENE_VAULT_IMAGE_PROCESSING_THREADS",
+        str(DEFAULT_IMAGE_PROCESSING_THREADS),
+    )
+    try:
+        threads = int(raw_value)
+    except ValueError:
+        threads = DEFAULT_IMAGE_PROCESSING_THREADS
+    threads = max(1, min(threads, MAX_IMAGE_PROCESSING_THREADS))
+    value = str(threads)
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[name] = value
+    try:
+        import cv2
+
+        cv2.setNumThreads(threads)
+    except ImportError:
+        # Health and non-vision installs must continue to work without OpenCV.
+        pass
+    return threads
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="scene-vault-ai")
     parser.add_argument(
@@ -254,6 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_logging()
+    _configure_image_processing_threads()
     args = build_parser().parse_args(argv)
     service = AiService()
 

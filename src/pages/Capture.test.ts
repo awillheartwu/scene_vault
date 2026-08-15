@@ -523,6 +523,29 @@ describe("Capture quick-label flow", () => {
     wrapper.unmount();
   });
 
+  it("removes a capture whose source was deleted before archive", async () => {
+    const first = { ...item(), id: "item-1", sourcePath: "D:\\shots\\one.png" };
+    const second = {
+      ...item(),
+      id: "item-2",
+      sourcePath: "D:\\shots\\two.png",
+      capturedAt: "2026-08-01T00:00:02Z",
+    };
+    api.listProjectRecentCaptures.mockResolvedValue([first, second]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+    expect(wrapper.findAll(".capture-card").length).toBe(2);
+
+    api.listProjectRecentCaptures.mockResolvedValue([second]);
+    eventHandlers.get("capture:item-purged")?.({ payload: { captureItemId: "item-1" } });
+    await flushPromises();
+
+    const remaining = wrapper.findAll(".capture-card");
+    expect(remaining.length).toBe(1);
+    expect(remaining[0].attributes("aria-label")).toContain("two.png");
+    wrapper.unmount();
+  });
+
   it("starts a session and reports the projects it auto-stopped", async () => {
     api.listSessions.mockResolvedValue([]);
     api.listSourceDirectories.mockResolvedValue([

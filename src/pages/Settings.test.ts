@@ -71,7 +71,7 @@ const appSettings = {
   splitPopupWindows: false,
   autoCloseEmptyPopup: false,
   thumbnailCacheSizeMb: 256,
-  thumbnailGenerationConcurrency: 1,
+  imageProcessingCoreLimit: 4,
 };
 
 const namingSettings = {
@@ -357,6 +357,23 @@ describe("Settings category navigation", () => {
 });
 
 describe("Settings dirty leave protection", () => {
+  it("saves an editable image-processing core limit", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    const input = page.get("#image-processing-core-limit");
+    expect(input.attributes("disabled")).toBeUndefined();
+    expect(input.attributes("min")).toBe("1");
+    expect(input.attributes("max")).toBe("32");
+    await input.setValue("3");
+    await page.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(api.updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ imageProcessingCoreLimit: 3 }),
+    );
+  });
+
   it("blocks route leave with a confirm while dirty and proceeds without one after saving", async () => {
     const page = mountSettings();
     await flushPromises();

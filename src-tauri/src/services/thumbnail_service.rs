@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
 use tokio::sync::Semaphore;
@@ -24,17 +24,13 @@ static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Bounds concurrent thumbnail decoding so a page of placeholders cannot
 /// spike CPU/RAM (each decode is a ~30MB buffer for a 3.6K screenshot).
-/// The limit is configurable through app settings; changing it swaps in a new
-/// semaphore so in-flight permits never need to be revoked.
 struct GenerationLimiter {
-    configured_limit: u32,
     semaphore: Arc<Semaphore>,
 }
 
 impl GenerationLimiter {
     fn new(limit: u32) -> Self {
         Self {
-            configured_limit: limit,
             semaphore: Arc::new(Semaphore::new(limit as usize)),
         }
     }
@@ -42,31 +38,13 @@ impl GenerationLimiter {
     fn semaphore(&self) -> Arc<Semaphore> {
         Arc::clone(&self.semaphore)
     }
-
-    fn set_limit(&mut self, limit: u32) {
-        if self.configured_limit == limit {
-            return;
-        }
-        self.configured_limit = limit;
-        self.semaphore = Arc::new(Semaphore::new(limit as usize));
-    }
 }
 
-static GENERATION_LIMIT: LazyLock<RwLock<GenerationLimiter>> =
-    LazyLock::new(|| RwLock::new(GenerationLimiter::new(1)));
+static GENERATION_LIMIT: LazyLock<GenerationLimiter> =
+    LazyLock::new(|| GenerationLimiter::new(1));
 
 fn generation_limit() -> Arc<Semaphore> {
-    GENERATION_LIMIT.read().expect("limit lock").semaphore()
-}
-
-/// Updates how many thumbnail decodes may run in parallel. The new limit is
-/// fixed at one so imported screenshots decode strictly one by one. Tasks
-/// that already hold permits from the previous
-/// semaphore finish naturally and do not count against the new limit.
-pub fn set_generation_limit(_limit: u32) {
-    let limit = 1;
-    let mut guard = GENERATION_LIMIT.write().expect("limit lock");
-    guard.set_limit(limit);
+    GENERATION_LIMIT.semaphore()
 }
 
 pub fn thumbnail_cache_dir(root: &Path) -> PathBuf {
@@ -327,8 +305,7 @@ mod tests {
     async fn generation_limit_gates_concurrent_decodes() {
         // Keep this test independent from the process-wide limiter, which may
         // be updated by settings-related tests running in parallel.
-        let mut limiter = GenerationLimiter::new(4);
-        limiter.set_limit(1);
+        let limiter = GenerationLimiter::new(1);
         let semaphore = limiter.semaphore();
         let first = semaphore.acquire().await.expect("first permit");
         let waiting = semaphore.clone();

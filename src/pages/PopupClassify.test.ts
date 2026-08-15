@@ -149,6 +149,19 @@ describe("PopupClassify", () => {
     wrapper.unmount();
   });
 
+  it("removes a purged capture from the queue immediately", async () => {
+    const wrapper = mount(PopupClassify);
+    await flushPromises();
+    expect(wrapper.text()).toContain("1/1");
+
+    eventHandlers.get("capture:item-purged")?.({ payload: { captureItemId: item.id } });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).not.toContain("1/1");
+    expect(wrapper.text()).toContain("待分类截图");
+    wrapper.unmount();
+  });
+
   it("re-runs the face-bank suggestion when person is chosen", async () => {
     api.suggestForCapture.mockResolvedValue({
       ...item,

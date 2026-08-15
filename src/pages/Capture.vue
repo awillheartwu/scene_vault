@@ -736,6 +736,14 @@ onMounted(async () => {
     unlisteners.push(
       await listen<CaptureItem>("capture:item-created", (event) => upsertItem(event.payload)),
       await listen<CaptureItem>("capture:item-updated", (event) => upsertItem(event.payload)),
+      await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
+        const purgedId = event.payload.captureItemId;
+        if (selectedItemId.value === purgedId) {
+          selectedItemId.value = null;
+          pendingClassification.value = null;
+        }
+        void refreshRecentCaptures();
+      }),
       await listen("capture:face-bank-rebuilt", () => void refreshRecentCaptures()),
       await listen<CaptureRuntimeStatus>("capture:runtime-status", (event) => {
         runtime.value = event.payload;

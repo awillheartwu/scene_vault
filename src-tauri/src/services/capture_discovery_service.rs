@@ -6,6 +6,8 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
+use serde_json::json;
+
 use crate::{
     error::AppError,
     models::{
@@ -43,6 +45,7 @@ struct Candidate {
 
 pub async fn discover(
     pool: &SqlitePool,
+    app: Option<&AppHandle>,
     input: DiscoverCapturesInput,
 ) -> Result<DiscoverCapturesResult, AppError> {
     let session_id = input.session_id.trim();
@@ -118,33 +121,61 @@ pub async fn discover(
     }
 
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
-    if !candidates.is_empty() && delay_ms > 0 {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+    // Registered rows for this session, keyed by normalized path, so the
+    // scan can tell new files from known ones in a single query instead of
+    // one lookup per candidate per poll.
+    #[derive(Clone)]
+    struct RegisteredRow {
+        id: String,
+        file_size: i64,
+        modified_at_ms: Option<i64>,
+        content_hash: String,
+        status: String,
+        archived: bool,
     }
+    let registered: std::collections::HashMap<String, RegisteredRow> =
+        sqlx::query_as::<_, (String, String, i64, Option<i64>, String, String, bool)>(
+            r#"
+            SELECT id, source_path, file_size, modified_at_ms, content_hash,
+                   status, archived_at IS NOT NULL
+            FROM capture_items
+            WHERE session_id = ?
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(id, source_path, file_size, modified_at_ms, content_hash, status, archived)| {
+            (
+                source_path,
+                RegisteredRow {
+                    id,
+                    file_size,
+                    modified_at_ms,
+                    content_hash,
+                    status,
+                    archived,
+                },
+            )
+        })
+        .collect();
 
-    // Ending a session while the stability delay is in progress must prevent
-    // new rows from being registered.
-    capture_service::require_active_session(pool, session_id).await?;
-
-    let mut discovered_items = Vec::new();
+    // Partition candidates: unchanged known files are skipped, files whose
+    // recorded stats changed are re-hashed (content may have been replaced),
+    // and unseen files go through the content-stability double hash before
+    // registration so a half-written screenshot is never indexed.
     let mut already_known_count = 0_u32;
+    struct StableCandidate {
+        candidate: Candidate,
+        canonical_path: PathBuf,
+        key: String,
+        first_hash: String,
+    }
+    let mut changed = Vec::new();
+    let mut fresh = Vec::new();
     for candidate in candidates {
-        let metadata = match tokio::fs::metadata(&candidate.path).await {
-            Ok(metadata) if metadata.is_file() => metadata,
-            _ => {
-                unstable_count = unstable_count.saturating_add(1);
-                continue;
-            }
-        };
-        let modified = metadata.modified().ok();
-        if metadata.len() == 0
-            || metadata.len() != candidate.length
-            || (candidate.modified.is_some() && modified != candidate.modified)
-        {
-            unstable_count = unstable_count.saturating_add(1);
-            continue;
-        }
-
         let canonical_path = match tokio::fs::canonicalize(&candidate.path).await {
             Ok(path)
                 if session_dirs
@@ -158,8 +189,175 @@ pub async fn discover(
                 continue;
             }
         };
-        if capture_service::matches_discovery_baseline(pool, session_id, &canonical_path, &metadata)
+        let key = capture_service::path_to_string(&canonical_path);
+        let Some(row) = registered.get(&key) else {
+            fresh.push(StableCandidate {
+                candidate,
+                canonical_path,
+                key,
+                first_hash: String::new(),
+            });
+            continue;
+        };
+        let stats_match = row.file_size == candidate.length as i64
+            && row.modified_at_ms.is_some()
+            && row.modified_at_ms
+                == candidate
+                    .modified
+                    .and_then(|modified| unix_millis(modified).ok())
+                    .map(i64::try_from)
+                    .and_then(Result::ok);
+        if stats_match {
+            already_known_count = already_known_count.saturating_add(1);
+            continue;
+        }
+        changed.push(StableCandidate {
+            candidate,
+            canonical_path,
+            key,
+            first_hash: String::new(),
+        });
+    }
+    // First content sample for every file that is new or looks replaced,
+    // taken before the shared stability delay below.
+    for item in fresh.iter_mut().chain(changed.iter_mut()) {
+        item.first_hash = capture_service::sha256_file(&item.canonical_path)
+            .await
+            .unwrap_or_default();
+    }
+
+    if (!fresh.is_empty() || !changed.is_empty()) && delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+
+    // Ending a session while the stability delay is in progress must prevent
+    // new rows from being registered.
+    capture_service::require_active_session(pool, session_id).await?;
+
+    let mut discovered_items = Vec::new();
+    for item in fresh.into_iter().chain(changed) {
+        let metadata = match tokio::fs::metadata(&item.candidate.path).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => {
+                unstable_count = unstable_count.saturating_add(1);
+                continue;
+            }
+        };
+        let modified = metadata.modified().ok();
+        if metadata.len() == 0
+            || metadata.len() != item.candidate.length
+            || (item.candidate.modified.is_some() && modified != item.candidate.modified)
+        {
+            unstable_count = unstable_count.saturating_add(1);
+            continue;
+        }
+        // Second content sample; registration only happens when both samples
+        // agree, which a still-growing file can never satisfy.
+        let second_hash = capture_service::sha256_file(&item.canonical_path)
+            .await
+            .unwrap_or_default();
+        if item.first_hash.is_empty() || item.first_hash != second_hash {
+            unstable_count = unstable_count.saturating_add(1);
+            continue;
+        }
+
+        let Some(row) = registered.get(&item.key).cloned() else {
+            if capture_service::matches_discovery_baseline(
+                pool,
+                session_id,
+                &item.canonical_path,
+                &metadata,
+            )
             .await?
+            {
+                ignored_count = ignored_count.saturating_add(1);
+                continue;
+            }
+            let is_backfill = session_started_at
+                .and_then(|started_at| started_at.checked_sub(BACKFILL_MTIME_TOLERANCE))
+                .is_some_and(|boundary| {
+                    item.candidate
+                        .modified
+                        .is_some_and(|modified_at| modified_at < boundary)
+                });
+            let (registered_item, inserted) = capture_service::register_discovered_path(
+                pool,
+                session_id,
+                &item.canonical_path,
+                is_backfill,
+            )
+            .await?;
+            if inserted {
+                discovered_items.push(registered_item);
+            } else {
+                already_known_count = already_known_count.saturating_add(1);
+            }
+            continue;
+        };
+
+        // A registered file whose content is unchanged only drifted in size
+        // or mtime (coarse timestamps, antivirus touches): refresh stats.
+        if row.content_hash == second_hash {
+            sqlx::query(
+                r#"
+                UPDATE capture_items
+                SET
+                    file_size = ?,
+                    modified_at_ms = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                "#,
+            )
+            .bind(i64::try_from(metadata.len()).unwrap_or(i64::MAX))
+            .bind(
+                modified
+                    .and_then(|value| unix_millis(value).ok())
+                    .map(i64::try_from)
+                    .and_then(Result::ok),
+            )
+            .bind(&row.id)
+            .execute(pool)
+            .await?;
+            already_known_count = already_known_count.saturating_add(1);
+            continue;
+        }
+
+        // Content changed at a registered path. Archived captures stay (the
+        // archive copy is the record); unarchived captures are stale: the
+        // old registration is removed as if it never appeared and the new
+        // content registers as a brand-new capture.
+        if row.archived || row.status == "processing" {
+            already_known_count = already_known_count.saturating_add(1);
+            continue;
+        }
+        if capture_service::purge_capture_item(pool, &row.id, &row.status).await? {
+            log_service::record_event(LogRecord {
+                level: LogLevel::Warn,
+                module: "capture.discovery".to_owned(),
+                message: "source image was replaced before archive; stale capture removed".to_owned(),
+                event: Some("capture_purged".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                capture_item_id: Some(row.id.clone()),
+                outcome: Some("purged".to_owned()),
+                error_code: Some("source_replaced".to_owned()),
+                ..Default::default()
+            });
+            if let Some(app) = app {
+                let _ = app.emit("capture:item-purged", json!({ "captureItemId": row.id }));
+            }
+        } else {
+            // The row was claimed or archived after the scan snapshot. Do
+            // not register competing content at the same path this cycle.
+            already_known_count = already_known_count.saturating_add(1);
+            continue;
+        }
+        if capture_service::matches_discovery_baseline(
+            pool,
+            session_id,
+            &item.canonical_path,
+            &metadata,
+        )
+        .await?
         {
             ignored_count = ignored_count.saturating_add(1);
             continue;
@@ -167,19 +365,19 @@ pub async fn discover(
         let is_backfill = session_started_at
             .and_then(|started_at| started_at.checked_sub(BACKFILL_MTIME_TOLERANCE))
             .is_some_and(|boundary| {
-                candidate
+                item.candidate
                     .modified
                     .is_some_and(|modified_at| modified_at < boundary)
             });
-        let (item, inserted) = capture_service::register_discovered_path(
+        let (registered_item, inserted) = capture_service::register_discovered_path(
             pool,
             session_id,
-            &canonical_path,
+            &item.canonical_path,
             is_backfill,
         )
         .await?;
         if inserted {
-            discovered_items.push(item);
+            discovered_items.push(registered_item);
         } else {
             already_known_count = already_known_count.saturating_add(1);
         }
@@ -198,6 +396,11 @@ pub async fn discover(
         entries_scanned,
         scan_duration_ms,
     })
+}
+
+fn unix_millis(time: SystemTime) -> Result<i64, std::time::SystemTimeError> {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Continuously reconciles active sessions with their source directories.
@@ -239,6 +442,7 @@ async fn poll_active_sessions_once(
         // not stop other active sessions from being reconciled.
         match discover(
             pool,
+            app,
             DiscoverCapturesInput {
                 session_id: session_id.clone(),
                 stability_delay_ms: None,
@@ -341,6 +545,7 @@ mod tests {
 
         let discovered = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id.clone(),
                 stability_delay_ms: Some(0),
@@ -359,6 +564,7 @@ mod tests {
 
         let repeated = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id,
                 stability_delay_ms: Some(0),
@@ -382,6 +588,7 @@ mod tests {
 
         let first = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id.clone(),
                 stability_delay_ms: Some(0),
@@ -399,6 +606,7 @@ mod tests {
             .expect("make unreadable");
         let repeated = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id,
                 stability_delay_ms: Some(0),
@@ -427,6 +635,7 @@ mod tests {
 
         let unchanged = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id.clone(),
                 stability_delay_ms: Some(0),
@@ -442,6 +651,7 @@ mod tests {
             .expect("overwrite");
         let overwritten = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id,
                 stability_delay_ms: Some(0),
@@ -488,6 +698,7 @@ mod tests {
 
         let result = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id.clone(),
                 stability_delay_ms: Some(0),
@@ -563,6 +774,7 @@ mod tests {
 
         let discovered = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id.clone(),
                 stability_delay_ms: Some(0),
@@ -580,6 +792,7 @@ mod tests {
         tokio::fs::write(&fresh, b"fresh image").await.expect("fresh");
         let discovered = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id,
                 stability_delay_ms: Some(0),
@@ -603,6 +816,7 @@ mod tests {
 
         let result = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id.clone(),
                 stability_delay_ms: Some(0),
@@ -638,6 +852,7 @@ mod tests {
 
         let result = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id,
                 stability_delay_ms: Some(150),
@@ -669,6 +884,7 @@ mod tests {
 
         let result = discover(
             &pool,
+            None,
             DiscoverCapturesInput {
                 session_id: session.id,
                 stability_delay_ms: Some(0),

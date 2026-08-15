@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from scene_vault_ai.cli import MAX_REQUEST_BYTES, _request, _worker
+from scene_vault_ai.cli import (
+    MAX_REQUEST_BYTES,
+    _configure_image_processing_threads,
+    _request,
+    _worker,
+)
 from scene_vault_ai.protocol import Response
 
 
@@ -54,6 +61,22 @@ class _ByteBuffer:
 
 
 class CliEncodingTests(unittest.TestCase):
+    def test_configures_image_processing_thread_limit(self) -> None:
+        cv2 = SimpleNamespace(setNumThreads=Mock())
+        with (
+            patch.dict(
+                os.environ,
+                {"SCENE_VAULT_IMAGE_PROCESSING_THREADS": "7"},
+                clear=False,
+            ),
+            patch.dict(sys.modules, {"cv2": cv2}),
+        ):
+            self.assertEqual(_configure_image_processing_threads(), 7)
+            self.assertEqual(os.environ["OMP_NUM_THREADS"], "7")
+            self.assertEqual(os.environ["OPENBLAS_NUM_THREADS"], "7")
+            self.assertEqual(os.environ["MKL_NUM_THREADS"], "7")
+            cv2.setNumThreads.assert_called_once_with(7)
+
     def test_chinese_name_round_trips_through_the_utf8_boundary(self) -> None:
         service = _StubService()
         request = {

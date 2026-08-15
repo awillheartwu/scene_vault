@@ -1,7 +1,7 @@
 use std::{
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         OnceLock,
     },
     time::{Duration, Instant},
@@ -33,6 +33,7 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 static WORKER_MANAGER: OnceLock<Mutex<VisionWorkerManager>> = OnceLock::new();
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static IMAGE_PROCESSING_CORE_LIMIT: AtomicU32 = AtomicU32::new(4);
 static SHUTDOWN_NOTIFY: OnceLock<Notify> = OnceLock::new();
 
 #[derive(Debug)]
@@ -51,10 +52,11 @@ struct WorkerSettingsFingerprint {
     recognizer: Option<String>,
     arcface_model_path: Option<String>,
     font_path: Option<String>,
+    image_processing_core_limit: u32,
 }
 
-impl From<&VisionSettings> for WorkerSettingsFingerprint {
-    fn from(settings: &VisionSettings) -> Self {
+impl WorkerSettingsFingerprint {
+    fn new(settings: &VisionSettings, image_processing_core_limit: u32) -> Self {
         Self {
             python_executable_path: settings.python_executable_path.clone(),
             python_module_root: settings.python_module_root.clone(),
@@ -63,6 +65,7 @@ impl From<&VisionSettings> for WorkerSettingsFingerprint {
             recognizer: settings.recognizer.clone(),
             arcface_model_path: settings.arcface_model_path.clone(),
             font_path: settings.font_path.clone(),
+            image_processing_core_limit,
         }
     }
 }
@@ -117,6 +120,23 @@ pub(super) fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
+pub fn set_image_processing_core_limit(limit: u32) {
+    IMAGE_PROCESSING_CORE_LIMIT.store(limit.clamp(1, 32), Ordering::SeqCst);
+}
+
+fn image_processing_core_limit() -> u32 {
+    IMAGE_PROCESSING_CORE_LIMIT.load(Ordering::SeqCst)
+}
+
+pub(super) fn apply_image_processing_core_limit(command: &mut Command) {
+    let value = image_processing_core_limit().to_string();
+    command
+        .env("SCENE_VAULT_IMAGE_PROCESSING_THREADS", &value)
+        .env("OMP_NUM_THREADS", &value)
+        .env("OPENBLAS_NUM_THREADS", &value)
+        .env("MKL_NUM_THREADS", &value);
+}
+
 #[cfg(all(test, target_os = "windows"))]
 async fn reset_for_tests() {
     let mut manager = manager().lock().await;
@@ -142,7 +162,8 @@ impl VisionWorkerManager {
                 "Python worker shutdown is in progress".to_owned(),
             ));
         }
-        let fingerprint = WorkerSettingsFingerprint::from(settings);
+        let core_limit = image_processing_core_limit();
+        let fingerprint = WorkerSettingsFingerprint::new(settings, core_limit);
         if self.fingerprint.as_ref() != Some(&fingerprint) {
             if let Some(worker) = self.worker.take() {
                 worker.stop("settings_changed").await;
@@ -256,6 +277,7 @@ impl WorkerProcess {
             }
             vision_settings_service::EngineRuntime::Sidecar { path } => Command::new(path),
         };
+        apply_image_processing_core_limit(&mut command);
         command.arg("worker");
         #[cfg(windows)]
         {
@@ -629,7 +651,7 @@ mod tests {
     #[test]
     fn settings_fingerprint_changes_for_every_worker_relevant_setting() {
         let base = VisionSettings::default();
-        let base_fingerprint = WorkerSettingsFingerprint::from(&base);
+        let base_fingerprint = WorkerSettingsFingerprint::new(&base, 4);
         for changed in [
             VisionSettings {
                 python_executable_path: Some("python.exe".to_owned()),
@@ -660,8 +682,9 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert_ne!(WorkerSettingsFingerprint::from(&changed), base_fingerprint);
+            assert_ne!(WorkerSettingsFingerprint::new(&changed, 4), base_fingerprint);
         }
+        assert_ne!(WorkerSettingsFingerprint::new(&base, 2), base_fingerprint);
     }
 
     #[test]

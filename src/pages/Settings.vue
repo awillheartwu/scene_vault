@@ -96,7 +96,7 @@ const appSettings = ref<AppSettings>({
   splitPopupWindows: false,
   autoCloseEmptyPopup: false,
   thumbnailCacheSizeMb: 256,
-  thumbnailGenerationConcurrency: 1,
+  imageProcessingCoreLimit: 4,
 });
 const cacheStatus = ref<ThumbnailCacheStatus | null>(null);
 const busy = ref(false);
@@ -941,20 +941,19 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="settings-field">
-        <label for="thumbnail-concurrency">缩略图生成并发数（CPU 核）</label>
+        <label for="image-processing-core-limit">限制图片处理时的核心数</label>
         <p>
-          为避免批量导入时占满处理器，缩略图只在进入可视区域后请求，并固定一次生成一张。
-          Windows 开发入口仍会将整个进程限制在 CPU 0–3。
+          限制单张人物图片进行人脸检测和识别时可使用的 CPU 线程数。处理队列和缩略图仍然
+          一张一张执行；修改后从下一次视觉处理开始生效。
         </p>
         <div>
           <input
-            id="thumbnail-concurrency"
-            v-model.number="appSettings.thumbnailGenerationConcurrency"
+            id="image-processing-core-limit"
+            v-model.number="appSettings.imageProcessingCoreLimit"
             type="number"
             min="1"
-            max="1"
+            max="32"
             step="1"
-            disabled
             class="threshold-input"
           />
         </div>
