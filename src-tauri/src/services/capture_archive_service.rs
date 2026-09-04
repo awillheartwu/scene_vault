@@ -124,8 +124,15 @@ async fn archive_pending_item(
         // a clearly separated directory so a later reprocess can write the
         // regular annotated output without conflict.
         "person" => {
-            archive_source_direct(pool, item, &destination_root, "人物图（未识别）", None, &naming)
-                .await
+            archive_source_direct(
+                pool,
+                item,
+                &destination_root,
+                "人物图（未识别）",
+                None,
+                &naming,
+            )
+            .await
         }
         "scene" => {
             archive_source_direct(pool, item, &destination_root, "游戏截图", None, &naming).await
@@ -397,6 +404,8 @@ async fn persist_completed_archive(
             asset_id = ?,
             destination_path = ?,
             destination_avatar_path = ?,
+            destination_file_state = 'available',
+            destination_avatar_file_state = CASE WHEN ? IS NULL THEN 'none' ELSE 'available' END,
             status = 'completed',
             error_message = NULL,
             archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -409,12 +418,13 @@ async fn persist_completed_archive(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(&asset_id)
     .bind(&asset_path)
-    .bind(avatar_path)
+    .bind(&avatar_path)
+    .bind(&avatar_path)
     .bind(&item.id)
     .fetch_optional(&mut *transaction)
     .await?
@@ -423,14 +433,12 @@ async fn persist_completed_archive(
     transaction.commit().await?;
 
     // Reprocessing (degraded fallback or workbench relabel) replaces the
-    // previous archive: once the new artifact is verified, remove the old
-    // annotated/avatar files (app-created paths only) and the stale asset row
-    // so the library keeps exactly one file per capture. Removing the old
-    // file is best-effort: a retry after the file was already replaced should
-    // not fail the archive.
+    // previous archive: once the new artifact is verified, move old target
+    // files to the Windows recycle bin. There is deliberately no permanent
+    // deletion fallback; unsupported targets remain on disk for safety.
     if let Some(previous) = item.destination_path.as_deref() {
         if previous != asset_path {
-            let _ = tokio::fs::remove_file(previous).await;
+            let _ = super::file_recycle_service::recycle(Path::new(previous)).await;
             if let Some(previous_asset_id) = item.asset_id.as_deref() {
                 let _ = sqlx::query("DELETE FROM assets WHERE id = ?")
                     .bind(previous_asset_id)
@@ -441,7 +449,7 @@ async fn persist_completed_archive(
     }
     if let Some(previous_avatar) = item.destination_avatar_path.as_deref() {
         if final_avatar.map(capture_service::path_to_string).as_deref() != Some(previous_avatar) {
-            let _ = tokio::fs::remove_file(previous_avatar).await;
+            let _ = super::file_recycle_service::recycle(Path::new(previous_avatar)).await;
         }
     }
 
@@ -1045,14 +1053,19 @@ mod tests {
         );
         assert_ne!(new_destination, old_destination);
         assert!(new_destination.is_file());
-        assert!(
-            !old_destination.exists(),
-            "old archive file must be replaced"
-        );
-        assert!(
-            !old_avatar.exists(),
-            "old avatar archive file must be replaced"
-        );
+        #[cfg(windows)]
+        {
+            assert!(!old_destination.exists(), "old archive must be recycled");
+            assert!(!old_avatar.exists(), "old avatar archive must be recycled");
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(
+                old_destination.exists(),
+                "unsupported recycle must fail closed"
+            );
+            assert!(old_avatar.exists(), "unsupported recycle must fail closed");
+        }
 
         let old_asset_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE id = ?")
             .bind(&old_asset_id)
@@ -1403,7 +1416,10 @@ mod tests {
             destination.contains("人物图（原图）"),
             "unexpected destination: {destination}"
         );
-        assert!(destination.contains("Aurora"), "name missing: {destination}");
+        assert!(
+            destination.contains("Aurora"),
+            "name missing: {destination}"
+        );
         assert!(completed.annotated_path.is_none());
         assert!(source.is_file(), "source screenshot must stay untouched");
     }

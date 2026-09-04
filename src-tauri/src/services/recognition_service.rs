@@ -134,7 +134,7 @@ pub async fn set_suggestion(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(&input.suggested_character_id)
@@ -197,7 +197,7 @@ pub async fn review_suggestion(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(&decision)
@@ -357,7 +357,8 @@ pub async fn list_character_items(
             item.error_message, item.failure_stage, item.attempt_count,
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
-            item.created_at, item.updated_at
+            item.created_at, item.updated_at, item.source_file_state,
+            item.destination_file_state, item.destination_avatar_file_state
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ?
@@ -420,7 +421,8 @@ pub async fn list_character_items_paged(
             item.error_message, item.failure_stage, item.attempt_count,
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
-            item.created_at, item.updated_at
+            item.created_at, item.updated_at, item.source_file_state,
+            item.destination_file_state, item.destination_avatar_file_state
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ?
@@ -1102,9 +1104,9 @@ pub async fn rebuild_face_bank(
     }
     let processing_settings = processing_settings_service::get(pool).await?;
 
-    let items: Vec<(String, String)> = sqlx::query_as(
+    let item_ids: Vec<String> = sqlx::query_scalar(
         r#"
-        SELECT id, source_path
+        SELECT id
         FROM capture_items
         WHERE project_id = ? AND classification = 'person'
         ORDER BY captured_at ASC, created_at ASC
@@ -1113,7 +1115,7 @@ pub async fn rebuild_face_bank(
     .bind(project_id)
     .fetch_all(pool)
     .await?;
-    let total = items.len() as u32;
+    let total = item_ids.len() as u32;
     let mut processed = 0_u32;
     let mut rebuilt = 0_u32;
     let mut no_face = 0_u32;
@@ -1122,22 +1124,35 @@ pub async fn rebuild_face_bank(
     let mut failed = 0_u32;
     let mut stale_preserved = 0_u32;
 
-    for (item_id, source_path) in items {
+    for item_id in item_ids {
         processed += 1;
         on_progress(processed, total);
-        let source = std::path::PathBuf::from(&source_path);
-        if !tokio::fs::metadata(&source)
-            .await
-            .is_ok_and(|metadata| metadata.is_file())
-        {
-            skipped_missing_source += 1;
-            // A sample whose source is gone can never be regenerated.
-            sqlx::query("DELETE FROM character_face_samples WHERE capture_item_id = ?")
+        let item = capture_service::get_item(pool, &item_id).await?;
+        let source = match capture_service::validate_source_identity(pool, &item).await {
+            Ok(source) => source,
+            Err(AppError::NotFound(_)) => {
+                skipped_missing_source += 1;
+                // A sample whose source is gone can never be regenerated.
+                sqlx::query("DELETE FROM character_face_samples WHERE capture_item_id = ?")
+                    .bind(&item_id)
+                    .execute(pool)
+                    .await?;
+                continue;
+            }
+            Err(_) => {
+                failed += 1;
+                let has_stale_sample: i64 = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM character_face_samples WHERE capture_item_id = ?)",
+                )
                 .bind(&item_id)
-                .execute(pool)
+                .fetch_one(pool)
                 .await?;
-            continue;
-        }
+                if has_stale_sample != 0 {
+                    stale_preserved += 1;
+                }
+                continue;
+            }
+        };
         let response = match vision_engine_service::extract_face_feature(
             &vision_settings,
             &source,
@@ -1268,6 +1283,7 @@ pub async fn refresh_capture_face_feature(
             status = item.status
         )));
     }
+    let source = capture_service::validate_source_identity(pool, &item).await?;
     let vision_settings = vision_settings_service::get(pool).await?;
     if !vision_settings_service::is_engine_available(&vision_settings) {
         return Err(AppError::Vision(
@@ -1275,15 +1291,6 @@ pub async fn refresh_capture_face_feature(
         ));
     }
     let processing_settings = processing_settings_service::get(pool).await?;
-    let source = std::path::PathBuf::from(&item.source_path);
-    if !tokio::fs::metadata(&source)
-        .await
-        .is_ok_and(|metadata| metadata.is_file())
-    {
-        return Err(AppError::NotFound(format!(
-            "source file for capture {capture_item_id}"
-        )));
-    }
     let response = vision_engine_service::extract_face_feature(
         &vision_settings,
         &source,

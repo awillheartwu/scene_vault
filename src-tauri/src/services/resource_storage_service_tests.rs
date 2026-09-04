@@ -49,7 +49,10 @@ fn scan_counts_files_recursively_and_tolerates_missing_paths() {
     assert_eq!((logs.total_bytes, logs.file_count), (18, 2));
     assert_eq!((thumbnails.total_bytes, thumbnails.file_count), (0, 0));
     // Existing paths stay openable; missing paths surface as not configured.
-    assert_eq!(database.path.as_deref(), Some(database_path.to_str().unwrap()));
+    assert_eq!(
+        database.path.as_deref(),
+        Some(database_path.to_str().unwrap())
+    );
     assert!(logs.path.is_some());
     assert!(thumbnails.path.is_none());
 }

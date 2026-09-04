@@ -25,6 +25,8 @@ const { eventHandlers, api } = vi.hoisted(() => ({
     verifyCaptureIdentity: vi.fn(),
     suggestForCapture: vi.fn(),
     retry: vi.fn(),
+    previewCaptureDeletion: vi.fn(),
+    deleteCaptureItem: vi.fn(),
     setProjectCover: vi.fn(),
     revealPath: vi.fn(),
     createProject: vi.fn(),
@@ -682,6 +684,41 @@ describe("Capture item context menu", () => {
 
     finishRetry(item("archive_pending"));
     await flushPromises();
+    wrapper.unmount();
+  });
+
+  it("offers removing an awaiting capture from the working strip", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([item()]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).toContain("从 Scene Vault 移除");
+    wrapper.unmount();
+  });
+
+  it("hides removal while a capture is being processed", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([item("queued")]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.find(".capture-card").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).not.toContain("从 Scene Vault 移除");
+    wrapper.unmount();
+  });
+
+  it("shows a replaced source and does not read the mismatched image", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([
+      { ...item(), sourceFileState: "replaced", destinationPath: null },
+    ]);
+    api.readImage.mockClear();
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("原图已被替换");
+    expect(api.readImage).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });

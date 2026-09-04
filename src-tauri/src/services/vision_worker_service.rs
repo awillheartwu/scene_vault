@@ -682,7 +682,10 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert_ne!(WorkerSettingsFingerprint::new(&changed, 4), base_fingerprint);
+            assert_ne!(
+                WorkerSettingsFingerprint::new(&changed, 4),
+                base_fingerprint
+            );
         }
         assert_ne!(WorkerSettingsFingerprint::new(&base, 2), base_fingerprint);
     }

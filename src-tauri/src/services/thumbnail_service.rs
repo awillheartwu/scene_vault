@@ -40,8 +40,7 @@ impl GenerationLimiter {
     }
 }
 
-static GENERATION_LIMIT: LazyLock<GenerationLimiter> =
-    LazyLock::new(|| GenerationLimiter::new(1));
+static GENERATION_LIMIT: LazyLock<GenerationLimiter> = LazyLock::new(|| GenerationLimiter::new(1));
 
 fn generation_limit() -> Arc<Semaphore> {
     GENERATION_LIMIT.semaphore()

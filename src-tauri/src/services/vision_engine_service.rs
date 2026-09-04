@@ -118,7 +118,9 @@ pub async fn health(settings: &VisionSettings) -> Result<VisionHealth, AppError>
             engine_version: None,
             python_version: None,
             process_screenshot_available: false,
-            error_message: Some("视觉引擎未配置：请配置 Python 与模型，或安装带 AI 组件的版本".to_owned()),
+            error_message: Some(
+                "视觉引擎未配置：请配置 Python 与模型，或安装带 AI 组件的版本".to_owned(),
+            ),
         });
     }
     let response = invoke(settings, "health", None, HEALTH_TIMEOUT).await?;
@@ -877,10 +879,7 @@ const PERMANENT_SOURCE_ERROR_CODES: [&str; 1] = ["input_not_found"];
 /// Engine error codes that usually mean the source image was still being
 /// written (or was locked) when read. They may resolve on their own, so the
 /// pre-label pass retries them a bounded number of times before skipping.
-const BOUNDED_RETRY_SOURCE_ERROR_CODES: [&str; 2] = [
-    "input_read_failed",
-    "image_decode_failed",
-];
+const BOUNDED_RETRY_SOURCE_ERROR_CODES: [&str; 2] = ["input_read_failed", "image_decode_failed"];
 
 /// Returns the engine error code when error means the source image is
 /// gone for good. Any other failure (missing model, broken Python
@@ -1137,7 +1136,9 @@ mod tests {
 
         // WebP has no fixed tail marker and must pass the pre-check.
         let webp = dir.path().join("ok.webp");
-        tokio::fs::write(&webp, b"RIFF....WEBP").await.expect("write webp");
+        tokio::fs::write(&webp, b"RIFF....WEBP")
+            .await
+            .expect("write webp");
         validate_image_complete(&webp).await.expect("webp passes");
     }
 

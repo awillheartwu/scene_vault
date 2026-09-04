@@ -2,11 +2,15 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
-async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+async function invoke<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  options: { recordFailure?: boolean } = {},
+): Promise<T> {
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    if (command !== "record_client_event") {
+    if (command !== "record_client_event" && options.recordFailure !== false) {
       void tauriInvoke("record_client_event", {
         input: {
           level: "error",
@@ -63,6 +67,51 @@ export interface ProjectDeletionPreview {
   noteCount: number;
   collectionCount: number;
   orphanAssetCount: number;
+}
+
+export interface CaptureDeletionPreview {
+  captureCount: number;
+  destinationFileCount: number;
+  networkDestinationFileCount: number;
+  localDerivedFileCount: number;
+  sourceFilesPreserved: number;
+}
+
+export interface FileRecycleFailure {
+  path: string;
+  error: string;
+}
+
+export interface CaptureDeletionResult {
+  completed: boolean;
+  recordsDeleted: number;
+  deletedCaptureItemIds: string[];
+  destinationFilesRecycled: number;
+  destinationFilesPermanentlyDeleted: number;
+  destinationFilesAlreadyMissing: number;
+  failures: FileRecycleFailure[];
+}
+
+export interface CaptureFileReconcileResult {
+  discoveredCount: number;
+  sourceMissingCount: number;
+  sourceReplacedCount: number;
+  destinationMissingCount: number;
+  destinationUnavailableCount: number;
+  unstableCount: number;
+}
+
+export interface ProjectFileReconcileResult {
+  scannedDirectoryCount: number;
+  scannedFileCount: number;
+  sourceCheckedCount: number;
+  relocatedCount: number;
+  sourceMissingCount: number;
+  sourceReplacedCount: number;
+  ambiguousCount: number;
+  unavailableSourceDirectoryCount: number;
+  destinationMissingCount: number;
+  destinationUnavailableCount: number;
 }
 
 export interface ProjectSourceDirectory {
@@ -204,6 +253,19 @@ export type CaptureStatus =
 
 export type CaptureClassification = "unclassified" | "person" | "scene" | "private";
 
+export type CaptureSourceFileState =
+  | "unknown"
+  | "available"
+  | "missing"
+  | "replaced";
+
+export type CaptureDestinationFileState =
+  | "none"
+  | "unknown"
+  | "available"
+  | "missing"
+  | "unavailable";
+
 export interface CaptureItem {
   id: string;
   projectId: string;
@@ -236,6 +298,10 @@ export interface CaptureItem {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Availability of the original screenshot; `replaced` means the path now holds different content. */
+  sourceFileState?: CaptureSourceFileState;
+  destinationFileState?: CaptureDestinationFileState;
+  destinationAvatarFileState?: CaptureDestinationFileState;
 }
 
 export interface CaptureHistoryEntry extends CaptureItem {
@@ -555,6 +621,15 @@ export const captureApi = {
     invoke<ProjectDeletionPreview>("preview_project_deletion", { projectId }),
   deleteProject: (projectId: string) =>
     invoke<ProjectDeletionPreview>("delete_project", { projectId }),
+  previewCaptureDeletion: (captureItemId: string) =>
+    invoke<CaptureDeletionPreview>("preview_capture_deletion", {
+      input: { captureItemId },
+    }),
+  deleteCaptureItem: (input: {
+    captureItemId: string;
+    deleteDestinationFiles: boolean;
+    allowPermanentNetworkDelete?: boolean;
+  }) => invoke<CaptureDeletionResult>("delete_capture_item", { input }),
   createProject: (name: string) =>
     invoke<Project>("create_project", {
       input: { name, description: null, coverAssetId: null },
@@ -575,6 +650,15 @@ export const captureApi = {
     characterId: string;
     avatarAssetId: string | null;
   }) => invoke<Character>("set_character_avatar", { input }),
+  previewCharacterDeletion: (input: {
+    characterId: string;
+    deleteDestinationFiles: boolean;
+  }) => invoke<CaptureDeletionPreview>("preview_character_deletion", { input }),
+  deleteCharacter: (input: {
+    characterId: string;
+    deleteDestinationFiles: boolean;
+    allowPermanentNetworkDelete?: boolean;
+  }) => invoke<CaptureDeletionResult>("delete_character", { input }),
   listProjectCharacterSummaries: (projectId: string) =>
     invoke<CharacterSummary[]>("list_project_character_summaries", {
       projectId,
@@ -631,6 +715,14 @@ export const captureApi = {
   startImportedRecognition: (sessionId: string) =>
     invoke<number>("start_imported_recognition", {
       input: { sessionId },
+    }),
+  reconcileCaptureFiles: (sessionId: string) =>
+    invoke<CaptureFileReconcileResult>("reconcile_capture_files", {
+      input: { sessionId },
+    }),
+  reconcileProjectFiles: (projectId: string) =>
+    invoke<ProjectFileReconcileResult>("reconcile_project_files", {
+      input: { projectId },
     }),
   label: (
     captureItemId: string,
@@ -837,9 +929,21 @@ export const captureApi = {
   listBundledFonts: () => invoke<BundledFont[]>("list_bundled_fonts"),
   checkVision: () => invoke<VisionHealth>("check_vision_engine"),
   readImage: (captureItemId: string, variant: "source" | "annotated" | "avatar" | "destination") =>
-    invoke<ArrayBuffer>("read_capture_image", { input: { captureItemId, variant } }),
+    invoke<ArrayBuffer>(
+      "read_capture_image",
+      { input: { captureItemId, variant } },
+      // Media reads are speculative: cards deliberately fall back to another
+      // variant or an ImageOff placeholder when files were removed outside
+      // Scene Vault. The backend still updates file state, while the caller
+      // decides whether an explicit preview should surface the error.
+      { recordFailure: false },
+    ),
   readThumbnail: (captureItemId: string, variant: "source" | "annotated" | "avatar" | "destination") =>
-    invoke<ArrayBuffer>("read_capture_thumbnail", { input: { captureItemId, variant } }),
+    invoke<ArrayBuffer>(
+      "read_capture_thumbnail",
+      { input: { captureItemId, variant } },
+      { recordFailure: false },
+    ),
   getThumbnailCacheStatus: () => invoke<ThumbnailCacheStatus>("thumbnail_cache_status"),
 };
 

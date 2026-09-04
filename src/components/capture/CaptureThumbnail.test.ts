@@ -89,3 +89,71 @@ it("loads the original for an auto-sized image wider than the thumbnail threshol
   expect(api.readThumbnail).not.toHaveBeenCalled();
   wrapper.unmount();
 });
+
+it("does not request the source when the item reports the file as missing", async () => {
+  let onIntersect: IntersectionObserverCallback = () => undefined;
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(callback: IntersectionObserverCallback) {
+      onIntersect = callback;
+    }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+    takeRecords() { return []; }
+    root = null;
+    rootMargin = "";
+    thresholds = [];
+  });
+
+  const wrapper = mount(CaptureThumbnail, {
+    props: {
+      item: {
+        id: "capture-missing",
+        sourcePath: "D:\\shots\\missing.png",
+        sourceFileState: "missing",
+      } as never,
+    },
+  });
+  await flushPromises();
+  onIntersect([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  await flushPromises();
+
+  expect(api.readThumbnail).not.toHaveBeenCalled();
+  expect(api.readImage).not.toHaveBeenCalled();
+  wrapper.unmount();
+});
+
+it("does not request an archived variant that is unreachable", async () => {
+  let onIntersect: IntersectionObserverCallback = () => undefined;
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(callback: IntersectionObserverCallback) {
+      onIntersect = callback;
+    }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+    takeRecords() { return []; }
+    root = null;
+    rootMargin = "";
+    thresholds = [];
+  });
+
+  const wrapper = mount(CaptureThumbnail, {
+    props: {
+      item: {
+        id: "capture-unavailable",
+        sourcePath: "D:\\shots\\one.png",
+        destinationPath: "D:\\archive\\one.png",
+        destinationFileState: "unavailable",
+      } as never,
+      variant: "destination",
+    },
+  });
+  await flushPromises();
+  onIntersect([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  await flushPromises();
+
+  expect(api.readThumbnail).not.toHaveBeenCalled();
+  expect(api.readImage).not.toHaveBeenCalled();
+  wrapper.unmount();
+});

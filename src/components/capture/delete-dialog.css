@@ -1,0 +1,231 @@
+/* Shared styles for Scene Vault deletion confirmation dialogs. */
+.delete-dialog {
+  position: fixed;
+  z-index: calc(var(--layer-overlay) + 1);
+  top: 50%;
+  left: 50%;
+  width: min(520px, calc(100vw - 48px));
+  gap: 12px;
+  transform: translate(-50%, -50%);
+}
+
+.delete-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.delete-title h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.delete-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+  color: var(--destructive);
+}
+
+.dialog-close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.dialog-close:hover:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.dialog-close:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.delete-description {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.delete-effects {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+  list-style: none;
+}
+
+.delete-effects li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.delete-effects li::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.delete-effects li.delete-danger::before {
+  background: var(--destructive);
+}
+
+.delete-target-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 70%, transparent);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.delete-target-option input {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin: 1px 0 0;
+  accent-color: var(--destructive);
+}
+
+.delete-target-option:has(input:disabled) {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.delete-target-option small {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.keep-files-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.keep-files-note svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.partial-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 42%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--destructive) 8%, var(--card));
+  color: var(--destructive);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.partial-warning .partial-failures {
+  display: grid;
+  gap: 4px;
+  max-height: 120px;
+  margin: 0;
+  padding-left: 18px;
+  overflow-y: auto;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+}
+
+.partial-warning .partial-failures li code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delete-error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.preview-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.danger-action {
+  display: inline-flex;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--destructive);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.danger-action:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.danger-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}

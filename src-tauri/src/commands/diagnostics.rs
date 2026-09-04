@@ -146,7 +146,11 @@ mod tests {
         let fallback = PathBuf::from("C:/app/ai-runtime");
         let sidecar = PathBuf::from("D:/sv/scene-vault-ai.exe");
         assert_eq!(
-            python_runtime_path(Some("C:/py/venv/Scripts/python.exe"), None, fallback.clone()),
+            python_runtime_path(
+                Some("C:/py/venv/Scripts/python.exe"),
+                None,
+                fallback.clone()
+            ),
             PathBuf::from("C:/py/venv")
         );
         assert_eq!(
@@ -208,11 +212,7 @@ fn configured_parent(value: Option<&str>, fallback: PathBuf) -> PathBuf {
         .unwrap_or(fallback)
 }
 
-fn python_runtime_path(
-    value: Option<&str>,
-    sidecar: Option<&Path>,
-    fallback: PathBuf,
-) -> PathBuf {
+fn python_runtime_path(value: Option<&str>, sidecar: Option<&Path>, fallback: PathBuf) -> PathBuf {
     if let Some(executable) = value.map(Path::new) {
         let Some(parent) = executable.parent() else {
             return fallback;

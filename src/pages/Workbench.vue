@@ -15,7 +15,9 @@ import {
   Pencil,
   RefreshCw,
   RotateCcw,
+  Search,
   Sparkles,
+  Trash2,
   UserPlus,
   UserRound,
   Users,
@@ -23,7 +25,13 @@ import {
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
+import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
+import {
+  captureFileIssues,
+  captureVariantReadReason,
+} from "@/components/capture/capture-file-state";
 import CharacterMergeDialog from "@/components/character/CharacterMergeDialog.vue";
+import CharacterDeleteDialog from "@/components/character/CharacterDeleteDialog.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
@@ -52,6 +60,7 @@ import {
   type FaceBankModelStatus,
   type FaceSample,
   type Project,
+  type ProjectFileReconcileResult,
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
 import {
@@ -83,8 +92,14 @@ const renameOpen = ref(false);
 const renameName = ref("");
 const renameBusy = ref(false);
 const mergeOpen = ref(false);
+const deleteItemTarget = ref<CaptureItem | null>(null);
+const deleteCharacterTarget = ref<CharacterSummary | null>(null);
+const characterSearch = ref("");
+const projectReconcileBusy = ref(false);
+const projectReconcileResult = ref<ProjectFileReconcileResult | null>(null);
 const detailOpen = ref(false);
 const mergeButton = ref<HTMLButtonElement | null>(null);
+let purgeReloadTimer: number | null = null;
 let unlisteners: UnlistenFn[] = [];
 let initialized = false;
 let componentActive = true;
@@ -145,6 +160,18 @@ function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
       action: () => {
         selectedCharacterId.value = summary.id;
         void batchReprocess(summary.id);
+      },
+    },
+    {
+      id: "delete-character",
+      label: "删除角色…",
+      icon: Trash2,
+      danger: true,
+      separatorBefore: true,
+      disabled: busy.value,
+      action: () => {
+        selectedCharacterId.value = summary.id;
+        deleteCharacterTarget.value = summary;
       },
     },
   ];
@@ -249,6 +276,7 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
     id: "reveal-source",
     label: "显示原图",
     icon: Image,
+    disabled: captureVariantReadReason(item, "source") !== null,
     action: () => reveal(item.sourcePath),
   });
   if (item.destinationPath) {
@@ -256,15 +284,49 @@ function buildItemItems(item: CaptureItem): ContextMenuItem[] {
       id: "reveal-destination",
       label: "显示归档图",
       icon: Archive,
+      disabled: captureVariantReadReason(item, "destination") !== null,
       action: () => reveal(item.destinationPath),
+    });
+  }
+  if (canDeleteItem(item)) {
+    items.push({
+      id: "delete-item",
+      label: "从 Scene Vault 移除…",
+      icon: Trash2,
+      danger: true,
+      separatorBefore: true,
+      disabled: busy.value,
+      action: () => {
+        selectedItemId.value = item.id;
+        deleteItemTarget.value = item;
+      },
     });
   }
   return items;
 }
 
+function canDeleteItem(item: CaptureItem): boolean {
+  return !["queued", "processing", "archive_pending"].includes(item.status);
+}
+
 const selectedCharacter = computed(
   () => summaries.value.find((summary) => summary.id === selectedCharacterId.value) ?? null,
 );
+const filteredSummaries = computed(() => {
+  const query = characterSearch.value.trim().toLocaleLowerCase();
+  if (!query) return summaries.value;
+  return summaries.value.filter((summary) => {
+    if (summary.name.toLocaleLowerCase().includes(query)) return true;
+    try {
+      const aliases = JSON.parse(summary.aliasesJson) as unknown;
+      return Array.isArray(aliases) && aliases.some(
+        (alias) => typeof alias === "string" && alias.toLocaleLowerCase().includes(query),
+      );
+    } catch {
+      return false;
+    }
+  });
+});
 const projectDegradedCount = computed(() =>
   summaries.value.reduce((sum, summary) => sum + summary.degradedCount, 0),
 );
@@ -394,6 +456,19 @@ function suggestionEmptyReason(item: CaptureItem): string {
 
 function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function runProjectFileReconcile() {
+  if (!projectId.value || projectReconcileBusy.value) return;
+  projectReconcileBusy.value = true;
+  try {
+    projectReconcileResult.value = await captureApi.reconcileProjectFiles(projectId.value);
+    await loadCharacterData({ manageLoading: false });
+  } catch (error) {
+    toast.error(normalizeError(error));
+  } finally {
+    projectReconcileBusy.value = false;
+  }
 }
 
 function thumbnailItem(id: string): CaptureItem {
@@ -912,6 +987,8 @@ watch(projectId, async () => {
   items.value = [];
   samples.value = [];
   selectedItemId.value = null;
+  characterSearch.value = "";
+  projectReconcileResult.value = null;
   selectedCharacterId.value = projectId.value
     ? localStorage.getItem(`scene-vault.workbench.character.${projectId.value}`)
     : null;
@@ -943,6 +1020,24 @@ function onItemPageSizeChange(size: number) {
   itemPage.value = 1;
   void loadItems();
 }
+function schedulePurgeReload() {
+  if (purgeReloadTimer !== null) return;
+  purgeReloadTimer = window.setTimeout(() => {
+    purgeReloadTimer = null;
+    if (initialized) void loadCharacterData();
+  }, 150);
+}
+
+function onCaptureItemDeleted() {
+  deleteItemTarget.value = null;
+  schedulePurgeReload();
+}
+
+function onCharacterDeleted() {
+  deleteCharacterTarget.value = null;
+  schedulePurgeReload();
+}
+
 async function registerWorkbenchListeners() {
   // Listener registration crosses the Tauri bridge. It must never delay the
   // first data request, and all three registrations can run concurrently.
@@ -951,7 +1046,10 @@ async function registerWorkbenchListeners() {
       if (initialized) void loadCharacterData();
     }),
     listen("capture:item-purged", () => {
-      if (initialized) void loadCharacterData();
+      schedulePurgeReload();
+    }),
+    listen("capture:character-deleted", () => {
+      schedulePurgeReload();
     }),
     listen("capture:face-bank-rebuilt", () => {
       // A rebuild refreshed features and suggestions for many items; the
@@ -983,6 +1081,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   componentActive = false;
+  if (purgeReloadTimer !== null) {
+    window.clearTimeout(purgeReloadTimer);
+    purgeReloadTimer = null;
+  }
   unlisteners.forEach((unlisten) => unlisten());
   unlisteners = [];
 });
@@ -1004,6 +1106,16 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </label>
+        <button
+          type="button"
+          class="secondary-action"
+          :disabled="loading || projectReconcileBusy || !projectId"
+          title="检查整个项目的原图路径和归档目标；不会导入或识别新文件"
+          @click="runProjectFileReconcile"
+        >
+          <Search :size="17" :class="{ 'animate-spin': projectReconcileBusy }" />
+          {{ projectReconcileBusy ? "检查中…" : "检查项目文件" }}
+        </button>
         <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData()">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
         </button>
@@ -1089,8 +1201,29 @@ onBeforeUnmount(() => {
         </div>
         <template v-if="view === 'characters'">
         <div class="workbench-characters-title">
-          <Users :size="16" /><span>角色</span><span class="count">{{ loading && !summaries.length ? "…" : summaries.length }}</span>
+          <Users :size="16" /><span>角色</span><span class="count">
+            {{ loading && !summaries.length ? "…" : characterSearch.trim() ? `${filteredSummaries.length}/${summaries.length}` : summaries.length }}
+          </span>
         </div>
+        <label class="character-search">
+          <Search :size="15" aria-hidden="true" />
+          <input
+            v-model="characterSearch"
+            type="search"
+            aria-label="搜索人物"
+            placeholder="搜索人物名称或别名"
+            autocomplete="off"
+          />
+          <button
+            v-if="characterSearch"
+            type="button"
+            aria-label="清空人物搜索"
+            title="清空搜索"
+            @click="characterSearch = ''"
+          >
+            <X :size="14" />
+          </button>
+        </label>
         <div
           v-if="loading && !summaries.length"
           class="workbench-character-skeletons"
@@ -1107,7 +1240,7 @@ onBeforeUnmount(() => {
         </div>
         <template v-else>
         <button
-          v-for="summary in summaries"
+          v-for="summary in filteredSummaries"
           :key="summary.id"
           type="button"
           class="character-card"
@@ -1144,7 +1277,10 @@ onBeforeUnmount(() => {
             {{ summary.pendingReviewCount }}
           </span>
         </button>
-        <div v-if="!summaries.length && !loading" class="workbench-empty">
+        <div v-if="characterSearch.trim() && !filteredSummaries.length && !loading" class="workbench-empty">
+          没有匹配“{{ characterSearch.trim() }}”的人物。
+        </div>
+        <div v-else-if="!summaries.length && !loading" class="workbench-empty">
           还没有角色，先在捕获流程创建角色并标记截图。
         </div>
         </template>
@@ -1281,6 +1417,12 @@ onBeforeUnmount(() => {
                 {{ sampleIssueLabel(item) }}
               </span>
               <span v-if="item.reviewStatus === 'pending'" class="review-chip">建议待确认</span>
+              <span
+                v-for="issue in captureFileIssues(item)"
+                :key="issue.kind"
+                class="file-state-chip"
+                :data-state="issue.state"
+              >{{ issue.label }}</span>
             </span>
           </button>
           <div v-if="!items.length && !loading" class="workbench-empty">该角色名下还没有截图。</div>
@@ -1385,6 +1527,14 @@ onBeforeUnmount(() => {
           <dl class="detail-facts">
             <div><dt>截图</dt><dd>{{ pathFileName(selectedItem.sourcePath) }}</dd></div>
             <div><dt>状态</dt><dd>{{ captureStatusLabel(selectedItem.status, selectedItem.failureStage) }}</dd></div>
+            <div
+              v-for="issue in captureFileIssues(selectedItem)"
+              :key="issue.kind"
+              class="file-issue-row"
+            >
+              <dt>{{ issue.kind === "source" ? "原图" : "目标文件" }}</dt>
+              <dd :data-state="issue.state">{{ issue.label }}</dd>
+            </div>
             <div><dt>当前角色</dt><dd>{{ characterName(selectedItem.characterId) || "未标记" }}</dd></div>
             <div><dt>分类</dt><dd>{{ classificationLabel(selectedItem.classification) }}</dd></div>
             <div><dt>捕获时间</dt><dd>{{ new Date(selectedItem.capturedAt).toLocaleString() }}</dd></div>
@@ -1531,16 +1681,31 @@ onBeforeUnmount(() => {
           <section class="action-card">
             <span class="action-card-title">定位文件</span>
             <div class="action-card-body">
-              <button type="button" class="path-button" @click="reveal(selectedItem.sourcePath)">
+              <button
+                type="button"
+                class="path-button"
+                :disabled="captureVariantReadReason(selectedItem, 'source') !== null"
+                :title="captureVariantReadReason(selectedItem, 'source') ?? '在文件管理器中定位原图'"
+                @click="reveal(selectedItem.sourcePath)"
+              >
                 <Image :size="15" />原图<ExternalLink :size="12" />
               </button>
-              <button v-if="selectedItem.destinationPath" type="button" class="path-button" @click="reveal(selectedItem.destinationPath)">
+              <button
+                v-if="selectedItem.destinationPath"
+                type="button"
+                class="path-button"
+                :disabled="captureVariantReadReason(selectedItem, 'destination') !== null"
+                :title="captureVariantReadReason(selectedItem, 'destination') ?? '在文件管理器中定位归档图'"
+                @click="reveal(selectedItem.destinationPath)"
+              >
                 <Archive :size="15" />归档图<ExternalLink :size="12" />
               </button>
               <button
                 v-if="selectedItem.destinationAvatarPath"
                 type="button"
                 class="path-button"
+                :disabled="captureVariantReadReason(selectedItem, 'avatar') !== null"
+                :title="captureVariantReadReason(selectedItem, 'avatar') ?? '在文件管理器中定位头像归档'"
                 @click="reveal(selectedItem.destinationAvatarPath)"
               >
                 <UserRound :size="15" />头像归档<ExternalLink :size="12" />
@@ -1593,7 +1758,169 @@ onBeforeUnmount(() => {
         </form>
       </DialogContent>
     </Dialog>
+    <CaptureDeleteDialog
+      v-if="deleteItemTarget"
+      :capture-item="deleteItemTarget"
+      @close="deleteItemTarget = null"
+      @deleted="onCaptureItemDeleted"
+    />
+    <CharacterDeleteDialog
+      v-if="deleteCharacterTarget"
+      :source="deleteCharacterTarget"
+      @close="deleteCharacterTarget = null"
+      @deleted="onCharacterDeleted"
+    />
+    <Dialog
+      :open="projectReconcileResult !== null"
+      @update:open="!$event && (projectReconcileResult = null)"
+    >
+      <DialogContent
+        v-if="projectReconcileResult"
+        class="rename-dialog project-reconcile-dialog"
+        :show-close-button="false"
+        aria-label="项目文件检查结果"
+      >
+        <span class="eyebrow">项目维护</span>
+        <DialogTitle>项目文件检查完成</DialogTitle>
+        <DialogDescription>
+          已检查 {{ projectReconcileResult.sourceCheckedCount }} 条截图记录，扫描
+          {{ projectReconcileResult.scannedDirectoryCount }} 个来源目录中的
+          {{ projectReconcileResult.scannedFileCount }} 张图片。没有导入或启动识别。
+        </DialogDescription>
+        <ul class="project-reconcile-list">
+          <li v-if="projectReconcileResult.relocatedCount">
+            已重新定位 {{ projectReconcileResult.relocatedCount }} 张原图，并保留人物、分类、归档和人脸数据
+          </li>
+          <li v-if="projectReconcileResult.sourceMissingCount">
+            {{ projectReconcileResult.sourceMissingCount }} 张原图缺失
+          </li>
+          <li v-if="projectReconcileResult.sourceReplacedCount">
+            {{ projectReconcileResult.sourceReplacedCount }} 张原图路径已出现不同内容
+          </li>
+          <li v-if="projectReconcileResult.ambiguousCount">
+            {{ projectReconcileResult.ambiguousCount }} 张原图存在多个同名同内容候选，未自动重定位
+          </li>
+          <li v-if="projectReconcileResult.destinationMissingCount">
+            {{ projectReconcileResult.destinationMissingCount }} 个归档/头像目标文件缺失
+          </li>
+          <li v-if="projectReconcileResult.destinationUnavailableCount">
+            {{ projectReconcileResult.destinationUnavailableCount }} 个归档/头像目标当前不可访问
+          </li>
+          <li v-if="projectReconcileResult.unavailableSourceDirectoryCount" class="reconcile-warning">
+            {{ projectReconcileResult.unavailableSourceDirectoryCount }} 个来源目录不可访问；为避免误判，未批量改写其缺失状态
+          </li>
+          <li
+            v-if="!projectReconcileResult.relocatedCount && !projectReconcileResult.sourceMissingCount && !projectReconcileResult.sourceReplacedCount && !projectReconcileResult.ambiguousCount && !projectReconcileResult.destinationMissingCount && !projectReconcileResult.destinationUnavailableCount && !projectReconcileResult.unavailableSourceDirectoryCount"
+          >
+            所有已登记文件状态正常
+          </li>
+        </ul>
+        <div class="rename-actions">
+          <button type="button" class="primary-action" @click="projectReconcileResult = null">完成</button>
+        </div>
+      </DialogContent>
+    </Dialog>
     <ContextMenu :menu="characterMenu" />
     <ContextMenu :menu="itemMenu" />
   </section>
 </template>
+
+<style scoped>
+.character-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 10px 8px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+
+.character-search:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 18%, transparent);
+}
+
+.character-search input {
+  min-width: 0;
+  flex: 1;
+  height: 34px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+}
+
+.character-search button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.project-reconcile-dialog {
+  max-width: 540px;
+}
+
+.project-reconcile-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  padding-left: 20px;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.project-reconcile-list .reconcile-warning {
+  color: var(--warn);
+}
+
+.workbench-cell-meta .file-state-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--border));
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  color: var(--destructive);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.workbench-cell-meta .file-state-chip[data-state="replaced"],
+.workbench-cell-meta .file-state-chip[data-state="unavailable"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
+
+.file-issue-row dd[data-state] {
+  display: inline-flex;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--border));
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  color: var(--destructive);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.file-issue-row dd[data-state="unavailable"],
+.file-issue-row dd[data-state="replaced"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
+
+.path-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+</style>

@@ -266,7 +266,6 @@ pub async fn list_project_recent_items(
         SELECT
             item.id, item.project_id, item.session_id, item.asset_id,
             item.character_id, item.classification, item.source_path, item.file_size, item.modified_at_ms, item.content_hash,
-            item.file_size, item.modified_at_ms, item.content_hash,
             item.annotated_path, item.avatar_path, item.destination_path,
             item.destination_avatar_path, item.status, item.face_box_json, item.face_count,
             item.suggested_character_id, item.recognition_confidence,
@@ -274,7 +273,8 @@ pub async fn list_project_recent_items(
             item.error_message, item.failure_stage, item.attempt_count,
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
-            item.created_at, item.updated_at
+            item.created_at, item.updated_at, item.source_file_state,
+            item.destination_file_state, item.destination_avatar_file_state
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         -- The strip shows the active session's captures plus every capture
@@ -344,6 +344,77 @@ pub fn image_path(item: &CaptureItem, variant: &str) -> Result<PathBuf, AppError
     Ok(PathBuf::from(path))
 }
 
+/// Confirms that the watched path still contains the immutable content owned
+/// by this capture. Processing and archive paths always hash the file: size
+/// and mtime are only discovery hints and are not strong enough to authorize
+/// writing derived data to an existing capture generation.
+pub async fn validate_source_identity(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+) -> Result<PathBuf, AppError> {
+    let path = PathBuf::from(&item.source_path);
+    let metadata = match tokio::fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            set_source_file_state(pool, &item.id, "missing").await?;
+            return Err(AppError::NotFound("capture source image".to_owned()));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            set_source_file_state(pool, &item.id, "missing").await?;
+            return Err(AppError::NotFound("capture source image".to_owned()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let size = i64::try_from(metadata.len())
+        .map_err(|_| AppError::Validation("capture source is too large".to_owned()))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| unix_millis(value).ok());
+    let hash = sha256_file(&path).await?;
+    if item
+        .content_hash
+        .as_deref()
+        .is_some_and(|value| value != hash)
+    {
+        set_source_file_state(pool, &item.id, "replaced").await?;
+        return Err(AppError::Conflict(
+            "capture source was replaced by different content; check file changes first".to_owned(),
+        ));
+    }
+    sqlx::query(
+        r#"
+        UPDATE capture_items
+        SET file_size = ?, modified_at_ms = ?, content_hash = COALESCE(content_hash, ?),
+            source_file_state = 'available',
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ?
+        "#,
+    )
+    .bind(size)
+    .bind(modified)
+    .bind(hash)
+    .bind(&item.id)
+    .execute(pool)
+    .await?;
+    Ok(path)
+}
+
+pub(crate) async fn set_source_file_state(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    state: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE capture_items SET source_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+    )
+    .bind(state)
+    .bind(capture_item_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn end_session(
     pool: &SqlitePool,
     input: EndCaptureSessionInput,
@@ -411,7 +482,7 @@ pub async fn list_items(pool: &SqlitePool, session_id: &str) -> Result<Vec<Captu
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
         WHERE session_id = ?
         ORDER BY captured_at DESC, created_at DESC, id DESC
@@ -457,7 +528,7 @@ pub async fn list_items_paged(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
         WHERE session_id = ?
         ORDER BY captured_at DESC, created_at DESC, id DESC
@@ -515,7 +586,8 @@ pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupCo
             item.error_message, item.failure_stage, item.attempt_count,
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
-            item.created_at, item.updated_at
+            item.created_at, item.updated_at, item.source_file_state,
+            item.destination_file_state, item.destination_avatar_file_state
         FROM capture_items item
         WHERE item.status = 'awaiting_label'
           AND item.project_id = ?
@@ -632,7 +704,10 @@ pub async fn list_history(
             item.processing_warnings_json,
             item.captured_at,
             item.processed_at,
-            item.archived_at
+            item.archived_at,
+            item.source_file_state,
+            item.destination_file_state,
+            item.destination_avatar_file_state
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         JOIN projects project ON project.id = session.project_id
@@ -765,7 +840,7 @@ pub async fn label_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(character_id.clone())
@@ -928,6 +1003,7 @@ async fn relabel_capture_item_inner(
             "cannot relabel a capture that is processing or waiting to archive".to_owned(),
         )),
         "completed" => {
+            validate_source_identity(pool, &current).await?;
             relabel_completed_capture(
                 pool,
                 capture_item_id,
@@ -991,7 +1067,7 @@ async fn relabel_pending_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(character_id)
@@ -1061,7 +1137,7 @@ async fn relabel_completed_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(character_id)
@@ -1124,6 +1200,7 @@ pub async fn complete_processing(
         ));
     }
 
+    validate_source_identity(pool, &item).await?;
     let source_path = tokio::fs::canonicalize(&item.source_path).await?;
     let annotated_path = match input
         .annotated_path
@@ -1232,7 +1309,7 @@ pub async fn complete_processing(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(annotated_path)
@@ -1280,7 +1357,7 @@ pub(crate) async fn complete_processing_without_engine(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(warnings_json)
@@ -1314,7 +1391,7 @@ pub async fn mark_failed(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(error_message)
@@ -1347,6 +1424,7 @@ pub async fn retry_capture(
             "only failed or degraded completed capture items can be retried".to_owned(),
         ));
     }
+    validate_source_identity(pool, &current).await?;
     let retry_archive = current.failure_stage.as_deref() == Some("archive")
         && current
             .annotated_path
@@ -1383,7 +1461,7 @@ pub async fn retry_capture(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
             "#,
         )
         .bind(capture_item_id)
@@ -1412,7 +1490,7 @@ pub async fn retry_capture(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
             "#,
         )
         .bind(next_status)
@@ -1514,7 +1592,8 @@ fn category_page_query(filter: &str, paged: bool) -> String {
             item.error_message, item.failure_stage, item.attempt_count,
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
-            item.created_at, item.updated_at
+            item.created_at, item.updated_at, item.source_file_state,
+            item.destination_file_state, item.destination_avatar_file_state
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ? AND {filter}
@@ -1691,14 +1770,6 @@ pub async fn import_directory_captures(
             continue;
         }
         let source_path = path_to_string(&canonical);
-        let already_registered: i64 =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM capture_items WHERE source_path = ?)")
-                .bind(&source_path)
-                .fetch_one(pool)
-                .await?;
-        if already_registered != 0 {
-            continue;
-        }
         sqlx::query(
             "DELETE FROM capture_session_baseline_files WHERE session_id = ? AND source_path = ?",
         )
@@ -1839,7 +1910,7 @@ pub(crate) async fn get_item(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
         WHERE id = ?
         "#,
@@ -1881,7 +1952,7 @@ pub(crate) async fn claim_next_queued(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(skip_person)
@@ -1905,7 +1976,7 @@ pub(crate) async fn peek_next_queued(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
         WHERE status = 'queued'
           AND (? = 0 OR classification != 'person')
@@ -1934,10 +2005,11 @@ pub(crate) async fn next_awaiting_label_without_feature(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
         WHERE status = 'awaiting_label'
           AND recognition_deferred = 0
+          AND source_file_state NOT IN ('missing', 'replaced')
           AND NOT EXISTS (
               SELECT 1
               FROM capture_faces face
@@ -2064,7 +2136,7 @@ pub(crate) async fn mark_archive_pending_from_processing(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(capture_item_id)
@@ -2086,7 +2158,7 @@ pub(crate) async fn next_archive_pending(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
         WHERE status = 'archive_pending'
           AND (next_retry_at IS NULL OR next_retry_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -2133,7 +2205,7 @@ pub(crate) async fn schedule_archive_retry(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(status)
@@ -2154,26 +2226,6 @@ pub(crate) async fn register_discovered_path(
     recognition_deferred: bool,
 ) -> Result<(CaptureItem, bool), AppError> {
     let session = require_active_session(pool, session_id).await?;
-    // Fast path: the path is already registered. Discovery polls active
-    // sessions on a fixed interval, and returning the existing row here
-    // avoids opening the file and re-reading its contents for a SHA-256 on
-    // every poll.
-    let existing_id: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM capture_items
-        WHERE session_id = ? AND source_path = ?
-        LIMIT 1
-        "#,
-    )
-    .bind(session_id)
-    .bind(path_to_string(source_path))
-    .fetch_optional(pool)
-    .await?;
-    if let Some(existing_id) = existing_id {
-        let item = get_item(pool, &existing_id).await?;
-        return Ok((item, false));
-    }
     let metadata = tokio::fs::metadata(source_path).await?;
     let file_size = i64::try_from(metadata.len())
         .map_err(|_| AppError::Validation("capture source is too large".to_owned()))?;
@@ -2182,6 +2234,12 @@ pub(crate) async fn register_discovered_path(
         .ok()
         .and_then(|value| unix_millis(value).ok());
     let content_hash = sha256_file(source_path).await?;
+
+    if is_content_ignored(pool, &session.project_id, &content_hash).await? {
+        return Err(AppError::Conflict(
+            "capture content was removed from Scene Vault and is ignored".to_owned(),
+        ));
+    }
 
     // Content fingerprint dedup: the same image found in another directory
     // of the same project registers only once.
@@ -2212,7 +2270,7 @@ pub(crate) async fn register_discovered_path(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
             FROM capture_items
             WHERE id = ?
             "#,
@@ -2227,12 +2285,13 @@ pub(crate) async fn register_discovered_path(
         r#"
         INSERT INTO capture_items (
             id, project_id, session_id, source_path,
-            file_size, modified_at_ms, content_hash, recognition_deferred
+            file_size, modified_at_ms, content_hash, recognition_deferred,
+            source_file_state
         )
-        SELECT ?, project_id, id, ?, ?, ?, ?, ?
+        SELECT ?, project_id, id, ?, ?, ?, ?, ?, 'available'
         FROM capture_sessions
         WHERE id = ? AND status = 'active'
-        ON CONFLICT(session_id, source_path) DO NOTHING
+        ON CONFLICT DO NOTHING
         "#,
     )
     .bind(Uuid::new_v4().to_string())
@@ -2255,13 +2314,13 @@ pub(crate) async fn register_discovered_path(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         FROM capture_items
-        WHERE session_id = ? AND source_path = ?
+        WHERE project_id = ? AND content_hash = ?
         "#,
     )
-    .bind(session_id)
-    .bind(source_path)
+    .bind(&session.project_id)
+    .bind(&content_hash)
     .fetch_optional(pool)
     .await?;
     let item = match item {
@@ -2273,7 +2332,45 @@ pub(crate) async fn register_discovered_path(
             ));
         }
     };
-    Ok((item, result.rows_affected() == 1))
+    let created = result.rows_affected() == 1;
+    if created {
+        sqlx::query(
+            r#"
+            UPDATE capture_items
+            SET source_file_state = 'replaced',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE project_id = ? AND source_path = ? AND id != ?
+            "#,
+        )
+        .bind(&session.project_id)
+        .bind(&source_path)
+        .bind(&item.id)
+        .execute(pool)
+        .await?;
+    }
+    Ok((item, created))
+}
+
+pub(crate) async fn is_content_ignored(
+    pool: &SqlitePool,
+    project_id: &str,
+    content_hash: &str,
+) -> Result<bool, AppError> {
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ignored_capture_contents')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !table_exists {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM ignored_capture_contents WHERE project_id = ? AND content_hash = ?)",
+    )
+    .bind(project_id)
+    .bind(content_hash)
+    .fetch_one(pool)
+    .await?)
 }
 
 pub(crate) async fn matches_discovery_baseline(
@@ -2334,7 +2431,7 @@ pub(crate) async fn set_archive_pending_for_retry(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(capture_item_id)
@@ -2436,7 +2533,7 @@ async fn transition_item(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
         "#,
     )
     .bind(to)
@@ -2493,18 +2590,16 @@ pub(crate) async fn sync_session_source_directories(
     pool: &SqlitePool,
     session: &CaptureSession,
 ) -> Result<(), AppError> {
-    let project_dirs: Vec<String> = sqlx::query_scalar(
-        "SELECT directory FROM project_source_directories WHERE project_id = ?",
-    )
-    .bind(&session.project_id)
-    .fetch_all(pool)
-    .await?;
-    let session_dirs: Vec<String> = sqlx::query_scalar(
-        "SELECT directory FROM session_source_directories WHERE session_id = ?",
-    )
-    .bind(&session.id)
-    .fetch_all(pool)
-    .await?;
+    let project_dirs: Vec<String> =
+        sqlx::query_scalar("SELECT directory FROM project_source_directories WHERE project_id = ?")
+            .bind(&session.project_id)
+            .fetch_all(pool)
+            .await?;
+    let session_dirs: Vec<String> =
+        sqlx::query_scalar("SELECT directory FROM session_source_directories WHERE session_id = ?")
+            .bind(&session.id)
+            .fetch_all(pool)
+            .await?;
     let missing: Vec<&String> = project_dirs
         .iter()
         .filter(|dir| !session_dirs.iter().any(|existing| existing == *dir))

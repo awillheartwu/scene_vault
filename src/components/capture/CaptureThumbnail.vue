@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ImageOff } from "@lucide/vue";
 import { captureApi, pathMimeType, type CaptureItem } from "@/lib/capture-api";
+import { captureVariantReadReason } from "./capture-file-state";
 
 const props = withDefaults(defineProps<{
   item: CaptureItem;
@@ -45,6 +46,9 @@ async function loadImage() {
     ? [props.variant, props.fallbackVariant]
     : [props.variant];
   for (const variant of variants) {
+    // Known-missing, replaced or unreachable files must not trigger pointless
+    // image reads; the backend state is authoritative when present.
+    if (captureVariantReadReason(props.item, variant)) continue;
     try {
       let bytes: ArrayBuffer;
       try {

@@ -5,20 +5,23 @@ use crate::{
     error::AppError,
     models::{
         capture::{
+            CaptureDeletionPreview, CaptureDeletionResult, CaptureFileReconcileResult,
             CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureItemListResponse,
             CaptureSession, ClassifyPopupContext, CompleteCaptureProcessingInput,
-            DiscoverCapturesInput, DiscoverCapturesResult, EndCaptureSessionInput,
-            ImportDirectoryCapturesInput, ImportedRecognitionInput, LabelCaptureInput,
-            ListCaptureHistoryInput, ListCategoryItemsInput, MarkCaptureFailedInput,
-            ReadCaptureImageInput, RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput,
-            RetryDegradedCapturesInput, StartCaptureSessionInput, StartCaptureSessionResult,
-            UnimportedCapture,
+            DeleteCaptureInput, DiscoverCapturesInput, DiscoverCapturesResult,
+            EndCaptureSessionInput, ImportDirectoryCapturesInput, ImportedRecognitionInput,
+            LabelCaptureInput, ListCaptureHistoryInput, ListCategoryItemsInput,
+            MarkCaptureFailedInput, ProjectFileReconcileResult, ReadCaptureImageInput,
+            ReconcileCaptureFilesInput, ReconcileProjectFilesInput, RegisterCaptureInput,
+            RelabelCaptureInput, RetryCaptureInput, RetryDegradedCapturesInput,
+            StartCaptureSessionInput, StartCaptureSessionResult, UnimportedCapture,
         },
         diagnostics::{LogLevel, LogRecord},
     },
     services::{
-        capture_archive_service, capture_discovery_service, capture_service, log_service,
-        thumbnail_service,
+        capture_archive_service, capture_deletion_service, capture_discovery_service,
+        capture_service, file_recycle_service::SystemRecycleBin, log_service,
+        project_file_reconcile_service, thumbnail_service,
     },
 };
 
@@ -106,6 +109,116 @@ pub async fn discover_captures(
         event: Some("scan_completed".to_owned()),
         session_id: Some(session_id),
         duration_ms: Some(result.scan_duration_ms as f64),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn preview_capture_deletion(
+    state: State<'_, AppState>,
+    input: CaptureItemIdInput,
+) -> Result<CaptureDeletionPreview, AppError> {
+    capture_deletion_service::preview_capture(&state.pool, &input.capture_item_id).await
+}
+
+#[tauri::command]
+pub async fn delete_capture_item(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: DeleteCaptureInput,
+) -> Result<CaptureDeletionResult, AppError> {
+    use tauri::Manager;
+
+    let result = capture_deletion_service::delete_capture(
+        &state.pool,
+        &app.path().app_cache_dir()?,
+        &app.path().app_local_data_dir()?,
+        &input.capture_item_id,
+        input.delete_destination_files,
+        input.allow_permanent_network_delete,
+        &SystemRecycleBin,
+    )
+    .await?;
+    if result.completed {
+        for id in &result.deleted_capture_item_ids {
+            let _ = app.emit(
+                "capture:item-purged",
+                serde_json::json!({ "captureItemId": id }),
+            );
+        }
+    }
+    log_service::record_event(LogRecord {
+        level: if result.completed {
+            LogLevel::Info
+        } else {
+            LogLevel::Warn
+        },
+        module: "capture.deletion".to_owned(),
+        message: if result.completed {
+            "capture removed from Scene Vault".to_owned()
+        } else {
+            "capture removal retained records after target deletion failure".to_owned()
+        },
+        event: Some("capture_delete_completed".to_owned()),
+        capture_item_id: Some(input.capture_item_id),
+        outcome: Some(
+            if result.completed {
+                "succeeded"
+            } else {
+                "partial"
+            }
+            .to_owned(),
+        ),
+        error_code: (!result.completed).then(|| "target_delete_failed".to_owned()),
+        ..Default::default()
+    });
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn reconcile_capture_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ReconcileCaptureFilesInput,
+) -> Result<CaptureFileReconcileResult, AppError> {
+    let session_id = input.session_id.clone();
+    let result = capture_discovery_service::reconcile_files(&state.pool, Some(&app), input).await?;
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "capture.reconcile".to_owned(),
+        message: "capture file reconciliation completed".to_owned(),
+        event: Some("file_reconcile_completed".to_owned()),
+        session_id: Some(session_id),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn reconcile_project_files(
+    state: State<'_, AppState>,
+    input: ReconcileProjectFilesInput,
+) -> Result<ProjectFileReconcileResult, AppError> {
+    let project_id = input.project_id.clone();
+    let result =
+        project_file_reconcile_service::reconcile_project_files(&state.pool, input).await?;
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "capture.reconcile".to_owned(),
+        message: format!(
+            "project file check completed: {} checked, {} relocated, {} source missing, {} source replaced, {} target missing, {} target unavailable",
+            result.source_checked_count,
+            result.relocated_count,
+            result.source_missing_count,
+            result.source_replaced_count,
+            result.destination_missing_count,
+            result.destination_unavailable_count,
+        ),
+        event: Some("project_file_reconcile_completed".to_owned()),
+        project_id: Some(project_id),
         outcome: Some("succeeded".to_owned()),
         ..Default::default()
     });
@@ -270,7 +383,7 @@ pub async fn read_capture_image(
     input: ReadCaptureImageInput,
 ) -> Result<tauri::ipc::Response, AppError> {
     let item = capture_service::get_item(&state.pool, input.capture_item_id.trim()).await?;
-    let path = capture_service::image_path(&item, input.variant.trim())?;
+    let path = readable_capture_path(&state.pool, &item, input.variant.trim()).await?;
     let bytes = tokio::fs::read(path).await?;
     Ok(tauri::ipc::Response::new(bytes))
 }
@@ -285,7 +398,7 @@ pub async fn read_capture_thumbnail(
 
     let item = capture_service::get_item(&state.pool, input.capture_item_id.trim()).await?;
     let variant = input.variant.trim();
-    let path = capture_service::image_path(&item, variant)?;
+    let path = readable_capture_path(&state.pool, &item, variant).await?;
     let cache_root = app.path().app_local_data_dir()?;
     let settings = crate::services::app_settings_service::get(&state.pool).await?;
     let limit_bytes = (settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024);
@@ -293,6 +406,48 @@ pub async fn read_capture_thumbnail(
         thumbnail_service::read_thumbnail(&cache_root, &item.id, variant, &path, limit_bytes)
             .await?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+async fn readable_capture_path(
+    pool: &sqlx::SqlitePool,
+    item: &CaptureItem,
+    variant: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    if variant == "source" {
+        return capture_service::validate_source_identity(pool, item).await;
+    }
+    let path = capture_service::image_path(item, variant)?;
+    if variant != "destination" {
+        return Ok(path);
+    }
+    match tokio::fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => {
+            sqlx::query(
+                "UPDATE capture_items SET destination_file_state = 'available' WHERE id = ?",
+            )
+            .bind(&item.id)
+            .execute(pool)
+            .await?;
+            Ok(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sqlx::query("UPDATE capture_items SET destination_file_state = 'missing' WHERE id = ?")
+                .bind(&item.id)
+                .execute(pool)
+                .await?;
+            Err(AppError::NotFound("capture destination image".to_owned()))
+        }
+        Ok(_) => Err(AppError::NotFound("capture destination image".to_owned())),
+        Err(error) => {
+            sqlx::query(
+                "UPDATE capture_items SET destination_file_state = 'unavailable' WHERE id = ?",
+            )
+            .bind(&item.id)
+            .execute(pool)
+            .await?;
+            Err(error.into())
+        }
+    }
 }
 
 #[tauri::command]
