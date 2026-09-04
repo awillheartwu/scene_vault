@@ -1941,6 +1941,25 @@ async fn configured_model_version_uses_the_same_content_fingerprint_as_python() 
     assert_ne!(first, second);
 }
 
+#[test]
+fn configured_model_fingerprint_cache_reuses_unchanged_files_and_invalidates_changes() {
+    let temporary = tempdir().expect("temporary model directory");
+    let model_path = temporary.path().join("cached-sface.onnx");
+    std::fs::write(&model_path, b"first-model").expect("write model");
+
+    let (first, first_cache_hit) = cached_sha256_prefix(&model_path).expect("first fingerprint");
+    let (second, second_cache_hit) = cached_sha256_prefix(&model_path).expect("cached fingerprint");
+    assert!(!first_cache_hit);
+    assert!(second_cache_hit);
+    assert_eq!(first, second);
+
+    std::fs::write(&model_path, b"replacement-model").expect("replace model");
+    let (replacement, replacement_cache_hit) =
+        cached_sha256_prefix(&model_path).expect("replacement fingerprint");
+    assert!(!replacement_cache_hit);
+    assert_ne!(first, replacement);
+}
+
 #[tokio::test]
 async fn tiny_background_faces_are_not_enrolled_and_warn() {
     let pool = db::test_pool().await;

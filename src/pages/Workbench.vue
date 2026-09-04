@@ -103,6 +103,7 @@ let purgeReloadTimer: number | null = null;
 let unlisteners: UnlistenFn[] = [];
 let initialized = false;
 let componentActive = true;
+let modelStatusRequestId = 0;
 
 type WorkbenchView = "characters" | "unclassified" | "scene" | "private";
 const view = ref<WorkbenchView>("characters");
@@ -638,8 +639,19 @@ function cacheCurrentWorkbench() {
   });
 }
 
+async function refreshFaceBankModelStatus(projectIdValue: string) {
+  const requestId = ++modelStatusRequestId;
+  const nextModelStatus = await (
+    captureApi.getFaceBankModelStatus?.(projectIdValue) ?? Promise.resolve(null)
+  ).catch(() => null);
+  if (requestId !== modelStatusRequestId || projectId.value !== projectIdValue) return;
+  modelStatus.value = nextModelStatus;
+  cacheCurrentWorkbench();
+}
+
 async function loadCharacterData(options: { manageLoading?: boolean } = {}) {
   if (!projectId.value) {
+    modelStatusRequestId += 1;
     summaries.value = [];
     characters.value = [];
     items.value = [];
@@ -653,11 +665,10 @@ async function loadCharacterData(options: { manageLoading?: boolean } = {}) {
   const requestedCharacterId = selectedCharacterId.value;
   if (manageLoading) loading.value = true;
   try {
-    const [nextSummaries, nextCharacters, nextModelStatus, requestedItems] = await Promise.all([
+    void refreshFaceBankModelStatus(projectIdValue);
+    const [nextSummaries, nextCharacters, requestedItems] = await Promise.all([
       captureApi.listProjectCharacterSummaries(projectIdValue),
       captureApi.listCharacters(projectIdValue),
-      (captureApi.getFaceBankModelStatus?.(projectIdValue) ??
-        Promise.resolve(null)).catch(() => null),
       fetchWorkbenchItems(
         projectIdValue,
         viewValue,
@@ -687,7 +698,6 @@ async function loadCharacterData(options: { manageLoading?: boolean } = {}) {
 
     summaries.value = nextSummaries;
     characters.value = nextCharacters;
-    modelStatus.value = nextModelStatus;
     selectedCharacterId.value = resolvedCharacterId;
     items.value = loadedItems.items;
     samples.value = loadedItems.samples;
@@ -986,6 +996,7 @@ watch(projectId, async () => {
   characters.value = [];
   items.value = [];
   samples.value = [];
+  modelStatus.value = null;
   selectedItemId.value = null;
   characterSearch.value = "";
   projectReconcileResult.value = null;

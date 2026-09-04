@@ -421,6 +421,75 @@ describe("Workbench", () => {
     expect(second.text()).toContain("Ava");
   });
 
+  it("keeps an independent snapshot for each visited project", async () => {
+    const secondProject = { ...project, id: "project-2", name: "Second Project" };
+    const secondSummaries = [
+      { ...summaries[0], id: "character-3", name: "Cora", latestCaptureItemId: "item-2" },
+    ];
+    const secondCharacters = [
+      { ...characters[0], id: "character-3", projectId: "project-2", name: "Cora" },
+    ];
+    const secondItem = {
+      ...item,
+      id: "item-2",
+      projectId: "project-2",
+      characterId: "character-3",
+      sourcePath: "C:\\shots\\two.png",
+    };
+    api.listProjects.mockResolvedValue([project, secondProject]);
+
+    localStorage.setItem("scene-vault.capture.project", "project-1");
+    const first = mount(Workbench);
+    await flushPromises();
+    expect(first.text()).toContain("Ava");
+    first.unmount();
+
+    localStorage.setItem("scene-vault.capture.project", "project-2");
+    api.listProjectCharacterSummaries.mockResolvedValue(secondSummaries);
+    api.listCharacters.mockResolvedValue(secondCharacters);
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([secondItem]));
+    api.listCharacterFaceSamples.mockResolvedValue([]);
+    const second = mount(Workbench);
+    await flushPromises();
+    expect(second.text()).toContain("Cora");
+    second.unmount();
+
+    let resolveSummaries!: (value: typeof summaries) => void;
+    api.listProjectCharacterSummaries.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSummaries = resolve;
+      }),
+    );
+    localStorage.setItem("scene-vault.capture.project", "project-1");
+    const revisited = mount(Workbench);
+
+    expect(revisited.text()).toContain("Ava");
+    expect(revisited.text()).not.toContain("Cora");
+    expect(revisited.find(".workbench-character-skeletons").exists()).toBe(false);
+
+    resolveSummaries(summaries);
+    await flushPromises();
+  });
+
+  it("does not keep the workbench loading while model compatibility is pending", async () => {
+    let resolveModelStatus!: (value: null) => void;
+    api.getFaceBankModelStatus.mockReturnValue(
+      new Promise((resolve) => {
+        resolveModelStatus = resolve;
+      }),
+    );
+
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Ava");
+    expect(wrapper.find(".workbench-character-skeletons").exists()).toBe(false);
+    expect(wrapper.findAll(".workbench-grid-skeleton-card")).toHaveLength(0);
+
+    resolveModelStatus(null);
+    await flushPromises();
+  });
+
   it("accepts a pending recognition suggestion from the detail panel", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();

@@ -23,24 +23,24 @@ export interface WorkbenchSnapshot {
   itemTotal: number;
 }
 
-let snapshot: WorkbenchSnapshot | null = null;
+const snapshots = new Map<string, WorkbenchSnapshot>();
 
 export function readWorkbenchSnapshot(projectId: string | null): WorkbenchSnapshot | null {
-  if (!snapshot || (projectId && snapshot.projectId !== projectId)) return null;
-  return snapshot;
+  if (!projectId) return null;
+  return snapshots.get(projectId) ?? null;
 }
 
 export function writeWorkbenchSnapshot(value: WorkbenchSnapshot): void {
-  snapshot = {
+  snapshots.set(value.projectId, {
     ...value,
     projects: [...value.projects],
     summaries: [...value.summaries],
     characters: [...value.characters],
     items: [...value.items],
     samples: [...value.samples],
-  };
+  });
 }
 
 export function resetWorkbenchSnapshot(): void {
-  snapshot = null;
+  snapshots.clear();
 }

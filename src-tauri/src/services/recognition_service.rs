@@ -1,5 +1,10 @@
 use sqlx::SqlitePool;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
+};
 
 use crate::{
     error::AppError,
@@ -20,6 +25,16 @@ use crate::{
 
 const RECOGNITION_SOURCES: [&str; 3] = ["face_bank", "vision", "manual"];
 const REVIEW_DECISIONS: [&str; 2] = ["accepted", "rejected"];
+
+#[derive(Clone)]
+struct ModelFingerprintCacheEntry {
+    file_size: u64,
+    modified_at: Option<SystemTime>,
+    fingerprint: String,
+}
+
+static MODEL_FINGERPRINT_CACHE: OnceLock<Mutex<HashMap<PathBuf, ModelFingerprintCacheEntry>>> =
+    OnceLock::new();
 
 async fn ensure_character_in_project(
     pool: &SqlitePool,
@@ -1416,12 +1431,39 @@ async fn model_version_with_fingerprint(base_version: &str, model_path: Option<&
         return base_version.to_owned();
     };
     let base_version = base_version.to_owned();
-    tokio::task::spawn_blocking(move || sha256_prefix(&model_path))
+    tokio::task::spawn_blocking(move || cached_sha256_prefix(&model_path).map(|value| value.0))
         .await
         .ok()
         .and_then(Result::ok)
         .map(|fingerprint| format!("{base_version}+sha256:{fingerprint}"))
         .unwrap_or(base_version)
+}
+
+fn cached_sha256_prefix(path: &Path) -> Result<(String, bool), std::io::Error> {
+    let metadata = std::fs::metadata(path)?;
+    let file_size = metadata.len();
+    let modified_at = metadata.modified().ok();
+    let cache_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let cache = MODEL_FINGERPRINT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = cache.get(&cache_path) {
+        if entry.file_size == file_size && entry.modified_at == modified_at {
+            return Ok((entry.fingerprint.clone(), true));
+        }
+    }
+
+    let fingerprint = sha256_prefix(path)?;
+    cache.insert(
+        cache_path,
+        ModelFingerprintCacheEntry {
+            file_size,
+            modified_at,
+            fingerprint: fingerprint.clone(),
+        },
+    );
+    Ok((fingerprint, false))
 }
 
 fn sha256_prefix(path: &Path) -> Result<String, std::io::Error> {
