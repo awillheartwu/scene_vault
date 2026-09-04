@@ -70,10 +70,20 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
   通过改判状态机更新主角色并重新处理，而不是仅修改复查状态。
 - 闭集校验：选定角色分数、其他角色最佳分数和 `unverified` / `ok` / `flagged` 状态。
 - `face_count`：检测到的人脸数量；当前建议仍只基于主脸。
+- 文件身份：`source_file_state`、`destination_file_state` 和
+  `destination_avatar_file_state` 分别记录原图、大图归档和头像归档的
+  `available` / `missing` / `replaced` / `unavailable` 状态；路径重新定位不改变人物、
+  分类、归档和人脸关系。
 
 已完成项改判时保留旧归档，待新归档成功后再替换旧文件和资产关系。改判为 `scene` 或
 `private` 会清空角色、建议和对应 Face Bank 样本。旧的 item 级特征列已废弃，运行时
 只读写 `capture_faces`。
+
+### `ignored_capture_contents`
+
+保存用户从 Scene Vault 删除的截图内容哈希，作用域为项目。来源目录仍存在相同内容时，
+发现和导入流程保持忽略；只有内容哈希变化才会登记为新的 Capture Item。该表不保存图片
+二进制，也不授权应用删除原图。
 
 ### `capture_faces`
 

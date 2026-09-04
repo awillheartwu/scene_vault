@@ -1,6 +1,6 @@
 [package]
 name = "scene_vault"
-version = "1.0.7"
+version = "1.0.8"
 description = "Local-first desktop app for organizing screenshots from any game"
 authors = ["Scene Vault contributors"]
 edition = "2021"

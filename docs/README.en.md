@@ -66,12 +66,15 @@ unclassified/scene/private classifications stay manual.
   screenshots are registered once), stable-write detection, mid-session source
   directory attachment, resume and retry recovery
 - **Classification & characters**: person/scene/private/unclassified labels,
-  character labeling with rename/merge/representative avatar, global-hotkey
-  quick-classify popup
+  character labeling with rename/merge/representative avatar, name/alias
+  search, global-hotkey quick-classify popup
 - **Optional AI**: face detection, Face Bank character suggestions, annotated
   image and avatar generation, SFace/ArcFace switching
 - **Reliable archiving**: local or NAS, atomic writes, automatic retry with
   backoff, no data loss on NAS disconnects
+- **File lifecycle**: project-wide source relocation and missing/replaced file
+  checks; sources are never deleted, while archive targets can be recycled
+  locally or permanently removed from UNC/NAS after explicit confirmation
 - **Data safety**: integrity preflight, consistent backups (SHA-256 manifest),
   two-phase restore with rollback, minimal recovery UI when the database cannot
   open, automatic pre-migration backups
