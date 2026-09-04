@@ -2079,17 +2079,20 @@ async fn migration_0013_cleans_polluted_face_data_and_backfills_primary_rows() {
     .expect("character");
     let source = fixture.source_directory.join("shot.png");
     tokio::fs::write(&source, b"image").await.expect("source");
-    let item = capture_service::register_capture(
-        &pool,
-        RegisterCaptureInput {
-            session_id: session.id.clone(),
-            source_path: capture_service::path_to_string(&source),
-        },
-    )
-    .await
-    .expect("register");
     let character_id = character.id;
-    let item_id = item.id;
+    let item_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO capture_items (id, project_id, session_id, source_path, file_size, content_hash) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&item_id)
+    .bind(&fixture.project_id)
+    .bind(&session.id)
+    .bind(capture_service::path_to_string(&source))
+    .bind(5_i64)
+    .bind("migration-seed")
+    .execute(&pool)
+    .await
+    .expect("register pre-0013 seed");
     sqlx::query(
         r#"
             UPDATE capture_items
@@ -2224,6 +2227,90 @@ async fn rebuild_face_bank_requires_configured_engine() {
         .await
         .expect_err("engine missing");
     assert!(matches!(error, AppError::Vision(_)));
+}
+
+#[tokio::test]
+async fn rebuild_face_bank_preserves_stale_sample_when_source_was_replaced() {
+    use crate::models::vision::{UpdateVisionSettingsInput, VisionSettings};
+
+    let pool = db::test_pool().await;
+    let fixture = fixture(&pool).await;
+    sqlx::query(
+        "UPDATE capture_items SET classification = 'scene', character_id = NULL WHERE id = ?",
+    )
+    .bind(&fixture.second_item_id)
+    .execute(&pool)
+    .await
+    .expect("exclude second item");
+    sqlx::query(
+        r#"
+        INSERT INTO character_face_samples (
+            id, character_id, capture_item_id, feature_json,
+            model_id, model_version, embedding_dim
+        ) VALUES (?, ?, ?, '[1.0,0.0]', ?, ?, 2)
+        "#,
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&fixture.character_id)
+    .bind(&fixture.item_id)
+    .bind(FACE_MODEL_ID)
+    .bind(FACE_MODEL_VERSION)
+    .execute(&pool)
+    .await
+    .expect("stale sample");
+
+    let item = capture_service::get_item(&pool, &fixture.item_id)
+        .await
+        .expect("item");
+    tokio::fs::write(&item.source_path, b"different replacement content")
+        .await
+        .expect("replace source");
+
+    let runtime = tempdir().expect("runtime");
+    let python = runtime.path().join("python.exe");
+    let module_root = runtime.path().join("pymod");
+    let yunet = runtime.path().join("yunet.onnx");
+    let sface = runtime.path().join("sface.onnx");
+    tokio::fs::create_dir_all(&module_root)
+        .await
+        .expect("module root");
+    for path in [&python, &yunet, &sface] {
+        tokio::fs::write(path, b"configured").await.expect("file");
+    }
+    vision_settings_service::update(
+        &pool,
+        UpdateVisionSettingsInput {
+            settings: VisionSettings {
+                python_executable_path: Some(capture_service::path_to_string(&python)),
+                python_module_root: Some(capture_service::path_to_string(&module_root)),
+                yunet_model_path: Some(capture_service::path_to_string(&yunet)),
+                sface_model_path: Some(capture_service::path_to_string(&sface)),
+                recognizer: None,
+                arcface_model_path: None,
+                font_path: None,
+            },
+        },
+    )
+    .await
+    .expect("vision settings");
+
+    let summary = rebuild_face_bank(&pool, &fixture.project_id, |_, _| {})
+        .await
+        .expect("rebuild");
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.stale_preserved, 1);
+    let refreshed = capture_service::get_item(&pool, &fixture.item_id)
+        .await
+        .expect("refreshed item");
+    assert_eq!(refreshed.source_file_state, "replaced");
+    let samples: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM character_face_samples WHERE capture_item_id = ?")
+            .bind(&fixture.item_id)
+            .fetch_one(&pool)
+            .await
+            .expect("sample count");
+    assert_eq!(samples, 1, "the old generation keeps its known-good sample");
 }
 
 #[tokio::test]

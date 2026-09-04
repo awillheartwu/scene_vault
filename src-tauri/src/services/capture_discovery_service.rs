@@ -6,12 +6,13 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
-use serde_json::json;
-
 use crate::{
     error::AppError,
     models::{
-        capture::{DiscoverCapturesInput, DiscoverCapturesResult},
+        capture::{
+            CaptureFileReconcileResult, DiscoverCapturesInput, DiscoverCapturesResult,
+            ReconcileCaptureFilesInput,
+        },
         diagnostics::{LogLevel, LogRecord},
     },
     services::{capture_service, log_service},
@@ -47,6 +48,15 @@ pub async fn discover(
     pool: &SqlitePool,
     app: Option<&AppHandle>,
     input: DiscoverCapturesInput,
+) -> Result<DiscoverCapturesResult, AppError> {
+    discover_with_options(pool, app, input, false).await
+}
+
+async fn discover_with_options(
+    pool: &SqlitePool,
+    _app: Option<&AppHandle>,
+    input: DiscoverCapturesInput,
+    force_rehash_known: bool,
 ) -> Result<DiscoverCapturesResult, AppError> {
     let session_id = input.session_id.trim();
     if session_id.is_empty() {
@@ -86,6 +96,7 @@ pub async fn discover(
     let mut ignored_count = 0_u32;
     let mut unstable_count = 0_u32;
     let mut entries_scanned = 0_u32;
+    let mut scanned_roots = Vec::new();
     let scan_started_at = SystemTime::now();
 
     let session_dirs = capture_service::session_directories(pool, &session).await?;
@@ -94,6 +105,7 @@ pub async fn discover(
             ignored_count = ignored_count.saturating_add(1);
             continue;
         };
+        scanned_roots.push(canonical_root.clone());
         while let Some(entry) = directory.next_entry().await? {
             entries_scanned = entries_scanned.saturating_add(1);
             let path = entry.path();
@@ -122,9 +134,9 @@ pub async fn discover(
 
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
 
-    // Registered rows for this session, keyed by normalized path, so the
-    // scan can tell new files from known ones in a single query instead of
-    // one lookup per candidate per poll.
+    // Registered rows for this project, keyed by normalized path. Sessions
+    // are work periods, but file identity is project-wide: a reused filename
+    // must also retire an older generation from a previous session.
     #[derive(Clone)]
     struct RegisteredRow {
         id: String,
@@ -134,33 +146,31 @@ pub async fn discover(
         status: String,
         archived: bool,
     }
-    let registered: std::collections::HashMap<String, RegisteredRow> =
+    let mut registered: std::collections::HashMap<String, Vec<RegisteredRow>> =
         sqlx::query_as::<_, (String, String, i64, Option<i64>, String, String, bool)>(
             r#"
             SELECT id, source_path, file_size, modified_at_ms, content_hash,
                    status, archived_at IS NOT NULL
             FROM capture_items
-            WHERE session_id = ?
+            WHERE project_id = ?
             "#,
         )
-        .bind(session_id)
+        .bind(&session.project_id)
         .fetch_all(pool)
         .await?
         .into_iter()
-        .map(|(id, source_path, file_size, modified_at_ms, content_hash, status, archived)| {
-            (
-                source_path,
-                RegisteredRow {
-                    id,
-                    file_size,
-                    modified_at_ms,
-                    content_hash,
-                    status,
-                    archived,
-                },
-            )
-        })
-        .collect();
+        .fold(std::collections::HashMap::new(), |mut rows, row| {
+            let (id, source_path, file_size, modified_at_ms, content_hash, status, archived) = row;
+            rows.entry(source_path).or_default().push(RegisteredRow {
+                id,
+                file_size,
+                modified_at_ms,
+                content_hash,
+                status,
+                archived,
+            });
+            rows
+        });
 
     // Partition candidates: unchanged known files are skipped, files whose
     // recorded stats changed are re-hashed (content may have been replaced),
@@ -190,7 +200,7 @@ pub async fn discover(
             }
         };
         let key = capture_service::path_to_string(&canonical_path);
-        let Some(row) = registered.get(&key) else {
+        let Some(rows) = registered.get(&key) else {
             fresh.push(StableCandidate {
                 candidate,
                 canonical_path,
@@ -199,15 +209,34 @@ pub async fn discover(
             });
             continue;
         };
-        let stats_match = row.file_size == candidate.length as i64
-            && row.modified_at_ms.is_some()
-            && row.modified_at_ms
-                == candidate
-                    .modified
-                    .and_then(|modified| unix_millis(modified).ok())
-                    .map(i64::try_from)
-                    .and_then(Result::ok);
-        if stats_match {
+        let candidate_modified = candidate
+            .modified
+            .and_then(|modified| unix_millis(modified).ok())
+            .map(i64::try_from)
+            .and_then(Result::ok);
+        let stats_match = rows.iter().any(|row| {
+            row.file_size == candidate.length as i64
+                && row.modified_at_ms.is_some()
+                && row.modified_at_ms == candidate_modified
+        });
+        if stats_match && !force_rehash_known {
+            sqlx::query(
+                r#"
+                UPDATE capture_items
+                SET source_file_state = CASE
+                        WHEN file_size = ? AND modified_at_ms = ? THEN 'available'
+                        ELSE 'replaced'
+                    END,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE project_id = ? AND source_path = ?
+                "#,
+            )
+            .bind(i64::try_from(candidate.length).unwrap_or(i64::MAX))
+            .bind(candidate_modified)
+            .bind(&session.project_id)
+            .bind(&key)
+            .execute(pool)
+            .await?;
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
@@ -261,7 +290,11 @@ pub async fn discover(
             continue;
         }
 
-        let Some(row) = registered.get(&item.key).cloned() else {
+        let Some(rows) = registered.get(&item.key).cloned() else {
+            if capture_service::is_content_ignored(pool, &session.project_id, &second_hash).await? {
+                ignored_count = ignored_count.saturating_add(1);
+                continue;
+            }
             if capture_service::matches_discovery_baseline(
                 pool,
                 session_id,
@@ -297,13 +330,14 @@ pub async fn discover(
 
         // A registered file whose content is unchanged only drifted in size
         // or mtime (coarse timestamps, antivirus touches): refresh stats.
-        if row.content_hash == second_hash {
+        if let Some(row) = rows.iter().find(|row| row.content_hash == second_hash) {
             sqlx::query(
                 r#"
                 UPDATE capture_items
                 SET
                     file_size = ?,
                     modified_at_ms = ?,
+                    source_file_state = 'available',
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE id = ?
                 "#,
@@ -318,37 +352,35 @@ pub async fn discover(
             .bind(&row.id)
             .execute(pool)
             .await?;
+            sqlx::query(
+                "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ? AND id != ?",
+            )
+            .bind(&session.project_id)
+            .bind(&item.key)
+            .bind(&row.id)
+            .execute(pool)
+            .await?;
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
 
-        // Content changed at a registered path. Archived captures stay (the
-        // archive copy is the record); unarchived captures are stale: the
-        // old registration is removed as if it never appeared and the new
-        // content registers as a brand-new capture.
-        if row.archived || row.status == "processing" {
+        // The path now holds different content. Every older generation keeps
+        // its database identity and is marked replaced. Deletion remains an
+        // explicit user action; discovery never silently removes history.
+        sqlx::query(
+            "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ?",
+        )
+        .bind(&session.project_id)
+        .bind(&item.key)
+        .execute(pool)
+        .await?;
+        if rows.iter().any(|row| row.status == "processing") {
+            // A processing row owns this path until it finishes or fails.
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
-        if capture_service::purge_capture_item(pool, &row.id, &row.status).await? {
-            log_service::record_event(LogRecord {
-                level: LogLevel::Warn,
-                module: "capture.discovery".to_owned(),
-                message: "source image was replaced before archive; stale capture removed".to_owned(),
-                event: Some("capture_purged".to_owned()),
-                session_id: Some(session_id.to_owned()),
-                capture_item_id: Some(row.id.clone()),
-                outcome: Some("purged".to_owned()),
-                error_code: Some("source_replaced".to_owned()),
-                ..Default::default()
-            });
-            if let Some(app) = app {
-                let _ = app.emit("capture:item-purged", json!({ "captureItemId": row.id }));
-            }
-        } else {
-            // The row was claimed or archived after the scan snapshot. Do
-            // not register competing content at the same path this cycle.
-            already_known_count = already_known_count.saturating_add(1);
+        if capture_service::is_content_ignored(pool, &session.project_id, &second_hash).await? {
+            ignored_count = ignored_count.saturating_add(1);
             continue;
         }
         if capture_service::matches_discovery_baseline(
@@ -382,6 +414,27 @@ pub async fn discover(
             already_known_count = already_known_count.saturating_add(1);
         }
     }
+
+    // Rows whose paths disappeared are retained only when archived. An
+    // unarchived disappearance is handled by the worker's guarded purge.
+    for (path, rows) in &mut registered {
+        let path = PathBuf::from(path);
+        if path.is_file()
+            || !scanned_roots
+                .iter()
+                .any(|root| capture_service::path_is_within(&path, root))
+        {
+            continue;
+        }
+        for row in rows.iter().filter(|row| row.archived) {
+            sqlx::query(
+                "UPDATE capture_items SET source_file_state = 'missing', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+            )
+            .bind(&row.id)
+            .execute(pool)
+            .await?;
+        }
+    }
     let scan_duration_ms = SystemTime::now()
         .duration_since(scan_started_at)
         .map(|duration| duration.as_millis() as u64)
@@ -396,6 +449,102 @@ pub async fn discover(
         entries_scanned,
         scan_duration_ms,
     })
+}
+
+/// Runs the same source reconciliation as the background poll and also checks
+/// archive targets on demand. Target-root failure is reported as unavailable,
+/// never as a mass deletion or missing-file conclusion.
+pub async fn reconcile_files(
+    pool: &SqlitePool,
+    app: Option<&AppHandle>,
+    input: ReconcileCaptureFilesInput,
+) -> Result<CaptureFileReconcileResult, AppError> {
+    let session_id = input.session_id.trim().to_owned();
+    // A user-triggered reconciliation deliberately hashes known files too.
+    // This catches a replacement that happens to preserve both length and
+    // filesystem mtime, while background polling keeps its cheap stat path.
+    let discovery = discover_with_options(
+        pool,
+        app,
+        DiscoverCapturesInput {
+            session_id: session_id.clone(),
+            stability_delay_ms: None,
+        },
+        true,
+    )
+    .await?;
+    let root: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT project.destination_directory
+        FROM capture_sessions session
+        JOIN projects project ON project.id = session.project_id
+        WHERE session.id = ?
+        "#,
+    )
+    .bind(&session_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    let targets: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, destination_path, destination_avatar_path FROM capture_items WHERE session_id = ?",
+    )
+    .bind(&session_id)
+    .fetch_all(pool)
+    .await?;
+    for (id, destination, avatar) in targets {
+        let destination_state = check_target_state(destination.as_deref(), root.as_deref()).await;
+        let avatar_state = check_target_state(avatar.as_deref(), root.as_deref()).await;
+        sqlx::query(
+            "UPDATE capture_items SET destination_file_state = ?, destination_avatar_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        )
+        .bind(destination_state)
+        .bind(avatar_state)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    let (source_missing_count, source_replaced_count, destination_missing_count, destination_unavailable_count): (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COALESCE(SUM(CASE WHEN source_file_state = 'missing' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN source_file_state = 'replaced' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN destination_file_state = 'missing' OR destination_avatar_file_state = 'missing' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN destination_file_state = 'unavailable' OR destination_avatar_file_state = 'unavailable' THEN 1 ELSE 0 END), 0)
+        FROM capture_items WHERE session_id = ?
+        "#,
+    )
+    .bind(&session_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(CaptureFileReconcileResult {
+        discovered_count: discovery.discovered_count,
+        source_missing_count: source_missing_count.max(0) as u32,
+        source_replaced_count: source_replaced_count.max(0) as u32,
+        destination_missing_count: destination_missing_count.max(0) as u32,
+        destination_unavailable_count: destination_unavailable_count.max(0) as u32,
+        unstable_count: discovery.unstable_count,
+    })
+}
+
+pub(crate) async fn check_target_state(path: Option<&str>, root: Option<&str>) -> &'static str {
+    let Some(path) = path else {
+        return "none";
+    };
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => "available",
+        Ok(_) => "missing",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match root {
+            Some(root)
+                if tokio::fs::metadata(root)
+                    .await
+                    .is_ok_and(|value| value.is_dir()) =>
+            {
+                "missing"
+            }
+            _ => "unavailable",
+        },
+        Err(_) => "unavailable",
+    }
 }
 
 fn unix_millis(time: SystemTime) -> Result<i64, std::time::SystemTimeError> {
@@ -663,6 +812,301 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archived_path_reuse_keeps_history_and_registers_new_content() {
+        let pool = db::test_pool().await;
+        let (_workspace, session, source) = session_fixture(&pool).await;
+        let image = source.join("reused.png");
+        tokio::fs::write(&image, b"first generation")
+            .await
+            .expect("first");
+        let first = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover first")
+        .discovered_items
+        .into_iter()
+        .next()
+        .expect("first item");
+        sqlx::query(
+            "UPDATE capture_items SET status = 'completed', archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        )
+        .bind(&first.id)
+        .execute(&pool)
+        .await
+        .expect("archive first");
+
+        tokio::fs::write(&image, b"second generation with different content")
+            .await
+            .expect("replace");
+        let second = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id,
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover replacement");
+        assert_eq!(second.discovered_count, 1);
+        assert_ne!(second.discovered_items[0].id, first.id);
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, source_file_state FROM capture_items WHERE source_path = ? ORDER BY captured_at",
+        )
+        .bind(capture_service::path_to_string(&image))
+        .fetch_all(&pool)
+        .await
+        .expect("versions");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (first.id, "replaced".to_owned()));
+        assert_eq!(rows[1].1, "available");
+    }
+
+    #[tokio::test]
+    async fn path_reuse_across_sessions_marks_the_older_generation_replaced() {
+        let pool = db::test_pool().await;
+        let (_workspace, first_session, source) = session_fixture(&pool).await;
+        let image = source.join("cross-session.png");
+        tokio::fs::write(&image, b"first generation")
+            .await
+            .expect("first");
+        let first = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: first_session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover first")
+        .discovered_items
+        .into_iter()
+        .next()
+        .expect("first item");
+        sqlx::query(
+            "UPDATE capture_items SET status = 'completed', archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        )
+        .bind(&first.id)
+        .execute(&pool)
+        .await
+        .expect("archive first");
+        sqlx::query("UPDATE capture_sessions SET status = 'completed' WHERE id = ?")
+            .bind(&first_session.id)
+            .execute(&pool)
+            .await
+            .expect("end first session");
+        let second_session = test_support::start_session(&pool, &first_session.project_id)
+            .await
+            .expect("second session");
+
+        tokio::fs::write(&image, b"second generation with different content")
+            .await
+            .expect("replace");
+        let second = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: second_session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover second");
+        assert_eq!(second.discovered_count, 1);
+        assert_ne!(second.discovered_items[0].id, first.id);
+        assert_eq!(second.discovered_items[0].session_id, second_session.id);
+        let old_state: String =
+            sqlx::query_scalar("SELECT source_file_state FROM capture_items WHERE id = ?")
+                .bind(&first.id)
+                .fetch_one(&pool)
+                .await
+                .expect("old state");
+        assert_eq!(old_state, "replaced");
+    }
+
+    #[tokio::test]
+    async fn manual_reconcile_rehashes_known_paths_even_when_stats_match() {
+        let pool = db::test_pool().await;
+        let (_workspace, session, source) = session_fixture(&pool).await;
+        let image = source.join("same-stats.png");
+        tokio::fs::write(&image, b"first generation")
+            .await
+            .expect("first");
+        let first = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover first")
+        .discovered_items
+        .into_iter()
+        .next()
+        .expect("first item");
+        sqlx::query(
+            "UPDATE capture_items SET status = 'completed', archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        )
+        .bind(&first.id)
+        .execute(&pool)
+        .await
+        .expect("archive first");
+
+        // Simulate a filesystem that reports the same cheap fingerprint for
+        // replaced content by updating the recorded stats to the new file.
+        tokio::fs::write(&image, b"other generation")
+            .await
+            .expect("replace with same length");
+        let metadata = tokio::fs::metadata(&image).await.expect("metadata");
+        let modified_at_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|value| unix_millis(value).ok())
+            .and_then(|value| i64::try_from(value).ok());
+        sqlx::query("UPDATE capture_items SET file_size = ?, modified_at_ms = ? WHERE id = ?")
+            .bind(i64::try_from(metadata.len()).expect("length"))
+            .bind(modified_at_ms)
+            .bind(&first.id)
+            .execute(&pool)
+            .await
+            .expect("match cheap stats");
+
+        let result = reconcile_files(
+            &pool,
+            None,
+            ReconcileCaptureFilesInput {
+                session_id: session.id,
+            },
+        )
+        .await
+        .expect("manual reconcile");
+        assert_eq!(result.discovered_count, 1);
+        assert_eq!(result.source_replaced_count, 1);
+        let versions: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, source_file_state FROM capture_items WHERE source_path = ?")
+                .bind(capture_service::path_to_string(&image))
+                .fetch_all(&pool)
+                .await
+                .expect("versions");
+        assert_eq!(versions.len(), 2);
+        assert!(versions
+            .iter()
+            .any(|row| row.0 == first.id && row.1 == "replaced"));
+        assert_eq!(
+            versions.iter().filter(|row| row.1 == "available").count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_reconcile_tracks_deleted_source_and_target_then_same_name_replacement() {
+        let pool = db::test_pool().await;
+        let (_workspace, session, source) = session_fixture(&pool).await;
+        let image = source.join("recreated.png");
+        tokio::fs::write(&image, b"first generation")
+            .await
+            .expect("first source");
+        let first = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover first")
+        .discovered_items
+        .into_iter()
+        .next()
+        .expect("first item");
+        let destination_root: String = sqlx::query_scalar(
+            r#"
+            SELECT project.destination_directory
+            FROM capture_sessions session
+            JOIN projects project ON project.id = session.project_id
+            WHERE session.id = ?
+            "#,
+        )
+        .bind(&session.id)
+        .fetch_one(&pool)
+        .await
+        .expect("destination root");
+        let target = PathBuf::from(destination_root).join("recreated-archive.png");
+        tokio::fs::write(&target, b"archived first generation")
+            .await
+            .expect("archive target");
+        sqlx::query(
+            "UPDATE capture_items SET status = 'completed', archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), destination_path = ? WHERE id = ?",
+        )
+        .bind(capture_service::path_to_string(&target))
+        .bind(&first.id)
+        .execute(&pool)
+        .await
+        .expect("archive first");
+
+        tokio::fs::remove_file(&image)
+            .await
+            .expect("delete source externally");
+        tokio::fs::remove_file(&target)
+            .await
+            .expect("delete target externally");
+        let missing = reconcile_files(
+            &pool,
+            None,
+            ReconcileCaptureFilesInput {
+                session_id: session.id.clone(),
+            },
+        )
+        .await
+        .expect("reconcile missing files");
+        assert_eq!(missing.discovered_count, 0);
+        assert_eq!(missing.source_missing_count, 1);
+        assert_eq!(missing.destination_missing_count, 1);
+
+        tokio::fs::write(&image, b"second generation with different content")
+            .await
+            .expect("recreate source with the same name");
+        let replaced = reconcile_files(
+            &pool,
+            None,
+            ReconcileCaptureFilesInput {
+                session_id: session.id,
+            },
+        )
+        .await
+        .expect("reconcile replacement");
+        assert_eq!(replaced.discovered_count, 1);
+        assert_eq!(replaced.source_missing_count, 0);
+        assert_eq!(replaced.source_replaced_count, 1);
+        assert_eq!(replaced.destination_missing_count, 1);
+
+        let versions: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, source_file_state, destination_file_state FROM capture_items WHERE source_path = ? ORDER BY captured_at",
+        )
+        .bind(capture_service::path_to_string(&image))
+        .fetch_all(&pool)
+        .await
+        .expect("source generations");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(
+            versions[0],
+            (first.id, "replaced".to_owned(), "missing".to_owned())
+        );
+        assert_eq!(versions[1].1, "available");
+        assert_eq!(versions[1].2, "none");
+    }
+
+    #[tokio::test]
     async fn backfill_that_escaped_baseline_is_registered_deferred() {
         let pool = db::test_pool().await;
         let fixture = test_support::project_with_directories(&pool, "DeferredBackfill")
@@ -718,10 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_picks_up_directories_added_while_running() {
-        use crate::{
-            models::project::AddProjectSourceDirectoryInput,
-            services::project_service,
-        };
+        use crate::{models::project::AddProjectSourceDirectoryInput, services::project_service};
         let pool = db::test_pool().await;
         let fixture = test_support::project_with_directories(&pool, "MidSessionDirs")
             .await
@@ -789,7 +1230,9 @@ mod tests {
 
         // A live capture written after the attach is discovered normally.
         let fresh = added_dir.join("fresh.png");
-        tokio::fs::write(&fresh, b"fresh image").await.expect("fresh");
+        tokio::fs::write(&fresh, b"fresh image")
+            .await
+            .expect("fresh");
         let discovered = discover(
             &pool,
             None,

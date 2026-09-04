@@ -1,8 +1,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { api } = vi.hoisted(() => ({
-  api: {
+const { api, eventHandlers, listenMock } = vi.hoisted(() => {
+  const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
+  return {
+    api: {
     listProjects: vi.fn(),
     listSessions: vi.fn(),
     listCharacters: vi.fn(),
@@ -11,10 +13,26 @@ const { api } = vi.hoisted(() => ({
     readThumbnail: vi.fn(),
     readImage: vi.fn(),
     retry: vi.fn(),
+    previewCaptureDeletion: vi.fn(),
+    deleteCaptureItem: vi.fn(),
     revealPath: vi.fn(),
     listDebugLogs: vi.fn(),
     getLogStatus: vi.fn(),
-  },
+    },
+    eventHandlers,
+    listenMock: vi.fn(
+      async (name: string, handler: (event: { payload: unknown }) => void) => {
+        eventHandlers.set(name, handler);
+        return () => {
+          eventHandlers.delete(name);
+        };
+      },
+    ),
+  };
+});
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: listenMock,
 }));
 
 vi.mock("@/lib/capture-api", () => ({
@@ -86,6 +104,15 @@ function entry(id: string, capturedAt: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventHandlers.clear();
+  listenMock.mockImplementation(
+    async (name: string, handler: (event: { payload: unknown }) => void) => {
+      eventHandlers.set(name, handler);
+      return () => {
+        eventHandlers.delete(name);
+      };
+    },
+  );
   localStorage.clear();
   api.listProjects.mockResolvedValue([project]);
   api.listSessions.mockResolvedValue([session]);
@@ -368,5 +395,61 @@ describe("History responsive detail", () => {
     } finally {
       wrapper.unmount();
     }
+  });
+});
+
+describe("History capture purge events", () => {
+  it("reloads the current history query when a capture is purged", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z")],
+      total: 1,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+    const callsBefore = api.listHistory.mock.calls.length;
+
+    const handler = eventHandlers.get("capture:item-purged");
+    expect(handler).toBeDefined();
+    handler!({ payload: { captureItemId: "1" } });
+    await flushPromises();
+
+    expect(api.listHistory.mock.calls.length).toBeGreaterThan(callsBefore);
+    wrapper.unmount();
+  });
+});
+
+describe("History deletion menu", () => {
+  function menuItems() {
+    return Array.from(document.body.querySelectorAll('[role="menuitem"]')) as HTMLElement[];
+  }
+
+  it("offers removing a completed history entry and opens the confirmation", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z")],
+      total: 1,
+    });
+    api.previewCaptureDeletion.mockResolvedValue({
+      captureCount: 1,
+      destinationFileCount: 1,
+      localDerivedFileCount: 0,
+      sourceFilesPreserved: 1,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+
+    await wrapper.find(".history-row").trigger("contextmenu", { clientX: 100, clientY: 60 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).toContain("从 Scene Vault 移除");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("从 Scene Vault 移除"))!
+      .click();
+    await flushPromises();
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog!.textContent).toContain("目标文件");
+    const checkbox = dialog!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    wrapper.unmount();
   });
 });

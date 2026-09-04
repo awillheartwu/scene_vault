@@ -84,6 +84,9 @@ pub struct CaptureItem {
     pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub source_file_state: String,
+    pub destination_file_state: String,
+    pub destination_avatar_file_state: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +142,93 @@ pub struct DiscoverCapturesResult {
 #[serde(rename_all = "camelCase")]
 pub struct CaptureItemIdInput {
     pub capture_item_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteCaptureInput {
+    pub capture_item_id: String,
+    #[serde(default)]
+    pub delete_destination_files: bool,
+    #[serde(default)]
+    pub allow_permanent_network_delete: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteCharacterCapturesInput {
+    pub character_id: String,
+    #[serde(default)]
+    pub delete_destination_files: bool,
+    #[serde(default)]
+    pub allow_permanent_network_delete: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDeletionPreview {
+    pub capture_count: u32,
+    pub destination_file_count: u32,
+    pub network_destination_file_count: u32,
+    pub local_derived_file_count: u32,
+    pub source_files_preserved: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRecycleFailure {
+    pub path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDeletionResult {
+    pub completed: bool,
+    pub records_deleted: u32,
+    pub deleted_capture_item_ids: Vec<String>,
+    pub destination_files_recycled: u32,
+    pub destination_files_permanently_deleted: u32,
+    pub destination_files_already_missing: u32,
+    pub failures: Vec<FileRecycleFailure>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileCaptureFilesInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureFileReconcileResult {
+    pub discovered_count: u32,
+    pub source_missing_count: u32,
+    pub source_replaced_count: u32,
+    pub destination_missing_count: u32,
+    pub destination_unavailable_count: u32,
+    pub unstable_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileProjectFilesInput {
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileReconcileResult {
+    pub scanned_directory_count: u32,
+    pub scanned_file_count: u32,
+    pub source_checked_count: u32,
+    pub relocated_count: u32,
+    pub source_missing_count: u32,
+    pub source_replaced_count: u32,
+    pub ambiguous_count: u32,
+    pub unavailable_source_directory_count: u32,
+    pub destination_missing_count: u32,
+    pub destination_unavailable_count: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,6 +397,9 @@ pub struct CaptureHistoryEntry {
     pub captured_at: String,
     pub processed_at: Option<String>,
     pub archived_at: Option<String>,
+    pub source_file_state: String,
+    pub destination_file_state: String,
+    pub destination_avatar_file_state: String,
 }
 
 /// A page of history entries plus the total number of matching records, so

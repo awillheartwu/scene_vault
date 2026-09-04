@@ -29,6 +29,11 @@ import {
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
+import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
+import {
+  captureFileIssues,
+  captureVariantReadReason,
+} from "@/components/capture/capture-file-state";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
 import { ContextMenu } from "@/components/ui/context-menu";
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
@@ -92,9 +97,11 @@ const pendingClassification = ref<CaptureClassification | null>(null);
 const verificationWarning = ref<VerificationResult | null>(null);
 const search = ref("");
 const previewUrl = ref<string | null>(null);
+const previewUnavailable = ref("");
 const loading = ref(true);
 const busy = ref(false);
 const importCandidates = ref<UnimportedCapture[] | null>(null);
+const deleteTarget = ref<CaptureItem | null>(null);
 const itemMenu = useContextMenu();
 
 function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
@@ -123,6 +130,7 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
     id: "reveal-source",
     label: "显示原图",
     icon: Image,
+    disabled: captureVariantReadReason(item, "source") !== null,
     action: () => void reveal(item.sourcePath),
   });
   if (item.destinationPath) {
@@ -130,6 +138,7 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
       id: "reveal-destination",
       label: "显示归档图",
       icon: Archive,
+      disabled: captureVariantReadReason(item, "destination") !== null,
       action: () => void reveal(item.destinationPath),
     });
   }
@@ -143,7 +152,24 @@ function buildItemMenu(item: CaptureItem): ContextMenuItem[] {
       action: () => setProjectCover(item),
     });
   }
+  if (canDeleteItem(item)) {
+    items.push({
+      id: "delete-item",
+      label: "从 Scene Vault 移除…",
+      icon: Trash2,
+      danger: true,
+      separatorBefore: true,
+      disabled: busy.value || importBusy.value,
+      action: () => {
+        deleteTarget.value = item;
+      },
+    });
+  }
   return items;
+}
+
+function canDeleteItem(item: CaptureItem): boolean {
+  return !["queued", "processing", "archive_pending"].includes(item.status);
 }
 
 async function reveal(path: string | null) {
@@ -481,6 +507,10 @@ async function refreshRecentCaptures() {
   selectBestItem();
 }
 
+function onItemDeleted() {
+  deleteTarget.value = null;
+}
+
 async function stopSession() {
   if (!activeSession.value) return;
   await runBusy(async () => {
@@ -704,10 +734,16 @@ function onKeydown(event: KeyboardEvent) {
 async function loadPreview() {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
   previewUrl.value = null;
+  previewUnavailable.value = "";
   if (!selectedItem.value) return;
+  const item = selectedItem.value;
+  const variant = item.status === "completed" && item.destinationPath ? "destination" : "source";
+  const blockedReason = captureVariantReadReason(item, variant);
+  if (blockedReason) {
+    previewUnavailable.value = blockedReason;
+    return;
+  }
   try {
-    const item = selectedItem.value;
-    const variant = item.status === "completed" && item.destinationPath ? "destination" : "source";
     const bytes = await captureApi.readImage(item.id, variant);
     previewUrl.value = URL.createObjectURL(new Blob([bytes], { type: pathMimeType(item.sourcePath) }));
   } catch (error) {
@@ -921,6 +957,12 @@ onBeforeUnmount(() => {
             <span class="status-pill" :data-status="selectedItem?.status ?? 'idle'">
               {{ selectedItem ? captureStatusLabel(selectedItem.status, selectedItem.failureStage) : "等待截图" }}
             </span>
+            <span
+              v-for="issue in selectedItem ? captureFileIssues(selectedItem) : []"
+              :key="issue.kind"
+              class="file-state-chip"
+              :data-state="issue.state"
+            >{{ issue.label }}</span>
           </div>
           <div class="stage-heading-actions">
             <div v-if="selectedItem" class="file-meta">
@@ -943,6 +985,11 @@ onBeforeUnmount(() => {
 
         <div class="preview-shell" :class="{ empty: !selectedItem }">
           <img v-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />
+          <div v-else-if="previewUnavailable" class="preview-unavailable">
+            <ImageOff :size="44" />
+            <strong>{{ previewUnavailable }}</strong>
+            <span>此截图对应的文件已不可读取，可右键从 Scene Vault 移除该记录。</span>
+          </div>
           <div v-else class="preview-empty">
             <ImageOff :size="44" />
             <strong>{{ activeSession ? "等待游戏产生新截图" : "开始会话后自动发现截图" }}</strong>
@@ -1182,6 +1229,55 @@ onBeforeUnmount(() => {
       @close="renameTarget = null"
       @saved="onProjectRenamed"
     />
+    <CaptureDeleteDialog
+      v-if="deleteTarget"
+      :capture-item="deleteTarget"
+      @close="deleteTarget = null"
+      @deleted="onItemDeleted"
+    />
     <ContextMenu :menu="itemMenu" />
   </section>
 </template>
+
+<style scoped>
+.stage-heading .file-state-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--border));
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  color: var(--destructive);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.stage-heading .file-state-chip[data-state="replaced"],
+.stage-heading .file-state-chip[data-state="unavailable"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
+
+.preview-unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  padding: 30px;
+  color: var(--warn);
+  text-align: center;
+}
+
+.preview-unavailable strong {
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.preview-unavailable span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+</style>

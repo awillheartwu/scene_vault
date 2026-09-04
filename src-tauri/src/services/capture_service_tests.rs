@@ -498,6 +498,55 @@ async fn rejects_source_overwrite_and_invalid_transitions() {
 }
 
 #[tokio::test]
+async fn source_identity_hashes_even_when_size_and_mtime_match_the_snapshot() {
+    let pool = db::test_pool().await;
+    let project = project(&pool).await;
+    let (_workspace, session, source) = session_with_source(&pool, &project.id).await;
+    let screenshot = source.join("capture.png");
+    tokio::fs::write(&screenshot, b"aaaa")
+        .await
+        .expect("source");
+    let item = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id,
+            source_path: path_to_string(&screenshot),
+        },
+    )
+    .await
+    .expect("register");
+
+    tokio::fs::write(&screenshot, b"bbbb")
+        .await
+        .expect("replacement");
+    let metadata = tokio::fs::metadata(&screenshot).await.expect("metadata");
+    let modified_at_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| unix_millis(value).ok());
+    sqlx::query("UPDATE capture_items SET file_size = ?, modified_at_ms = ? WHERE id = ?")
+        .bind(i64::try_from(metadata.len()).expect("size"))
+        .bind(modified_at_ms)
+        .bind(&item.id)
+        .execute(&pool)
+        .await
+        .expect("spoof matching metadata");
+    let spoofed = get_item(&pool, &item.id).await.expect("spoofed item");
+
+    let error = validate_source_identity(&pool, &spoofed)
+        .await
+        .expect_err("different content must be rejected");
+    assert!(matches!(error, AppError::Conflict(_)));
+    assert_eq!(
+        get_item(&pool, &item.id)
+            .await
+            .expect("updated item")
+            .source_file_state,
+        "replaced"
+    );
+}
+
+#[tokio::test]
 async fn claim_next_queued_skip_flag_filters_person_items() {
     let pool = db::test_pool().await;
     let project = project(&pool).await;
@@ -1513,6 +1562,38 @@ async fn awaiting_label_feature_pass_picks_each_item_once() {
 }
 
 #[tokio::test]
+async fn awaiting_label_feature_pass_skips_replaced_sources() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (workspace, session, source) = session_with_source(&pool, &proj.id).await;
+    let screenshot = source.join("capture.png");
+    tokio::fs::write(&screenshot, b"source")
+        .await
+        .expect("screenshot");
+    let item = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id,
+            source_path: path_to_string(&screenshot),
+        },
+    )
+    .await
+    .expect("register");
+    set_source_file_state(&pool, &item.id, "replaced")
+        .await
+        .expect("mark replaced");
+
+    assert!(
+        next_awaiting_label_without_feature(&pool)
+            .await
+            .expect("query")
+            .is_none(),
+        "an old generation must not extract features from replacement content"
+    );
+    let _ = workspace;
+}
+
+#[tokio::test]
 async fn purge_capture_item_removes_row_and_related_faces() {
     let pool = db::test_pool().await;
     let proj = project(&pool).await;
@@ -1551,13 +1632,12 @@ async fn purge_capture_item_removes_row_and_related_faces() {
         .await
         .expect("purge");
     assert!(removed, "first purge removes the row");
-    let face_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM capture_faces WHERE capture_item_id = ?",
-    )
-    .bind(&item.id)
-    .fetch_one(&pool)
-    .await
-    .expect("face count");
+    let face_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM capture_faces WHERE capture_item_id = ?")
+            .bind(&item.id)
+            .fetch_one(&pool)
+            .await
+            .expect("face count");
     assert_eq!(face_count, 0, "face rows cascade with the capture");
 
     let again = purge_capture_item(&pool, &item.id, &item.status)
@@ -2147,8 +2227,8 @@ async fn import_is_deduplicated_across_sessions() {
         import_directory_captures(
             &pool,
             ImportDirectoryCapturesInput {
-                session_id: session2.id,
-                paths,
+                session_id: session2.id.clone(),
+                paths: paths.clone(),
             },
         )
         .await
@@ -2157,6 +2237,30 @@ async fn import_is_deduplicated_across_sessions() {
         0,
         "cross-session re-import must be skipped"
     );
+
+    tokio::fs::write(&paths[0], b"new generation at reused path")
+        .await
+        .expect("replace screenshot");
+    let replacement = import_directory_captures(
+        &pool,
+        ImportDirectoryCapturesInput {
+            session_id: session2.id,
+            paths: vec![paths[0].clone()],
+        },
+    )
+    .await
+    .expect("import replacement");
+    assert_eq!(replacement.len(), 1, "changed content creates a new item");
+    let mut generations: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, source_file_state FROM capture_items WHERE source_path = ?")
+            .bind(&paths[0])
+            .fetch_all(&pool)
+            .await
+            .expect("generations");
+    assert_eq!(generations.len(), 2);
+    generations.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(generations[0].1, "available");
+    assert_eq!(generations[1].1, "replaced");
     let _ = workspace;
 }
 
@@ -2240,7 +2344,9 @@ async fn imports_baselined_images_from_a_chinese_named_directory() {
     let destination = workspace.path().join("archive");
     tokio::fs::create_dir(&source).await.expect("source dir");
     tokio::fs::create_dir(&chinese).await.expect("chinese dir");
-    tokio::fs::create_dir(&destination).await.expect("destination");
+    tokio::fs::create_dir(&destination)
+        .await
+        .expect("destination");
     project_service::set_destination_directory(
         &pool,
         SetProjectDestinationInput {
@@ -2325,7 +2431,14 @@ async fn recent_items_surface_awaiting_label_captures_from_ended_sessions() {
     let (_workspace, first_session, _source) = session_with_source(&pool, &project.id).await;
 
     // One capture stays awaiting-label in the ended session; one is archived.
-    let pending = insert_item(&pool, &first_session.id, &project.id, "person", "pending.png").await;
+    let pending = insert_item(
+        &pool,
+        &first_session.id,
+        &project.id,
+        "person",
+        "pending.png",
+    )
+    .await;
     let done = insert_item(&pool, &first_session.id, &project.id, "person", "done.png").await;
     transition_item(&pool, &done, "awaiting_label", "completed", false)
         .await
@@ -2364,5 +2477,8 @@ async fn recent_items_surface_awaiting_label_captures_from_ended_sessions() {
         !ids.contains(&done),
         "completed capture from the ended session must not reappear"
     );
-    assert!(ids.contains(&live), "active-session capture must be visible");
+    assert!(
+        ids.contains(&live),
+        "active-session capture must be visible"
+    );
 }

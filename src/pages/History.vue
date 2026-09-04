@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { Archive, ExternalLink, Eye, EyeOff, FileClock, Filter, Image, RefreshCw, Sparkles, UserRound } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Archive, ExternalLink, Eye, EyeOff, FileClock, Filter, Image, RefreshCw, Sparkles, Trash2, UserRound } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
+import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
+import {
+  captureFileIssues,
+  captureVariantReadReason,
+} from "@/components/capture/capture-file-state";
 import PaginationControls from "@/components/common/PaginationControls.vue";
 import DebugLogPanel from "@/components/history/DebugLogPanel.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
@@ -42,6 +48,8 @@ const errorMessage = ref("");
 const showPrivate = ref(false);
 const activeView = ref<"captures" | "logs">("captures");
 const entryMenu = useContextMenu();
+const unlisteners: UnlistenFn[] = [];
+const deleteTarget = ref<CaptureHistoryEntry | null>(null);
 
 const selected = computed(() => entries.value.find((entry) => entry.id === selectedId.value) ?? entries.value[0] ?? null);
 const filtered = computed(() => entries.value);
@@ -106,13 +114,20 @@ function selectEntry(entry: CaptureHistoryEntry) {
 function buildEntryItems(entry: CaptureHistoryEntry): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
     { id: "detail", label: "查看详情", icon: Eye, action: () => selectEntry(entry) },
-    { id: "source", label: "显示原图", icon: Image, action: () => reveal(entry.sourcePath) },
+    {
+      id: "source",
+      label: "显示原图",
+      icon: Image,
+      disabled: captureVariantReadReason(entry, "source") !== null,
+      action: () => reveal(entry.sourcePath),
+    },
   ];
   if (entry.destinationPath) {
     items.push({
       id: "destination",
       label: "显示归档图",
       icon: Archive,
+      disabled: captureVariantReadReason(entry, "destination") !== null,
       action: () => reveal(entry.destinationPath),
     });
   }
@@ -121,6 +136,7 @@ function buildEntryItems(entry: CaptureHistoryEntry): ContextMenuItem[] {
       id: "avatar",
       label: "显示头像",
       icon: UserRound,
+      disabled: captureVariantReadReason(entry, "avatar") !== null,
       action: () => reveal(entry.destinationAvatarPath),
     });
   }
@@ -134,7 +150,24 @@ function buildEntryItems(entry: CaptureHistoryEntry): ContextMenuItem[] {
       action: () => reprocess(entry),
     });
   }
+  if (canDeleteEntry(entry)) {
+    items.push({
+      id: "delete-item",
+      label: "从 Scene Vault 移除…",
+      icon: Trash2,
+      danger: true,
+      separatorBefore: true,
+      disabled: loading.value,
+      action: () => {
+        deleteTarget.value = entry;
+      },
+    });
+  }
   return items;
+}
+
+function canDeleteEntry(entry: CaptureHistoryEntry): boolean {
+  return !["queued", "processing", "archive_pending"].includes(entry.status);
 }
 
 function onEntryContext(event: MouseEvent, entry: CaptureHistoryEntry) {
@@ -210,9 +243,27 @@ watch([sessionId, characterId, status], () => {
   page.value = 1;
   void load();
 });
+
+function onEntryDeleted() {
+  deleteTarget.value = null;
+}
+
 onMounted(async () => {
   await initializeSettings();
   await initialize();
+  try {
+    unlisteners.push(
+      await listen<{ captureItemId: string }>("capture:item-purged", () => {
+        void load();
+      }),
+    );
+  } catch {
+    // Browser previews do not expose the Tauri event bridge.
+  }
+});
+
+onBeforeUnmount(() => {
+  unlisteners.forEach((unlisten) => unlisten());
 });
 </script>
 
@@ -281,6 +332,12 @@ onMounted(async () => {
             </div>
             <div class="history-character"><UserRound :size="15" />{{ entry.characterName || "未标记" }}</div>
             <span class="status-pill" :data-status="entry.status">{{ captureStatusLabel(entry.status, entry.failureStage) }}</span>
+            <span
+              v-for="issue in captureFileIssues(entry)"
+              :key="issue.kind"
+              class="file-state-chip"
+              :data-state="issue.state"
+            >{{ issue.label }}</span>
           </button>
           <div v-if="!filtered.length && !loading" class="history-empty">没有符合筛选条件的截图。</div>
         </div>
@@ -305,6 +362,14 @@ onMounted(async () => {
 
             <dl>
               <div><dt>状态</dt><dd>{{ captureStatusLabel(selected.status, selected.failureStage) }}</dd></div>
+              <div
+                v-for="issue in captureFileIssues(selected)"
+                :key="issue.kind"
+                class="file-issue-row"
+              >
+                <dt>{{ issue.kind === "source" ? "原图" : "目标文件" }}</dt>
+                <dd :data-state="issue.state">{{ issue.label }}</dd>
+              </div>
               <div><dt>角色</dt><dd>{{ selected.characterName || "未标记" }}</dd></div>
               <div><dt>会话</dt><dd>{{ selected.sessionStatus }}</dd></div>
               <div><dt>捕获时间</dt><dd>{{ new Date(selected.capturedAt).toLocaleString() }}</dd></div>
@@ -313,9 +378,26 @@ onMounted(async () => {
             </dl>
 
             <div class="detail-paths">
-              <button type="button" @click="reveal(selected.sourcePath)"><Image :size="16" />显示原图<ExternalLink :size="13" /></button>
-              <button v-if="selected.destinationPath" type="button" @click="reveal(selected.destinationPath)"><Archive :size="16" />显示归档图<ExternalLink :size="13" /></button>
-              <button v-if="selected.destinationAvatarPath" type="button" @click="reveal(selected.destinationAvatarPath)"><UserRound :size="16" />显示头像<ExternalLink :size="13" /></button>
+              <button
+                type="button"
+                :disabled="captureVariantReadReason(selected, 'source') !== null"
+                :title="captureVariantReadReason(selected, 'source') ?? '在文件管理器中定位原图'"
+                @click="reveal(selected.sourcePath)"
+              ><Image :size="16" />显示原图<ExternalLink :size="13" /></button>
+              <button
+                v-if="selected.destinationPath"
+                type="button"
+                :disabled="captureVariantReadReason(selected, 'destination') !== null"
+                :title="captureVariantReadReason(selected, 'destination') ?? '在文件管理器中定位归档图'"
+                @click="reveal(selected.destinationPath)"
+              ><Archive :size="16" />显示归档图<ExternalLink :size="13" /></button>
+              <button
+                v-if="selected.destinationAvatarPath"
+                type="button"
+                :disabled="captureVariantReadReason(selected, 'avatar') !== null"
+                :title="captureVariantReadReason(selected, 'avatar') ?? '在文件管理器中定位头像'"
+                @click="reveal(selected.destinationAvatarPath)"
+              ><UserRound :size="16" />显示头像<ExternalLink :size="13" /></button>
               <button v-if="canReprocess(selected)" type="button" :disabled="loading" @click="reprocess(selected)"><Sparkles :size="16" />重新识别<ExternalLink :size="13" /></button>
             </div>
           </div>
@@ -328,6 +410,12 @@ onMounted(async () => {
     </template>
 
     <DebugLogPanel v-else />
+    <CaptureDeleteDialog
+      v-if="deleteTarget"
+      :capture-item="deleteTarget"
+      @close="deleteTarget = null"
+      @deleted="onEntryDeleted"
+    />
     <ContextMenu :menu="entryMenu" />
   </section>
 </template>
@@ -416,5 +504,35 @@ onMounted(async () => {
   .history-workspace :deep(.responsive-detail-panel.is-static) {
     border-left: 0;
   }
+}
+
+.history-row .file-state-chip,
+.file-issue-row dd[data-state] {
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--border));
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  color: var(--destructive);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.history-row .file-state-chip[data-state="unavailable"],
+.file-issue-row dd[data-state="unavailable"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
+
+.history-row .file-state-chip[data-state="replaced"],
+.file-issue-row dd[data-state="replaced"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
+
+.file-issue-row dd {
+  display: inline-flex;
 }
 </style>

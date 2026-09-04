@@ -89,16 +89,23 @@ async fn autoconfigure_bundled_with(
     app_local_dir: &Path,
     sidecar: &Path,
 ) -> Result<(), AppError> {
-    let resources = sidecar.parent().unwrap_or_else(|| Path::new("")).join("resources");
+    let resources = sidecar
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("resources");
     let mut settings = get(pool).await?;
     let mut changed = false;
 
-    let yunet = resources.join(BUNDLED_MODELS_REL).join("face_detection_yunet_2023mar.onnx");
+    let yunet = resources
+        .join(BUNDLED_MODELS_REL)
+        .join("face_detection_yunet_2023mar.onnx");
     if settings.yunet_model_path.is_none() && yunet.is_file() {
         settings.yunet_model_path = Some(yunet.to_string_lossy().into_owned());
         changed = true;
     }
-    let sface = resources.join(BUNDLED_MODELS_REL).join("face_recognition_sface_2021dec.onnx");
+    let sface = resources
+        .join(BUNDLED_MODELS_REL)
+        .join("face_recognition_sface_2021dec.onnx");
     if settings.sface_model_path.is_none() && sface.is_file() {
         settings.sface_model_path = Some(sface.to_string_lossy().into_owned());
         changed = true;
@@ -113,7 +120,9 @@ async fn autoconfigure_bundled_with(
         changed = true;
     }
     if settings.font_path.is_none() {
-        let bundled_font = resources.join(BUNDLED_FONTS_REL).join("SmileySans-Oblique.ttf");
+        let bundled_font = resources
+            .join(BUNDLED_FONTS_REL)
+            .join("SmileySans-Oblique.ttf");
         if bundled_font.is_file() {
             std::fs::create_dir_all(app_local_dir.join("fonts"))?;
             let target = app_local_dir.join("fonts").join("SmileySans-Oblique.ttf");
@@ -345,10 +354,7 @@ mod tests {
         let sidecar = install.path().join("scene-vault-ai.exe");
         std::fs::write(&sidecar, b"exe").expect("sidecar");
 
-        assert_eq!(
-            sidecar_executable_in(install.path()),
-            Some(sidecar.clone())
-        );
+        assert_eq!(sidecar_executable_in(install.path()), Some(sidecar.clone()));
 
         let settings = VisionSettings {
             python_executable_path: Some("C:\\python.exe".to_owned()),
@@ -404,10 +410,19 @@ mod tests {
             .await
             .expect("autoconfigure");
         let settings = get(&pool).await.expect("read");
-        assert_eq!(settings.yunet_model_path, Some(yunet.to_string_lossy().into_owned()));
-        assert_eq!(settings.sface_model_path, Some(sface.to_string_lossy().into_owned()));
+        assert_eq!(
+            settings.yunet_model_path,
+            Some(yunet.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            settings.sface_model_path,
+            Some(sface.to_string_lossy().into_owned())
+        );
         assert!(settings.font_path.is_some());
-        assert!(app_local.path().join("fonts/SmileySans-Oblique.ttf").is_file());
+        assert!(app_local
+            .path()
+            .join("fonts/SmileySans-Oblique.ttf")
+            .is_file());
 
         // User-configured values are never overwritten.
         let custom_yunet = install.path().join("custom-yunet.onnx");
@@ -418,7 +433,11 @@ mod tests {
         let custom = VisionSettings {
             python_executable_path: Some(custom_python.to_string_lossy().into_owned()),
             python_module_root: Some(
-                install.path().join("custom-src").to_string_lossy().into_owned(),
+                install
+                    .path()
+                    .join("custom-src")
+                    .to_string_lossy()
+                    .into_owned(),
             ),
             yunet_model_path: Some(custom_yunet.to_string_lossy().into_owned()),
             sface_model_path: None,
@@ -626,13 +645,12 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("read suggestion");
-        let awaiting_feature: Option<String> = sqlx::query_scalar(
-            "SELECT feature_json FROM capture_faces WHERE capture_item_id = ?",
-        )
-        .bind(&awaiting.id)
-        .fetch_one(&pool)
-        .await
-        .expect("read awaiting feature");
+        let awaiting_feature: Option<String> =
+            sqlx::query_scalar("SELECT feature_json FROM capture_faces WHERE capture_item_id = ?")
+                .bind(&awaiting.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read awaiting feature");
         assert!(suggested.is_some());
         assert!(awaiting_feature.is_some());
 
@@ -654,13 +672,12 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("read cleared suggestion");
-        let awaiting_feature: Option<String> = sqlx::query_scalar(
-            "SELECT feature_json FROM capture_faces WHERE capture_item_id = ?",
-        )
-        .bind(&awaiting.id)
-        .fetch_one(&pool)
-        .await
-        .expect("read cleared awaiting feature");
+        let awaiting_feature: Option<String> =
+            sqlx::query_scalar("SELECT feature_json FROM capture_faces WHERE capture_item_id = ?")
+                .bind(&awaiting.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read cleared awaiting feature");
         let awaiting_model: Option<String> = sqlx::query_scalar(
             "SELECT feature_model_id FROM capture_faces WHERE capture_item_id = ?",
         )

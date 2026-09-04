@@ -30,6 +30,11 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
     setCharacterAvatar: vi.fn(),
     retry: vi.fn(),
     refreshCaptureFaceFeature: vi.fn(),
+    previewCaptureDeletion: vi.fn(),
+    deleteCaptureItem: vi.fn(),
+    previewCharacterDeletion: vi.fn(),
+    deleteCharacter: vi.fn(),
+    reconcileProjectFiles: vi.fn(),
     setProjectCover: vi.fn(),
     revealPath: vi.fn(),
     readImage: vi.fn(),
@@ -91,7 +96,7 @@ const summaries = [
   {
     id: "character-2",
     name: "Bella",
-    aliasesJson: "[]",
+    aliasesJson: '["贝拉"]',
     avatarAssetId: null,
     avatarCaptureItemId: null,
     captureCount: 0,
@@ -240,6 +245,18 @@ beforeEach(() => {
   });
   api.readImage.mockResolvedValue(new ArrayBuffer(8));
   api.readThumbnail.mockResolvedValue(new ArrayBuffer(8));
+  api.reconcileProjectFiles.mockResolvedValue({
+    scannedDirectoryCount: 1,
+    scannedFileCount: 12,
+    sourceCheckedCount: 2,
+    relocatedCount: 1,
+    sourceMissingCount: 0,
+    sourceReplacedCount: 0,
+    ambiguousCount: 0,
+    unavailableSourceDirectoryCount: 0,
+    destinationMissingCount: 1,
+    destinationUnavailableCount: 0,
+  });
 });
 
 afterEach(() => {
@@ -269,6 +286,38 @@ describe("Workbench", () => {
     expect(wrapper.find(".pending-badge").text()).toBe("1");
     expect(wrapper.text()).toContain("queued");
     expect(wrapper.text()).toContain("建议待确认");
+  });
+
+  it("filters characters by name or alias and can clear the query", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    const search = wrapper.get('input[aria-label="搜索人物"]');
+
+    await search.setValue("贝拉");
+    expect(wrapper.findAll(".character-card")).toHaveLength(1);
+    expect(wrapper.find(".character-card").text()).toContain("Bella");
+    expect(wrapper.find(".character-card").text()).not.toContain("Ava");
+
+    await search.setValue("nobody");
+    expect(wrapper.text()).toContain('没有匹配“nobody”的人物');
+
+    await wrapper.get('button[aria-label="清空人物搜索"]').trigger("click");
+    expect(wrapper.findAll(".character-card")).toHaveLength(2);
+  });
+
+  it("checks all project files without requiring an active capture session", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const button = wrapper.findAll("button").find((entry) => entry.text().includes("检查项目文件"));
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(api.reconcileProjectFiles).toHaveBeenCalledWith("project-1");
+    expect(document.body.textContent).toContain("已重新定位 1 张原图");
+    expect(document.body.textContent).toContain("1 个归档/头像目标文件缺失");
+    expect(document.body.textContent).toContain("没有导入或启动识别");
   });
 
   it("shows a stable loading skeleton instead of a false empty workbench", async () => {
@@ -309,6 +358,7 @@ describe("Workbench", () => {
     expect(listenMock.mock.calls.map(([name]) => name)).toEqual(
       expect.arrayContaining([
         "capture:item-updated",
+        "capture:character-deleted",
         "capture:face-bank-rebuilt",
         "capture:face-bank-rebuild-progress",
       ]),
@@ -1104,9 +1154,23 @@ describe("Workbench", () => {
     const callsBefore = api.listCharacterCaptureItemsPage.mock.calls.length;
 
     eventHandlers.get("capture:item-purged")?.({ payload: { captureItemId: "item-1" } });
+    await new Promise((resolve) => setTimeout(resolve, 160));
     await flushPromises();
 
     expect(api.listCharacterCaptureItemsPage.mock.calls.length).toBeGreaterThan(callsBefore);
+    wrapper.unmount();
+  });
+
+  it("reloads the workbench when an empty character is deleted", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    const callsBefore = api.listProjectCharacterSummaries.mock.calls.length;
+
+    eventHandlers.get("capture:character-deleted")?.({ payload: { characterId: "character-2" } });
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    await flushPromises();
+
+    expect(api.listProjectCharacterSummaries.mock.calls.length).toBeGreaterThan(callsBefore);
     wrapper.unmount();
   });
 
@@ -1273,6 +1337,58 @@ describe("Workbench context menus", () => {
     expect(menu!.textContent).toContain("显示原图");
     expect(menu!.textContent).not.toContain("确认建议");
     expect(menu!.textContent).not.toContain("设为代表头像");
+    wrapper.unmount();
+  });
+
+  it("offers removing a completed capture from an item cell", async () => {
+    api.listCharacterCaptureItemsPage.mockResolvedValue(
+      paged([{ ...item, status: "completed" }]),
+    );
+    api.previewCaptureDeletion.mockResolvedValue({
+      captureCount: 1,
+      destinationFileCount: 1,
+      localDerivedFileCount: 0,
+      sourceFilesPreserved: 1,
+    });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".workbench-cell").trigger("contextmenu", { clientX: 90, clientY: 60 });
+    await flushPromises();
+    const remove = menuItems().find((entry) => entry.textContent?.includes("从 Scene Vault 移除"));
+    expect(remove).toBeDefined();
+    remove!.click();
+    await flushPromises();
+
+    expect(document.body.querySelector('[role="dialog"]')!.textContent).toContain("目标文件");
+    expect(document.body.querySelector('input[type="checkbox"]')).toBeTruthy();
+    wrapper.unmount();
+  });
+
+  it("offers cascade deletion of a character and opens its confirmation", async () => {
+    api.previewCharacterDeletion.mockResolvedValue({
+      captureCount: 2,
+      destinationFileCount: 1,
+      localDerivedFileCount: 1,
+      sourceFilesPreserved: 2,
+    });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await wrapper.find(".character-card").trigger("contextmenu", { clientX: 80, clientY: 50 });
+    await flushPromises();
+    expect(document.body.querySelector('[role="menu"]')!.textContent).toContain("删除角色");
+
+    menuItems()
+      .find((entry) => entry.textContent?.includes("删除角色"))!
+      .click();
+    await flushPromises();
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog!.textContent).toContain("删除角色");
+    expect(dialog!.textContent).toContain("2 条该角色的截图记录");
+    const checkbox = dialog!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
     wrapper.unmount();
   });
 });

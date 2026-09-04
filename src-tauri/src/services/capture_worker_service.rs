@@ -115,6 +115,27 @@ pub async fn process_once(
         }
         Err(_) => {}
     }
+    if let Err(error) = capture_service::validate_source_identity(pool, &item).await {
+        let failed = capture_service::mark_failed(
+            pool,
+            MarkCaptureFailedInput {
+                capture_item_id: item.id.clone(),
+                error_message: error.to_string(),
+            },
+        )
+        .await?;
+        capture_log(
+            &failed,
+            LogLevel::Warn,
+            "source_identity_changed",
+            "failed",
+            "capture source no longer matches the registered content",
+            Some("source_replaced"),
+        );
+        emit_item(app, &failed);
+        emit_runtime(pool, app).await?;
+        return Ok(());
+    }
     emit_item(app, &item);
     capture_log(
         &item,
@@ -208,6 +229,27 @@ async fn process_awaiting_label_feature(
     let Some(item) = capture_service::next_awaiting_label_without_feature(pool).await? else {
         return Ok(false);
     };
+    let source = match capture_service::validate_source_identity(pool, &item).await {
+        Ok(source) => source,
+        Err(AppError::NotFound(_)) => {
+            purge_capture_and_emit(app, pool, &item, "source_missing").await?;
+            return Ok(false);
+        }
+        Err(_error) => {
+            capture_log(
+                &item,
+                LogLevel::Warn,
+                "prelabel_source_identity_changed",
+                "skipped",
+                "pre-label face feature extraction skipped because the source no longer matches the registered content",
+                Some("source_replaced"),
+            );
+            schedule_prelabel_retry(pool, &item.id).await?;
+            let updated = capture_service::get_item(pool, &item.id).await?;
+            emit_item(app, &updated);
+            return Ok(false);
+        }
+    };
     let item_id_for_progress = item.id.clone();
     let source_path_for_progress = item.source_path.clone();
     let progress_app = app.clone();
@@ -224,7 +266,7 @@ async fn process_awaiting_label_feature(
     }) as vision_engine_service::ProgressCallback);
     let response = match vision_engine_service::extract_face_feature(
         settings,
-        &PathBuf::from(&item.source_path),
+        &source,
         processing_settings,
         progress,
     )
@@ -261,8 +303,7 @@ async fn process_awaiting_label_feature(
             // written, locked by the writer, ...). Give it a bounded number
             // of retries, then record the "attempted without a feature"
             // marker so the pre-label pass never re-picks the item.
-            if let Some(error_code) =
-                vision_engine_service::bounded_retry_source_error_code(&error)
+            if let Some(error_code) = vision_engine_service::bounded_retry_source_error_code(&error)
             {
                 let next_attempt = item.attempt_count.saturating_add(1);
                 if next_attempt >= i64::from(MAX_PRELABEL_RETRY_ATTEMPTS) {
@@ -481,6 +522,7 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
         FROM capture_items
         WHERE status = 'awaiting_label'
           AND recognition_deferred = 0
+          AND source_file_state NOT IN ('missing', 'replaced')
           AND NOT EXISTS (
               SELECT 1
               FROM capture_faces face
@@ -537,19 +579,20 @@ async fn archive_and_emit(
     app: &AppHandle,
     item: &CaptureItem,
 ) -> Result<(), AppError> {
-    // A capture whose source was deleted before it was archived can never be
-    // copied or verified; remove it entirely instead of retrying the copy.
-    match tokio::fs::metadata(&item.source_path).await {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => {
+    // Validate again immediately before archive. This protects both direct
+    // source archives and derived outputs from same-name source replacement.
+    match capture_service::validate_source_identity(pool, item).await {
+        Ok(_) => {}
+        Err(AppError::NotFound(_)) => {
             purge_capture_and_emit(app, pool, item, "source_missing").await?;
             return Ok(());
         }
-        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
-            purge_capture_and_emit(app, pool, item, "source_missing").await?;
+        Err(error) => {
+            let scheduled =
+                capture_service::schedule_archive_retry(pool, &item.id, &error.to_string()).await?;
+            emit_item(app, &scheduled);
             return Ok(());
         }
-        Err(_) => {}
     }
     capture_log(
         item,
