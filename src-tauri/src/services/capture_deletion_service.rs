@@ -162,6 +162,13 @@ async fn execute<R: FileRecycler>(
     allow_permanent_network_delete: bool,
     recycler: &R,
 ) -> Result<CaptureDeletionResult, AppError> {
+    let mut ids: Vec<_> = rows.iter().map(|r| r.id.clone()).collect();
+    ids.sort();
+    let mut _guards = Vec::new();
+    for id in &ids {
+        _guards.push(super::capture_operation_service::lock(pool, id).await);
+        super::capture_operation_service::ensure_available(pool, id).await?;
+    }
     if rows.iter().any(|row| {
         matches!(
             row.status.as_str(),

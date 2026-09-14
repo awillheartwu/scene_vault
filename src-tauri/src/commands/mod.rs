@@ -10,3 +10,5 @@ pub mod settings;
 pub mod system;
 pub mod vision;
 pub mod window;
+
+pub mod capture_edit;

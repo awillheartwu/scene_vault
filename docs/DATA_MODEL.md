@@ -74,6 +74,10 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
   `destination_avatar_file_state` 分别记录原图、大图归档和头像归档的
   `available` / `missing` / `replaced` / `unavailable` 状态；路径重新定位不改变人物、
   分类、归档和人脸关系。
+- 人工介入与并发：`manual_face_roi_json` 保存用户框选主脸的归一化选区，
+  `manual_face_roi_ready` 标记该选区是否已成功重算特征；`processing_version`
+  在选区变更或撤销分类时递增，用于拒绝过期结果；`operation_owner` 表示当前持有该
+  图片的重置操作，非空时其他写入方必须等待。
 
 已完成项改判时保留旧归档，待新归档成功后再替换旧文件和资产关系。改判为 `scene` 或
 `private` 会清空角色、建议和对应 Face Bank 样本。旧的 item 级特征列已废弃，运行时
@@ -84,6 +88,22 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
 保存用户从 Scene Vault 删除的截图内容哈希，作用域为项目。来源目录仍存在相同内容时，
 发现和导入流程保持忽略；只有内容哈希变化才会登记为新的 Capture Item。该表不保存图片
 二进制，也不授权应用删除原图。
+
+### 撤销分类不落库
+
+撤销分类（`重置`）不建队列表：一次任务只活在进程内存里，预览冻结名单和每个文件的
+身份快照，执行时逐张串行处理，日志（`capture.reset`）是唯一持久痕迹。应用重启后
+任务消失，用户重新发起即可；已删除的归档文件和已完成的图片不需要旧日志，缺失文件在
+下一轮按“已完成”跳过。
+
+数据库里只剩两处与撤销相关的状态：
+
+- `capture_items.operation_owner`（`0021`）：撤销期间值为 `reset:<job>`，阻止
+  识别、改判、删除等写入方同时操作该图片；每张图片处理结束后立即释放，应用启动时清扫
+  被强杀留下的 `reset:*` 占用。`processing_version` 只在撤销提交成功时 +1，用于
+  作废在途识别结果；失败的尝试不改变它，因此可以重试。
+- `capture_items.reset_generation`（`0022`）：成功撤销的次数。保留了旧归档、之后
+  重新归档时用它生成不会冲突的文件名（模板没有 `{seq}` 时加 ` - reset-N` 后缀）。
 
 ### `capture_faces`
 

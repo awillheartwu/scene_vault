@@ -12,3 +12,5 @@ pub mod recognition_settings;
 pub mod resource;
 pub mod tag;
 pub mod vision;
+
+pub mod capture_reset;

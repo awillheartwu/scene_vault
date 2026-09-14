@@ -33,6 +33,7 @@ import {
   type BundledFont,
   type AnnotationSettings,
   type CropSettings,
+  type RoiSettings,
   type DetectionSettings,
   type ModelRecognitionProfile,
   type ProcessingSettings,
@@ -50,6 +51,7 @@ import PageHeader from "@/components/layout/PageHeader.vue";
 import ResourceStoragePanel from "@/components/settings/ResourceStoragePanel.vue";
 import { recordClientEvent } from "@/lib/client-log";
 import { toast } from "@/lib/toast";
+import { describeError } from "@/lib/vision-errors";
 
 const NAMING_PLACEHOLDERS: [string, string][] = [
   ["{source}", "源截图文件名（不含扩展名）"],
@@ -171,10 +173,12 @@ const processingUi = ref<{
   detection: DetectionSettings;
   annotation: AnnotationSettings;
   crop: CropSettings;
+  roi: RoiSettings;
 }>({
   detection: emptyDetection(),
   annotation: emptyAnnotation(),
   crop: emptyCrop(),
+  roi: emptyRoi(),
 });
 const textColorHex = ref("#50dcff");
 const strokeColorHex = ref("#000000");
@@ -193,6 +197,7 @@ interface SettingsBaseline {
     detection: DetectionSettings;
     annotation: AnnotationSettings;
     crop: CropSettings;
+    roi: RoiSettings;
     textColorHex: string;
     strokeColorHex: string;
   };
@@ -282,6 +287,7 @@ async function initialize() {
       detection: processing.detection ?? emptyDetection(),
       annotation: processing.annotation ?? emptyAnnotation(),
       crop: processing.crop ?? emptyCrop(),
+      roi: processing.roi ?? emptyRoi(),
     };
     annotatePerson.value = processing.annotatePerson ?? true;
     textColorHex.value = rgbToHex(processingUi.value.annotation.textColor);
@@ -296,6 +302,7 @@ async function initialize() {
         detection: clone(processingUi.value.detection),
         annotation: clone(processingUi.value.annotation),
         crop: clone(processingUi.value.crop),
+        roi: clone(processingUi.value.roi),
         textColorHex: textColorHex.value,
         strokeColorHex: strokeColorHex.value,
       },
@@ -541,6 +548,10 @@ function emptyCrop(): CropSettings {
   };
 }
 
+function emptyRoi(): RoiSettings {
+  return { expandRatio: null, multipleFaces: null };
+}
+
 function rgbToHex(color: [number, number, number] | null): string {
   if (!color) return "#50dcff";
   return (
@@ -610,12 +621,13 @@ function buildProcessingPayload(): ProcessingSettings {
       : null,
     annotation: hasValue(annotation) ? annotation : null,
     crop: hasValue(processingUi.value.crop) ? processingUi.value.crop : null,
+    roi: hasValue(processingUi.value.roi) ? processingUi.value.roi : null,
     annotatePerson: annotatePerson.value,
   };
 }
 
 function resetProcessingGroup(
-  group: "detection" | "annotation" | "crop",
+  group: "detection" | "annotation" | "crop" | "roi",
 ) {
   if (group === "detection") processingUi.value.detection = emptyDetection();
   if (group === "annotation") {
@@ -624,6 +636,7 @@ function resetProcessingGroup(
     strokeColorHex.value = "#000000";
   }
   if (group === "crop") processingUi.value.crop = emptyCrop();
+  if (group === "roi") processingUi.value.roi = emptyRoi();
 }
 
 async function saveProcessing() {
@@ -636,6 +649,7 @@ async function saveProcessing() {
         detection: clone(processingUi.value.detection),
         annotation: clone(processingUi.value.annotation),
         crop: clone(processingUi.value.crop),
+        roi: clone(processingUi.value.roi),
         textColorHex: textColorHex.value,
         strokeColorHex: strokeColorHex.value,
       };
@@ -758,7 +772,7 @@ function fontOptions(): { label: string; value: string }[] {
 }
 
 function normalizeError(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 function onBeforeUnload(event: BeforeUnloadEvent) {
@@ -1236,6 +1250,37 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <section class="processing-group" aria-labelledby="processing-roi-title">
+        <div class="processing-group-title">
+          <h3 id="processing-roi-title"><span aria-hidden="true">04</span>主脸框选</h3>
+          <button type="button" class="clear-field" @click="resetProcessingGroup('roi')">恢复默认</button>
+        </div>
+        <div class="processing-grid">
+          <label class="processing-field">
+            <span>扩边重试比例</span>
+            <input
+              id="roi-expand-ratio"
+              v-model.number="processingUi.roi.expandRatio"
+              type="number"
+              min="0"
+              max="0.5"
+              step="0.05"
+              placeholder="0.15"
+            />
+            <small>框选区域内没检出人脸时，按这个比例向外扩大后再试一次；0 表示不扩大。默认 0.15。</small>
+          </label>
+          <label class="processing-field">
+            <span>选区内多张脸</span>
+            <select id="roi-multiple-faces" v-model="processingUi.roi.multipleFaces">
+              <option :value="null">提示报错（默认）</option>
+              <option value="largest">自动选最大的一张</option>
+              <option value="sharpest">自动选最清晰的一张</option>
+            </select>
+            <small>框住多张脸时的处理方式：报错最稳妥，自动挑选更省事，但可能不是你想要的那张。</small>
+          </label>
+        </div>
+      </section>
+
       <div class="settings-actions">
         <button type="submit" class="primary-action" :disabled="processingBusy">
           <LoaderCircle v-if="processingBusy" class="animate-spin" :size="17" /><Save :size="17" />保存处理参数
@@ -1366,7 +1411,6 @@ onBeforeUnmount(() => {
 <style scoped>
 .settings-page > :deep(.page-header) {
   width: 100%;
-  max-width: 1080px;
 }
 
 .settings-layout {
@@ -1374,7 +1418,6 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   gap: 20px;
   width: 100%;
-  max-width: 1080px;
 }
 
 .settings-nav {

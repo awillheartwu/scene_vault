@@ -142,6 +142,52 @@ python\.venv\Scripts\python.exe python\tools\benchmark_worker.py `
   `sfaceModelPath` 时提取特征；ArcFace 必须提供 `arcfaceModelPath`。
 - 输出支持 PNG、JPEG、WebP 和 BMP。
 
+### 可选主脸选择区域 faceRoi
+
+协议版本仍为 `1`。`processScreenshot.payload` 可添加独立的 `faceRoi` 字段：
+
+```json
+"faceRoi": { "x": 0.25, "y": 0.2, "width": 0.5, "height": 0.6 }
+```
+
+四个字段必须齐全且无额外字段，都是有限 JSON 数字（不接受布尔值或字符串）。
+`x`、`y` 是相对整张原图左上角的归一化坐标，允许为 0；`width`、`height` 必须
+大于 0。各值均在 `[0,1]`，且 `x + width <= 1`、`y + height <= 1`。
+省略或传 `null` 表示不指定 ROI，完全沿用原有自动主脸评分和无脸降级行为。
+非空 ROI 要求 `detectFace=true`；无效 ROI 返回 `invalid_payload`。
+
+引擎先检测整张图片，只保留脸框中心位于 ROI 内（含边界）的候选。恰好一张时采用
+该脸；多于一张时按可选的 `roi` 组决定（见下），默认返回 `roi_multiple_faces`，
+不自动挑选。没有候选时，将 ROI 左右各扩大其宽度的 `roi.expandRatio`（默认 0.15）、
+上下各扩大其高度的同比例，裁切到图片边界；像素边界
+向外取整后，仅在此裁剪图上再检测一次。裁剪检测框和全部五点 landmarks 会平移回
+原图坐标，再按原始 ROI 的中心条件筛选；零张返回 `roi_no_face`，多张仍返回
+`roi_multiple_faces`。这两个错误均为 `ok=false`、`data=null`，且不写标注或头像输出；
+多脸错误的 `error.details.faceCount` 给出框内候选数。检测器本身失败仍返回检测错误。
+
+### 可选框选策略 roi
+
+`processScreenshot.payload` 可添加独立的 `roi` object，配合 `faceRoi` 使用：
+
+```json
+"roi": { "expandRatio": 0.15, "multipleFaces": "largest" }
+```
+
+- `expandRatio`：没有候选时向外扩边重试的比例，有限数字且落在 `[0, 0.5]`，默认 `0.15`；
+  `0` 表示不扩边，只在原选区内判定。
+- `multipleFaces`：选区内多于一张脸时的策略，取值 `error`（默认，返回
+  `roi_multiple_faces`）、`largest`（取面积最大的一张）、`sharpest`（取清晰度最高的一张）。
+
+两个字段都可省略，未知字段、越界比例或未知策略返回 `invalid_payload`。不传 `roi`
+时行为与之前完全一致。
+
+仅提特征时使用同一 `processScreenshot` 请求，设置 `annotate=false`、
+`cropAvatar=false`，省略对应输出路径，并提供识别器模型路径。最终处理时传入相同
+`faceRoi`，开启所需输出；特征、标注和头像共用同一选脸结果，均使用原图及原图坐标。
+人工 ROI 只保存在请求的独立字段中，不替代响应的实际像素 `faceBox`，响应不回传 ROI。
+指定 ROI 时成功响应的 `faceCount` 为框内选中数量 `1`；未指定时仍为整图检测数量。
+`faceSharpness` 对应选中的检测框，`faceAreaRatio` 仍相对整张图片计算。
+
 检测参数可通过可选的 `detection` object 调整；未知字段、错误类型、非有限数字和
 越界参数会被拒绝。
 
@@ -206,7 +252,7 @@ SFace 使用 `opencv-contrib-python-headless` 中的 `FaceRecognizerSF`；ArcFac
 用户提供的 ONNX 模型和 5 点对齐。特征提取失败只追加识别器对应的 warning，不影响
 标注和头像输出。模型权重不随 Python 包分发。
 
-没有检测到人脸是成功降级：标注大图仍会生成，头像路径为空。模型缺失、图片损坏或
+未指定 ROI 时，没有检测到人脸是成功降级：标注大图仍会生成，头像路径为空。模型缺失、图片损坏或
 写入失败才返回失败：
 
 ```json
@@ -240,6 +286,8 @@ input_read_failed
 resource_not_found
 image_decode_failed
 face_detection_failed
+roi_no_face
+roi_multiple_faces
 output_write_failed
 internal_error
 ```
@@ -251,6 +299,15 @@ $env:PYTHONPATH = "python/src"
 python -m unittest discover -s python/tests -v
 python -m compileall -q python/src python/tests python/sidecar.py
 ```
+
+WSL/Linux 下固定 CPU 0–3 运行测试：
+
+```bash
+PYTHONPATH=python/src taskset -c 0-3 python -m unittest discover -s python/tests -v
+```
+
+`test_face_roi.py` 覆盖 ROI 校验、整图筛选、扩框重检、坐标与 landmarks 平移、
+框内无脸/多脸错误，以及特征和最终输出共用选脸结果；这些测试不需要模型权重。
 
 常规测试使用 fake detector 验证无脸降级、主脸结果和头像裁剪，因此不需要提交模型
 权重。持有 YuNet ONNX 模型时可额外运行真实模型 smoke test：

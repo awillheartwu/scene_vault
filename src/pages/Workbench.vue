@@ -26,6 +26,7 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
+import CaptureResetActions from "@/components/capture/CaptureResetActions.vue";
 import {
   captureFileIssues,
   captureVariantReadReason,
@@ -63,6 +64,7 @@ import {
   type ProjectFileReconcileResult,
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
+import { describeError } from "@/lib/vision-errors";
 import {
   readWorkbenchSnapshot,
   writeWorkbenchSnapshot,
@@ -114,6 +116,87 @@ const itemPageSize = ref(cachedWorkbench?.itemPageSize ?? 100);
 const itemTotal = ref(cachedWorkbench?.itemTotal ?? 0);
 const characterMenu = useContextMenu();
 const itemMenu = useContextMenu();
+const resetActions = ref<InstanceType<typeof CaptureResetActions> | null>(null);
+const resetSelectedIds = ref<string[]>([]);
+const resetSelecting = ref(false);
+const resetCharacterSelecting = ref(false);
+const resetCharacterIds = ref<string[]>([]);
+const resetCollecting = ref(false);
+const resetFilter = computed(() => ({
+  projectId: projectId.value,
+  characterId: view.value === "characters" ? selectedCharacterId.value : null,
+  includePrivate: true,
+}));
+const resetSelectableIds = computed(() => items.value.filter((item) => item.classification !== "unclassified").map((item) => item.id));
+
+watch([projectId, view, selectedCharacterId], () => {
+  resetSelectedIds.value = [];
+  resetSelecting.value = false;
+});
+
+async function beginCharacterReset(characterId: string) {
+  // The context menu entry means "undo this character's pictures", so it
+  // enters the same multi-character selection as the maintenance menu with
+  // this character already picked, instead of the per-picture selection.
+  await startCharacterSelection();
+  resetCharacterIds.value = [characterId];
+}
+async function allResetCandidates(): Promise<string[]> {
+  if (view.value === 'characters') {
+    if (!selectedCharacterId.value) return [];
+    return captureApi.listCaptureResetCandidates({ projectId: projectId.value, characterId: selectedCharacterId.value, includePrivate: true });
+  }
+  if (view.value === 'unclassified') return [];
+  return (await captureApi.listCategoryItems({ projectId: projectId.value, category: view.value })).map(item => item.id);
+}
+async function startCharacterSelection() {
+  view.value = 'characters';
+  panelCollapsed.value = false;
+  resetSelecting.value = false;
+  resetSelectedIds.value = [];
+  resetCharacterIds.value = [];
+  await nextTick();
+  resetCharacterSelecting.value = true;
+}
+function toggleResetCharacter(id: string) {
+  if (resetCollecting.value) return;
+  resetCharacterIds.value = resetCharacterIds.value.includes(id) ? resetCharacterIds.value.filter(value => value !== id) : [...resetCharacterIds.value, id];
+}
+async function finishCharacterSelection() {
+  if (!resetCharacterIds.value.length) { resetCharacterSelecting.value = false; return; }
+  if (resetCollecting.value) return;
+  const project = projectId.value;
+  const characters = [...resetCharacterIds.value];
+  resetCollecting.value = true;
+  try {
+    const ids = new Set<string>();
+    for (const character of characters) {
+      for (const id of await captureApi.listCaptureResetCandidates({projectId: project, characterId: character, includePrivate: true})) ids.add(id);
+    }
+    if (project !== projectId.value || !resetCharacterSelecting.value) return;
+    if (!ids.size) { toast.error('所选人物没有可撤销的截图'); return; }
+    resetActions.value?.preview([...ids]);
+  } catch (error) { toast.error(normalizeError(error)); }
+  finally { resetCollecting.value = false; }
+}
+function afterReset() {
+  resetCharacterSelecting.value = false;
+  resetCharacterIds.value = [];
+  void loadCharacterData();
+}
+watch([projectId, view], () => { resetCharacterSelecting.value = false; resetCharacterIds.value = []; });
+
+function onItemClick(item: CaptureItem) {
+  if (!resetSelecting.value) {
+    openItemDetail(item.id);
+    return;
+  }
+  if (item.classification === "unclassified") return;
+  selectedItemId.value = item.id;
+  resetSelectedIds.value = resetSelectedIds.value.includes(item.id)
+    ? resetSelectedIds.value.filter((id) => id !== item.id)
+    : [...resetSelectedIds.value, item.id];
+}
 
 function onCharacterContext(event: MouseEvent, summary: CharacterSummary) {
   if (!characterMenu.open(event, buildCharacterItems(summary))) return;
@@ -164,6 +247,14 @@ function buildCharacterItems(summary: CharacterSummary): ContextMenuItem[] {
       },
     },
     {
+      id: "reset-character",
+      label: "选择此角色的截图撤销…",
+      icon: RotateCcw,
+      separatorBefore: true,
+      disabled: busy.value || summary.captureCount === 0,
+      action: () => beginCharacterReset(summary.id),
+    },
+    {
       id: "delete-character",
       label: "删除角色…",
       icon: Trash2,
@@ -186,6 +277,7 @@ function onItemContext(event: MouseEvent, item: CaptureItem) {
 function buildItemItems(item: CaptureItem): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
     { id: "detail", label: "查看详情", icon: Eye, action: () => openItemDetail(item.id) },
+    { id: "reset-item", label: "撤销图片分类…", icon: RotateCcw, disabled: item.classification === "unclassified" || ["queued", "processing", "archive_pending"].includes(item.status), separatorBefore: true, action: () => resetActions.value?.preview([item.id]) },
   ];
   if ((view.value === "characters" || view.value === "unclassified") && item.reviewStatus === "pending") {
     items.push(
@@ -456,7 +548,7 @@ function suggestionEmptyReason(item: CaptureItem): string {
 }
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 async function runProjectFileReconcile() {
@@ -1130,6 +1222,19 @@ onBeforeUnmount(() => {
         <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData()">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
         </button>
+        <CaptureResetActions
+          ref="resetActions"
+          triggerless
+          :select-all-candidates="allResetCandidates"
+          v-model:selecting="resetSelecting"
+          :filter="resetFilter"
+          :selected-ids="resetSelectedIds"
+          :selectable-ids="resetSelectableIds"
+          :has-items="resetSelectableIds.length > 0"
+          @clear="resetSelectedIds = []"
+          @select-all="resetSelectedIds = $event"
+          @updated="afterReset"
+        />
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
             <button type="button" class="icon-action" aria-label="人物维护" title="人物维护">
@@ -1137,6 +1242,8 @@ onBeforeUnmount(() => {
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="workbench-maintenance-menu">
+            <DropdownMenuItem :disabled="!resetSelectableIds.length || resetCharacterSelecting" @select="resetActions?.startSelection()"><RotateCcw :size="15" />选择图片撤销分类…</DropdownMenuItem>
+            <DropdownMenuItem :disabled="!summaries.some(character => character.captureCount > 0) || resetCollecting" @select="startCharacterSelection"><Users :size="15" />多选人物撤销截图…</DropdownMenuItem>
             <DropdownMenuItem
               title="重新提取特征，保留截图当前角色绑定，并按当前匹配参数刷新待分类建议"
               :disabled="busy || !projectId"
@@ -1216,6 +1323,13 @@ onBeforeUnmount(() => {
             {{ loading && !summaries.length ? "…" : characterSearch.trim() ? `${filteredSummaries.length}/${summaries.length}` : summaries.length }}
           </span>
         </div>
+        <div v-if="resetCharacterSelecting" class="character-reset-selection" aria-label="选择人物撤销截图">
+          <span>已选 {{ resetCharacterIds.length }} 个人物</span>
+          <button type="button" :disabled="resetCollecting" @click="resetCharacterIds = filteredSummaries.filter(character => character.captureCount > 0).map(character => character.id)">全选筛选人物</button>
+          <button type="button" :disabled="resetCollecting" @click="resetCharacterIds = []">取消全选</button>
+          <button type="button" :disabled="resetCollecting" @click="finishCharacterSelection">{{ resetCollecting ? '读取截图…' : '结束多选' }}</button>
+          <button type="button" :disabled="resetCollecting" @click="resetCharacterSelecting = false; resetCharacterIds = []">取消</button>
+        </div>
         <label class="character-search">
           <Search :size="15" aria-hidden="true" />
           <input
@@ -1255,8 +1369,10 @@ onBeforeUnmount(() => {
           :key="summary.id"
           type="button"
           class="character-card"
-          :class="{ selected: selectedCharacterId === summary.id }"
-          @click="selectCharacter(summary.id)"
+          :class="{ selected: !resetCharacterSelecting && selectedCharacterId === summary.id, 'reset-selected': resetCharacterSelecting && resetCharacterIds.includes(summary.id) }"
+          :aria-pressed="resetCharacterSelecting ? resetCharacterIds.includes(summary.id) : undefined"
+          :disabled="resetCharacterSelecting && (summary.captureCount === 0 || resetCollecting)"
+          @click="resetCharacterSelecting ? toggleResetCharacter(summary.id) : selectCharacter(summary.id)"
           @contextmenu="onCharacterContext($event, summary)"
         >
           <span class="character-avatar">
@@ -1402,8 +1518,8 @@ onBeforeUnmount(() => {
             type="button"
             role="listitem"
             class="workbench-cell"
-            :class="{ selected: selectedItemId === item.id }"
-            @click="openItemDetail(item.id)"
+            :class="{ selected: !resetSelecting && selectedItemId === item.id, 'reset-selected': resetSelecting && resetSelectedIds.includes(item.id) }"
+            @click="onItemClick(item)"
             @contextmenu="onItemContext($event, item)"
           >
             <span class="workbench-cell-thumb">
@@ -1912,6 +2028,12 @@ onBeforeUnmount(() => {
   color: var(--warn);
 }
 
+.workbench-cell.reset-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+}
+
 .file-issue-row dd[data-state] {
   display: inline-flex;
   padding: 2px 8px;
@@ -1934,4 +2056,9 @@ onBeforeUnmount(() => {
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+.character-card.reset-selected { outline: 2px solid var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
+.character-reset-selection { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; font-size: 12px; }
+.character-reset-selection span { width: 100%; color: var(--muted-foreground); }
+.character-reset-selection button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--secondary); color: var(--foreground); }
 </style>

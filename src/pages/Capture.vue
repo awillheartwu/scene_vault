@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { isOlderCapture } from "@/lib/capture-api";
+import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
+import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
+import { parseFaceBox } from '@/lib/face-box';
+import { describeError } from '@/lib/vision-errors';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -214,7 +219,7 @@ const stripThumbOffset = ref(0);
 let stripObserver: ResizeObserver | null = null;
 
 const activeSession = computed(() => sessions.value.find((session) => session.status === "active") ?? null);
-const selectedItem = computed(() => items.value.find((item) => item.id === selectedItemId.value) ?? items.value[0] ?? null);
+const selectedItem = computed(() => stripItems.value.find((item) => item.id === selectedItemId.value) ?? stripItems.value[0] ?? null);
 const selectedCharacter = computed(() => characters.value.find((character) => character.id === selectedCharacterId.value) ?? null);
 // The recent strip is a working queue: awaiting-label first (oldest first),
 // then in-flight, then failed. Completed captures leave the strip entirely;
@@ -228,7 +233,7 @@ const stripItems = computed(() => {
     failed: 2,
   };
   return items.value
-    .filter((item) => item.status !== "completed")
+    .filter((item) => item.status !== 'completed')
     .sort((a, b) => {
       const pa = priority[a.status] ?? 3;
       const pb = priority[b.status] ?? 3;
@@ -236,8 +241,14 @@ const stripItems = computed(() => {
       return new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime();
     });
 });
+const { roi: faceRoi, busy: roiBusy, blocked: roiBlocked, loading: roiLoading, error: roiError, revision: roiRevision, save: saveFaceRoi } = useCaptureFaceRoi(selectedItem, upsertItem);
+watch(roiRevision, () => { verificationWarning.value = null; });
+// The last detected primary face: framing starts from it instead of an
+// arbitrary centered box.
+const detectedFaceBox = computed(() => parseFaceBox(selectedItem.value?.faceBoxJson));
 const suggestedCharacter = computed(() => {
   const item = selectedItem.value;
+  if (roiBusy.value || roiBlocked.value) return null;
   if (!item || item.reviewStatus !== "pending" || !item.suggestedCharacterId) return null;
   return characters.value.find((character) => character.id === item.suggestedCharacterId) ?? null;
 });
@@ -280,7 +291,7 @@ const canSubmit = computed(
     selectedItem.value?.status === "awaiting_label" &&
     pendingClassification.value === "person" &&
     Boolean(selectedCharacterId.value) &&
-    !busy.value,
+    !busy.value && !roiBusy.value && !roiBlocked.value && !roiLoading.value,
 );
 
 async function initialize() {
@@ -314,7 +325,7 @@ async function loadProject() {
   ]);
   const project = projects.value.find((value) => value.id === projectId.value);
   projectDestination.value = project?.destinationDirectory ?? "";
-  items.value = await captureApi.listProjectRecentCaptures(projectId.value, 100);
+  await refreshRecentCaptures();
   deferredImportCount.value = activeSession.value
     ? await captureApi.deferredImportRecognitionCount(activeSession.value.id)
     : 0;
@@ -501,9 +512,14 @@ async function startImportedRecognition() {
   }
 }
 
+let recentRequest = 0;
 async function refreshRecentCaptures() {
+  const request = ++recentRequest;
   if (!projectId.value) return;
-  items.value = await captureApi.listProjectRecentCaptures(projectId.value, 100);
+  const id = projectId.value;
+  const [recent, pending] = await Promise.all([captureApi.listProjectRecentCaptures(id, 100), captureApi.listProjectPendingCaptures(id)]);
+  if (id !== projectId.value || request !== recentRequest) return;
+  items.value = [...new Map([...recent, ...pending].map(item => [item.id, item])).values()];
   selectBestItem();
 }
 
@@ -524,12 +540,14 @@ async function submitLabel() {
   if (!selectedItem.value || !selectedCharacterId.value || !canSubmit.value) return;
   const itemId = selectedItem.value.id;
   const characterId = selectedCharacterId.value;
+  const revision = roiRevision.value;
   verificationWarning.value = null;
   await runBusy(async () => {
     const result = await captureApi.verifyCaptureIdentity({
       captureItemId: itemId,
       characterId,
     });
+    if (selectedItem.value?.id !== itemId || revision !== roiRevision.value) return;
     if (result.level === "ok" || result.level === "unverified") {
       await doLabel(itemId, characterId);
     } else {
@@ -539,7 +557,7 @@ async function submitLabel() {
 }
 
 async function confirmForcedLabel() {
-  if (!selectedItem.value || !selectedCharacterId.value) return;
+  if (!selectedItem.value || !selectedCharacterId.value || !canSubmit.value) return;
   const itemId = selectedItem.value.id;
   const characterId = selectedCharacterId.value;
   verificationWarning.value = null;
@@ -580,10 +598,12 @@ let suggestionRequestedFor: string | null = null;
 // state) decides whether a comparison is possible; no front-end guard here.
 async function refreshSuggestion() {
   const item = selectedItem.value;
-  if (!item || suggestionRequestedFor === item.id) return;
+  if (!item || roiBusy.value || roiBlocked.value || suggestionRequestedFor === item.id) return;
+  const revision = roiRevision.value;
   suggestionRequestedFor = item.id;
   try {
-    upsertItem(await captureApi.suggestForCapture(item.id));
+    const updated = await captureApi.suggestForCapture(item.id);
+    if (revision === roiRevision.value && selectedItem.value?.id === item.id) upsertItem(updated);
   } catch (error) {
     toast.error(normalizeError(error));
   } finally {
@@ -607,7 +627,9 @@ async function runBusy(action: () => Promise<void>) {
 }
 
 function upsertItem(item: CaptureItem) {
+  if (item.projectId !== projectId.value) return;
   const index = items.value.findIndex((value) => value.id === item.id);
+  if (index >= 0 && isOlderCapture(item, items.value[index])) return;
   if (index === -1) items.value.unshift(item);
   else items.value[index] = item;
   items.value = [...items.value].sort((left, right) => right.capturedAt.localeCompare(left.capturedAt));
@@ -731,7 +753,9 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+let previewRequest = 0;
 async function loadPreview() {
+  const request = ++previewRequest;
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
   previewUrl.value = null;
   previewUnavailable.value = "";
@@ -745,18 +769,19 @@ async function loadPreview() {
   }
   try {
     const bytes = await captureApi.readImage(item.id, variant);
+    if (request !== previewRequest) return;
     previewUrl.value = URL.createObjectURL(new Blob([bytes], { type: pathMimeType(item.sourcePath) }));
   } catch (error) {
-    toast.error(normalizeError(error));
+    if (request === previewRequest) toast.error(normalizeError(error));
   }
 }
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 watch(projectId, () => void loadProject());
-watch(() => selectedItem.value?.id, () => void loadPreview());
+watch(() => [selectedItem.value?.id, selectedItem.value?.status, selectedItem.value?.destinationPath, selectedItem.value?.sourcePath], () => void loadPreview());
 watch(items, () => void nextTick(syncStripBar));
 watch(
   () => [selectedItemId.value, pendingClassification.value] as const,
@@ -801,6 +826,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  previewRequest++;
+  recentRequest++;
   stripObserver?.disconnect();
   stripObserver = null;
   window.removeEventListener("keydown", onKeydown);
@@ -984,7 +1011,8 @@ onBeforeUnmount(() => {
         <CaptureProgress persistent :deferred-count="deferredImportCount" class="stage-progress" />
 
         <div class="preview-shell" :class="{ empty: !selectedItem }">
-          <img v-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />
+          <FaceRoiSelector inline v-if="selectedItem && pendingClassification === 'person' && selectedItem.status === 'awaiting_label' && selectedItem.classification === 'unclassified'" :item-id="selectedItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
+          <img v-else-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />
           <div v-else-if="previewUnavailable" class="preview-unavailable">
             <ImageOff :size="44" />
             <strong>{{ previewUnavailable }}</strong>
@@ -1025,28 +1053,29 @@ onBeforeUnmount(() => {
         </div>
 
         <section class="recent-strip" aria-labelledby="recent-title">
-          <div class="strip-title">
-            <h2 id="recent-title">近期捕获 <span>({{ stripItems.length }})</span></h2>
-            <span>{{ waitingCount }} 张等待标记</span>
+          <div class="capture-list-toolbar">
+            <div class="capture-list-title"><h2 id="recent-title">近期捕获 <span>{{ stripItems.length }}</span></h2><span v-if="waitingCount" class="capture-list-hint">{{ waitingCount }} 张待分类</span></div>
           </div>
           <div v-if="stripItems.length" class="thumbnail-scroll">
           <div ref="stripRow" class="thumbnail-row" @wheel="onStripWheel" @scroll="onStripScroll">
-            <button
+            <div
               v-for="item in stripItems"
               :key="item.id"
-              type="button"
+              role="group"
               class="capture-card"
               :class="{ selected: selectedItemId === item.id }"
               :aria-label="`选择 ${pathFileName(item.sourcePath)}`"
               @click="selectedItemId = item.id"
               @contextmenu="onItemContext($event, item)"
             >
+              <button class="capture-card-select" type="button" :aria-label="`查看 ${pathFileName(item.sourcePath)}`">
               <div class="thumb-image"><CaptureThumbnail :item="item" /></div>
               <div class="thumb-status" :data-status="item.status">
                 <span class="status-dot" />{{ captureStatusLabel(item.status, item.failureStage) }}
               </div>
               <time>{{ new Date(item.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</time>
-            </button>
+              </button>
+            </div>
           </div>
           <div ref="stripBar" class="strip-scrollbar" :class="{ dragging: stripDragging }" @pointerdown="onBarPointerDown">
             <div
@@ -1279,5 +1308,15 @@ onBeforeUnmount(() => {
   color: var(--muted-foreground);
   font-size: 11px;
 }
+
+
+.capture-list-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-bottom: 10px; }
+.capture-list-title { display: flex; align-items: center; gap: 8px; }
+.capture-list-title h2 { margin: 0; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.capture-list-title h2 span { margin-left: 5px; color: var(--muted-foreground); font-size: 11px; font-weight: 400; }
+.capture-list-hint { color: var(--muted-foreground); font-size: 11px; }
+.capture-card { position: relative; }
+.capture-card-select { display: block; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.capture-card-select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 </style>

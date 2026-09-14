@@ -5,6 +5,7 @@ use crate::{error::AppError, models::vision::ProcessingSettings};
 const SETTINGS_KEY: &str = "capture.processing";
 const FALLBACK_POSITIONS: [&str; 4] = ["top_left", "top_right", "bottom_left", "bottom_right"];
 const FACE_TEXT_POSITIONS: [&str; 5] = ["above", "right", "below", "left", "custom"];
+const ROI_MULTIPLE_FACES: [&str; 3] = ["error", "largest", "sharpest"];
 
 pub async fn get(pool: &SqlitePool) -> Result<ProcessingSettings, AppError> {
     let value: Option<String> = sqlx::query_scalar("SELECT value_json FROM settings WHERE key = ?")
@@ -151,6 +152,22 @@ fn normalize(settings: &ProcessingSettings) -> Result<(), AppError> {
             }
         }
     }
+    if let Some(roi) = &settings.roi {
+        if let Some(ratio) = roi.expand_ratio {
+            validate_finite("roiExpandRatio", ratio)?;
+            if !(0.0..=0.5).contains(&ratio) {
+                return Err(range_error("roiExpandRatio", "0.0 and 0.5"));
+            }
+        }
+        if let Some(strategy) = &roi.multiple_faces {
+            if !ROI_MULTIPLE_FACES.contains(&strategy.as_str()) {
+                return Err(AppError::Validation(format!(
+                    "roiMultipleFaces must be one of {}",
+                    ROI_MULTIPLE_FACES.join(", ")
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -171,7 +188,41 @@ fn range_error(label: &str, range: &str) -> AppError {
 mod tests {
     use super::*;
     use crate::db;
-    use crate::models::vision::{AnnotationSettings, CropSettings, DetectionSettings};
+    use crate::models::vision::{AnnotationSettings, CropSettings, DetectionSettings, RoiSettings};
+
+    #[tokio::test]
+    async fn validates_and_round_trips_roi_settings() {
+        let pool = db::test_pool().await;
+        for invalid in [
+            RoiSettings {
+                expand_ratio: Some(0.9),
+                multiple_faces: None,
+            },
+            RoiSettings {
+                expand_ratio: Some(f64::NAN),
+                multiple_faces: None,
+            },
+            RoiSettings {
+                expand_ratio: Some(0.2),
+                multiple_faces: Some("closest".to_owned()),
+            },
+        ] {
+            let settings = ProcessingSettings {
+                roi: Some(invalid),
+                ..Default::default()
+            };
+            assert!(update(&pool, settings).await.is_err());
+        }
+        let settings = ProcessingSettings {
+            roi: Some(RoiSettings {
+                expand_ratio: Some(0.25),
+                multiple_faces: Some("largest".to_owned()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(update(&pool, settings.clone()).await.unwrap(), settings);
+        assert_eq!(get(&pool).await.unwrap(), settings);
+    }
 
     #[tokio::test]
     async fn defaults_and_round_trips_saved_settings() {

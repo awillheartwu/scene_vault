@@ -229,6 +229,13 @@ async fn process_awaiting_label_feature(
     let Some(item) = capture_service::next_awaiting_label_without_feature(pool).await? else {
         return Ok(false);
     };
+    let _guard = super::capture_operation_service::lock(pool, &item.id).await;
+    if super::capture_operation_service::ensure_available(pool, &item.id).await.is_err() { return Ok(false); }
+    let item = capture_service::get_item(pool, &item.id).await?;
+    let deferred: i64 = sqlx::query_scalar("SELECT recognition_deferred FROM capture_items WHERE id=?").bind(&item.id).fetch_one(pool).await?;
+    if item.status != "awaiting_label" || deferred != 0 { return Ok(false); }
+    let version = super::capture_operation_service::version(pool, &item.id).await?;
+    let roi = super::capture_roi_service::get(pool, &item.id).await?;
     let source = match capture_service::validate_source_identity(pool, &item).await {
         Ok(source) => source,
         Err(AppError::NotFound(_)) => {
@@ -264,11 +271,12 @@ async fn process_awaiting_label_feature(
             }),
         );
     }) as vision_engine_service::ProgressCallback);
-    let response = match vision_engine_service::extract_face_feature(
+    let response = match vision_engine_service::extract_face_feature_with_roi(
         settings,
         &source,
         processing_settings,
         progress,
+        roi.as_ref(),
     )
     .await
     {
@@ -361,6 +369,7 @@ async fn process_awaiting_label_feature(
             return Ok(false);
         }
     };
+    super::capture_operation_service::validate_result(pool, &item.id, version).await?;
     let feature_json = match response.face_feature {
         Some(feature) => serde_json::to_string(&feature)
             .map_err(|error| AppError::Vision(format!("cannot encode face feature: {error}")))?,
@@ -426,7 +435,8 @@ async fn process_item(
             }),
         );
     }) as vision_engine_service::ProgressCallback);
-    let response = vision_engine_service::process_screenshot(
+    let roi = super::capture_roi_service::get(pool, &item.id).await?;
+    let response = vision_engine_service::process_screenshot_with_roi(
         settings,
         &PathBuf::from(&item.source_path),
         &annotated,
@@ -434,6 +444,7 @@ async fn process_item(
         &character_name,
         processing_settings,
         progress,
+        roi.as_ref(),
     )
     .await?;
 
@@ -522,6 +533,7 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
         FROM capture_items
         WHERE status = 'awaiting_label'
           AND recognition_deferred = 0
+          AND operation_owner IS NULL
           AND source_file_state NOT IN ('missing', 'replaced')
           AND NOT EXISTS (
               SELECT 1
@@ -540,14 +552,6 @@ pub async fn runtime_status(pool: &SqlitePool) -> Result<CaptureRuntimeStatus, A
     .fetch_optional(pool)
     .await?;
     let sidecar = vision_settings_service::sidecar_executable();
-    log_service::info(
-        "vision.engine",
-        format!(
-            "runtime status: configured={} sidecar={sidecar:?} current_exe={:?}",
-            vision_settings_service::is_configured(&settings),
-            std::env::current_exe(),
-        ),
-    );
     Ok(CaptureRuntimeStatus {
         engine_status: if vision_settings_service::is_configured(&settings) {
             "configured".to_owned()

@@ -29,8 +29,12 @@ _PAYLOAD_FIELDS = frozenset(
         "detection",
         "annotation",
         "crop",
+        "roi",
+        "faceRoi",
     }
 )
+_ROI_FIELDS = frozenset({"expandRatio", "multipleFaces"})
+_ROI_MULTIPLE_FACES = ("error", "largest", "sharpest")
 _DETECTION_FIELDS = frozenset(
     {
         "scoreThreshold",
@@ -123,6 +127,44 @@ class CropConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RoiPolicy:
+    """How manual primary-face framing behaves around an imperfect frame."""
+
+    # Extra margin (fraction of the frame) used by the retry detection pass.
+    expand_ratio: float = 0.15
+    # error keeps the frame strict; largest/sharpest pick one face automatically.
+    multiple_faces: str = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class FaceRoi:
+    """Manual selection in normalized image coordinates, not a detected box."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+    @classmethod
+    def from_payload(cls, value: object) -> "FaceRoi":
+        fields = frozenset({"x", "y", "width", "height"})
+        if not isinstance(value, dict) or set(value) != fields:
+            raise _invalid("faceRoi must contain exactly x, y, width, height", "faceRoi")
+        for key in fields:
+            number = value[key]
+            if (
+                type(number) not in (int, float)
+                or not 0 <= number <= 1
+                or not math.isfinite(number)
+                or (key in ("width", "height") and number == 0)
+            ):
+                raise _invalid("faceRoi must be finite and within the image", f"faceRoi.{key}")
+        if value["x"] + value["width"] > 1 or value["y"] + value["height"] > 1:
+            raise _invalid("faceRoi must fit within the image", "faceRoi")
+        return cls(**{key: float(value[key]) for key in fields})
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessingRequest:
     input_path: Path
     annotated_output_path: Path | None
@@ -137,6 +179,8 @@ class ProcessingRequest:
     crop: CropConfig
     recognizer: str = "sface"
     arcface_model_path: Path | None = None
+    face_roi: FaceRoi | None = None
+    roi_policy: RoiPolicy = RoiPolicy()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ProcessingRequest":
@@ -146,6 +190,13 @@ class ProcessingRequest:
         annotate = _boolean(payload, "annotate", True)
         crop_avatar = _boolean(payload, "cropAvatar", True)
         detect_face = _boolean(payload, "detectFace", True)
+        face_roi = (
+            FaceRoi.from_payload(payload["faceRoi"])
+            if payload.get("faceRoi") is not None
+            else None
+        )
+        if face_roi is not None and not detect_face:
+            raise _invalid("faceRoi requires detectFace", "faceRoi")
 
         annotated_output_path = _optional_local_path(
             payload.get("annotatedOutputPath"),
@@ -217,9 +268,11 @@ class ProcessingRequest:
         detection_payload = _object(payload.get("detection"), "detection")
         annotation_payload = _object(payload.get("annotation"), "annotation")
         crop_payload = _object(payload.get("crop"), "crop")
+        roi_payload = _object(payload.get("roi"), "roi")
         _reject_unknown_fields(detection_payload, _DETECTION_FIELDS, "detection")
         _reject_unknown_fields(annotation_payload, _ANNOTATION_FIELDS, "annotation")
         _reject_unknown_fields(crop_payload, _CROP_FIELDS, "crop")
+        _reject_unknown_fields(roi_payload, _ROI_FIELDS, "roi")
 
         yunet = (
             YuNetConfig(
@@ -393,6 +446,16 @@ class ProcessingRequest:
                 maximum=16_384,
             ),
         )
+        roi_policy = RoiPolicy(
+            expand_ratio=_number(
+                roi_payload,
+                "expandRatio",
+                0.15,
+                minimum=0.0,
+                maximum=0.5,
+            ),
+            multiple_faces=_roi_multiple_faces(roi_payload.get("multipleFaces")),
+        )
 
         output_paths = [
             path
@@ -418,6 +481,8 @@ class ProcessingRequest:
             )
 
         return cls(
+            face_roi=face_roi,
+            roi_policy=roi_policy,
             input_path=input_path,
             annotated_output_path=annotated_output_path,
             avatar_output_path=avatar_output_path,
@@ -521,6 +586,17 @@ def _object(value: object, key: str) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         raise _invalid(f"{key} must be an object", key)
+    return value
+
+
+def _roi_multiple_faces(value: object) -> str:
+    if value is None:
+        return "error"
+    if not isinstance(value, str) or value not in _ROI_MULTIPLE_FACES:
+        raise _invalid(
+            f"multipleFaces must be one of {', '.join(_ROI_MULTIPLE_FACES)}",
+            "roi.multipleFaces",
+        )
     return value
 
 

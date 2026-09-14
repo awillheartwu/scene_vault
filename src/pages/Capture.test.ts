@@ -4,6 +4,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 const { eventHandlers, api } = vi.hoisted(() => ({
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
   api: {
+    getCaptureFaceRoi: vi.fn(async () => null),
+    setCaptureFaceRoi: vi.fn(),
+    listCaptureResetCandidates: vi.fn(async () => ['a', 'b']),
+    previewCaptureReset: vi.fn(),
+    discardCaptureReset: vi.fn(async () => {}),
+    listProjectPendingCaptures: vi.fn(async () => []),
+    listHistory: vi.fn(async () => ({ entries: [], total: 0 })),
     listProjects: vi.fn(),
     listCharacters: vi.fn(),
     listSessions: vi.fn(),
@@ -43,7 +50,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-vi.mock("@/lib/capture-api", () => ({
+vi.mock("@/lib/capture-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/capture-api")>()),
   captureApi: api,
   captureStatusLabel: (status: string) => ({
     awaiting_label: "待分类",
@@ -96,6 +104,7 @@ const characters = [
 function item(status = "awaiting_label") {
   return {
     id: "item-1",
+    projectId: project.id,
     sessionId: session.id,
     assetId: null,
     characterId: null,
@@ -250,6 +259,28 @@ describe("Capture quick-label flow", () => {
 
     expect(wrapper.find('[aria-label="项目名称"]').exists()).toBe(true);
     expect(localStorage.getItem("scene-vault.capture.create-project")).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("starts framing on the face the last scan picked", async () => {
+    const detected = { ...item(), faceBoxJson: '{"x":300,"y":150,"width":300,"height":300}' };
+    api.listProjectRecentCaptures.mockResolvedValue([detected]);
+    api.suggestForCapture.mockResolvedValue(detected);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.findAll("button").find((button) => button.text().includes("人物"))!.trigger("click");
+    await wrapper.vm.$nextTick();
+    const image = wrapper.get(".face-roi-selector img").element;
+    Object.defineProperty(image, "naturalWidth", { value: 1000 });
+    Object.defineProperty(image, "naturalHeight", { value: 1000 });
+    await wrapper.findAll("button").find((button) => button.text() === "框选主脸")!.trigger("click");
+
+    // The capture page and the popup share the selector, so the default box has
+    // to come from the same detected face on both sides.
+    expect(wrapper.get(".roi-box").attributes("style")).toContain("left: 30%");
+    expect(wrapper.get(".roi-box").attributes("style")).toContain("top: 15%");
+    expect(wrapper.get(".roi-box").attributes("style")).toContain("width: 30%");
     wrapper.unmount();
   });
 
@@ -439,7 +470,7 @@ describe("Capture quick-label flow", () => {
 
     expect(api.listProjectRecentCaptures).toHaveBeenCalledWith(project.id, 100);
     expect(wrapper.findAll(".capture-card").length).toBe(30);
-    expect(wrapper.text()).toContain("30 张等待标记");
+    expect(wrapper.text()).toContain("30 张待分类");
     wrapper.unmount();
   });
 
@@ -721,4 +752,25 @@ describe("Capture item context menu", () => {
     expect(api.readImage).not.toHaveBeenCalled();
     wrapper.unmount();
   });
+});
+
+
+it("keeps an empty capture list free of reset actions", async () => {
+  api.listProjectRecentCaptures.mockResolvedValue([]);
+  const wrapper = mount(Capture);
+  await flushPromises();
+  expect(wrapper.find('.capture-list-toolbar').exists()).toBe(true);
+  expect(wrapper.find('.reset-actions button').exists()).toBe(false);
+  expect(wrapper.find('input.capture-selection').exists()).toBe(false);
+  wrapper.unmount();
+});
+
+it("keeps reset controls and browse filters out of the realtime capture page", async () => {
+  const wrapper = mount(Capture);
+  await flushPromises();
+  expect(wrapper.find('.reset-actions').exists()).toBe(false);
+  expect(wrapper.find('select[aria-label="角色筛选"]').exists()).toBe(false);
+  expect(wrapper.find('select[aria-label="捕获状态"]').exists()).toBe(false);
+  expect(wrapper.find('.capture-list-title').text()).toContain('近期捕获');
+  wrapper.unmount();
 });

@@ -274,7 +274,7 @@ pub async fn list_project_recent_items(
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         -- The strip shows the active session's captures plus every capture
@@ -482,7 +482,7 @@ pub async fn list_items(pool: &SqlitePool, session_id: &str) -> Result<Vec<Captu
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
         WHERE session_id = ?
         ORDER BY captured_at DESC, created_at DESC, id DESC
@@ -528,7 +528,7 @@ pub async fn list_items_paged(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
         WHERE session_id = ?
         ORDER BY captured_at DESC, created_at DESC, id DESC
@@ -587,9 +587,9 @@ pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupCo
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
         FROM capture_items item
-        WHERE item.status = 'awaiting_label'
+        WHERE item.status = 'awaiting_label' AND item.operation_owner IS NULL
           AND item.project_id = ?
         ORDER BY item.captured_at ASC, item.created_at ASC
         LIMIT 50
@@ -707,7 +707,9 @@ pub async fn list_history(
             item.archived_at,
             item.source_file_state,
             item.destination_file_state,
-            item.destination_avatar_file_state
+            item.file_size, item.modified_at_ms, item.content_hash, item.face_count,
+            item.created_at, item.updated_at,
+            item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         JOIN projects project ON project.id = session.project_id
@@ -769,6 +771,8 @@ pub async fn label_capture(
     input: LabelCaptureInput,
 ) -> Result<CaptureItem, AppError> {
     let capture_item_id = required(&input.capture_item_id, "capture item id")?;
+    let _operation = super::capture_operation_service::lock(pool, capture_item_id).await;
+    super::capture_operation_service::ensure_available(pool, capture_item_id).await?;
     let classification = input
         .classification
         .as_deref()
@@ -779,6 +783,10 @@ pub async fn label_capture(
         return Err(AppError::Validation(
             "classification must be person, scene, or private".to_owned(),
         ));
+    }
+    if classification == "person" {
+        let invalid_roi: bool = sqlx::query_scalar("SELECT manual_face_roi_json IS NOT NULL AND manual_face_roi_ready=0 FROM capture_items WHERE id=?").bind(capture_item_id).fetch_one(pool).await?;
+        if invalid_roi { return Err(AppError::Conflict("选区尚未识别成功，请重新框选或恢复自动选脸后再分类".to_owned())); }
     }
     let character_id = if classification == "person" {
         let raw = input.character_id.as_deref().ok_or_else(|| {
@@ -840,7 +848,7 @@ pub async fn label_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(character_id.clone())
@@ -942,6 +950,8 @@ async fn relabel_capture_item_inner(
     expected_suggested_character_id: Option<&str>,
 ) -> Result<CaptureItem, AppError> {
     let capture_item_id = required(&input.capture_item_id, "capture item id")?;
+    let _operation = super::capture_operation_service::lock(pool, capture_item_id).await;
+    super::capture_operation_service::ensure_available(pool, capture_item_id).await?;
     let classification = input
         .classification
         .as_deref()
@@ -1067,7 +1077,7 @@ async fn relabel_pending_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(character_id)
@@ -1137,7 +1147,7 @@ async fn relabel_completed_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(character_id)
@@ -1309,7 +1319,7 @@ pub async fn complete_processing(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(annotated_path)
@@ -1357,7 +1367,7 @@ pub(crate) async fn complete_processing_without_engine(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(warnings_json)
@@ -1391,7 +1401,7 @@ pub async fn mark_failed(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(error_message)
@@ -1412,6 +1422,8 @@ pub async fn retry_capture(
     input: RetryCaptureInput,
 ) -> Result<CaptureItem, AppError> {
     let capture_item_id = required(&input.capture_item_id, "capture item id")?;
+    let _operation = super::capture_operation_service::lock(pool, capture_item_id).await;
+    super::capture_operation_service::ensure_available(pool, capture_item_id).await?;
     let current = get_item(pool, capture_item_id).await?;
     // A completed person capture that was archived without Python (degraded
     // fallback) can be re-queued for full processing once the engine is
@@ -1461,7 +1473,7 @@ pub async fn retry_capture(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
             "#,
         )
         .bind(capture_item_id)
@@ -1490,7 +1502,7 @@ pub async fn retry_capture(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
             "#,
         )
         .bind(next_status)
@@ -1593,7 +1605,7 @@ fn category_page_query(filter: &str, paged: bool) -> String {
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ? AND {filter}
@@ -1910,7 +1922,7 @@ pub(crate) async fn get_item(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
         WHERE id = ?
         "#,
@@ -1940,7 +1952,7 @@ pub(crate) async fn claim_next_queued(
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = (
             SELECT id FROM capture_items
-            WHERE status = 'queued'
+            WHERE status = 'queued' AND operation_owner IS NULL
               AND (? = 0 OR classification != 'person')
             ORDER BY captured_at ASC, created_at ASC
             LIMIT 1
@@ -1952,7 +1964,7 @@ pub(crate) async fn claim_next_queued(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(skip_person)
@@ -1976,9 +1988,9 @@ pub(crate) async fn peek_next_queued(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
-        WHERE status = 'queued'
+        WHERE status = 'queued' AND operation_owner IS NULL
           AND (? = 0 OR classification != 'person')
         ORDER BY captured_at ASC, created_at ASC
         LIMIT 1
@@ -2005,10 +2017,11 @@ pub(crate) async fn next_awaiting_label_without_feature(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
         WHERE status = 'awaiting_label'
           AND recognition_deferred = 0
+          AND operation_owner IS NULL
           AND source_file_state NOT IN ('missing', 'replaced')
           AND NOT EXISTS (
               SELECT 1
@@ -2136,7 +2149,7 @@ pub(crate) async fn mark_archive_pending_from_processing(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(capture_item_id)
@@ -2158,7 +2171,7 @@ pub(crate) async fn next_archive_pending(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
         WHERE status = 'archive_pending'
           AND (next_retry_at IS NULL OR next_retry_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -2205,7 +2218,7 @@ pub(crate) async fn schedule_archive_retry(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(status)
@@ -2270,7 +2283,7 @@ pub(crate) async fn register_discovered_path(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
             FROM capture_items
             WHERE id = ?
             "#,
@@ -2314,7 +2327,7 @@ pub(crate) async fn register_discovered_path(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         FROM capture_items
         WHERE project_id = ? AND content_hash = ?
         "#,
@@ -2431,7 +2444,7 @@ pub(crate) async fn set_archive_pending_for_retry(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(capture_item_id)
@@ -2533,7 +2546,7 @@ async fn transition_item(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(to)
@@ -2676,6 +2689,7 @@ pub(crate) async fn purge_capture_item(
         DELETE FROM capture_items
         WHERE id = ?
           AND archived_at IS NULL
+          AND operation_owner IS NULL
           AND status = ?
         "#,
     )

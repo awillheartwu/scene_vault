@@ -5,6 +5,11 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
   const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
   return {
     api: {
+    getCaptureFaceRoi: vi.fn(async () => null),
+    setCaptureFaceRoi: vi.fn(),
+    listCaptureResetCandidates: vi.fn(async () => ['a', 'b']),
+    previewCaptureReset: vi.fn(),
+    discardCaptureReset: vi.fn(async () => {}),
     listProjects: vi.fn(),
     listSessions: vi.fn(),
     listCharacters: vi.fn(),
@@ -160,6 +165,42 @@ describe("History project continuity", () => {
       expect.objectContaining({ projectId: project.id }),
     );
     expect(localStorage.getItem("scene-vault.capture.project")).toBe(project.id);
+    wrapper.unmount();
+  });
+});
+
+describe("History capture toolbar", () => {
+  it("selects a row for reset when selection mode is active", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z"), entry("2", "2026-08-01T00:01:00Z")],
+      total: 2,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+
+    const actions = wrapper.get(".history-reset-actions");
+    await actions.get("summary").trigger("click");
+    await actions.get(".reset-menu-content button").trigger("click");
+    const row = wrapper.findAll(".history-row")[0];
+    await row.trigger("click");
+
+    expect(row.classes()).toContain("reset-selected");
+    expect((row.get("input").element as HTMLInputElement).checked).toBe(true);
+    expect(actions.text()).toContain("结束多选");
+
+    await actions.findAll("button").find((button) => button.text() === "取消")!.trigger("click");
+    expect(wrapper.find("input.history-selection").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps reset management on the left of the pagination row", async () => {
+    const wrapper = mount(History);
+    await flushPromises();
+
+    const row = wrapper.get(".history-pagination-row");
+    expect(row.find(".history-reset-actions").exists()).toBe(true);
+    expect(row.find('[role="navigation"][aria-label="分页"]').exists()).toBe(true);
+    expect(row.element.firstElementChild?.classList.contains("history-reset-actions")).toBe(true);
     wrapper.unmount();
   });
 });
@@ -452,4 +493,16 @@ describe("History deletion menu", () => {
     expect(checkbox.checked).toBe(true);
     wrapper.unmount();
   });
+});
+
+it('keeps checked pictures when navigating to another page',async()=>{
+ api.listHistory.mockImplementation(async ({offset})=>({entries:[entry(offset ? '2' : '1','2026-08-01T00:00:00Z')],total:120}));
+ const wrapper=mount(History);await flushPromises();
+ await wrapper.get('.history-reset-actions summary').trigger('click');
+ await wrapper.get('.reset-menu-content button').trigger('click');
+ await wrapper.get('.history-row').trigger('click');
+ await wrapper.get('[aria-label="下一页"]').trigger('click');await flushPromises();
+ expect(wrapper.get('.history-reset-actions').text()).toContain('已选 1 张');
+ await wrapper.get('.history-row').trigger('click');
+ expect(wrapper.get('.history-reset-actions').text()).toContain('已选 2 张');wrapper.unmount();
 });

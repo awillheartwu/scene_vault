@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import CaptureResetActions from '@/components/capture/CaptureResetActions.vue';
+import { describeError } from '@/lib/vision-errors';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Archive, ExternalLink, Eye, EyeOff, FileClock, Filter, Image, RefreshCw, Sparkles, Trash2, UserRound } from "@lucide/vue";
@@ -50,9 +52,15 @@ const activeView = ref<"captures" | "logs">("captures");
 const entryMenu = useContextMenu();
 const unlisteners: UnlistenFn[] = [];
 const deleteTarget = ref<CaptureHistoryEntry | null>(null);
+const resetActions = ref<InstanceType<typeof CaptureResetActions> | null>(null);
+const resetSelectedIds = ref<string[]>([]);
+const resetSelecting = ref(false);
+const resetFilter = computed(() => ({ projectId: projectId.value, sessionId: sessionId.value || null, characterId: characterId.value || null, status: status.value || null, includePrivate: showPrivate.value }));
+watch([projectId, sessionId, characterId, status, showPrivate], () => { resetSelectedIds.value = []; resetSelecting.value = false; });
 
 const selected = computed(() => entries.value.find((entry) => entry.id === selectedId.value) ?? entries.value[0] ?? null);
 const filtered = computed(() => entries.value);
+const resetSelectableIds = computed(() => filtered.value.filter((entry) => entry.classification !== "unclassified").map((entry) => entry.id));
 
 async function initialize() {
   projects.value = await captureApi.listProjects();
@@ -82,7 +90,9 @@ async function loadProjectFilters() {
   await load();
 }
 
+let loadRequest = 0;
 async function load() {
+  const request = ++loadRequest;
   if (!projectId.value) return;
   loading.value = true;
   errorMessage.value = "";
@@ -96,13 +106,16 @@ async function load() {
       offset: (page.value - 1) * pageSize.value,
       includePrivate: showPrivate.value,
     });
+    if (request !== loadRequest) return;
+    const lastPage = Math.max(1, Math.ceil(result.total / pageSize.value));
+    if (page.value > lastPage) { page.value = lastPage; await load(); return; }
     entries.value = result.entries;
     total.value = result.total;
-    selectedId.value = entries.value[0]?.id ?? null;
+    if (!entries.value.some(entry => entry.id === selectedId.value)) selectedId.value = entries.value[0]?.id ?? null;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    if (request === loadRequest) errorMessage.value = describeError(error);
   } finally {
-    loading.value = false;
+    if (request === loadRequest) loading.value = false;
   }
 }
 
@@ -111,8 +124,21 @@ function selectEntry(entry: CaptureHistoryEntry) {
   detailOpen.value = true;
 }
 
+function onEntryClick(entry: CaptureHistoryEntry) {
+  if (!resetSelecting.value) {
+    selectEntry(entry);
+    return;
+  }
+  if (entry.classification === "unclassified") return;
+  selectedId.value = entry.id;
+  resetSelectedIds.value = resetSelectedIds.value.includes(entry.id)
+    ? resetSelectedIds.value.filter((id) => id !== entry.id)
+    : [...resetSelectedIds.value, entry.id];
+}
+
 function buildEntryItems(entry: CaptureHistoryEntry): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
+    { id: 'reset-item', label: '撤销图片分类…', icon: RefreshCw, disabled: entry.classification === 'unclassified' || ['queued', 'processing', 'archive_pending'].includes(entry.status), action: () => resetActions.value?.preview([entry.id]) },
     { id: "detail", label: "查看详情", icon: Eye, action: () => selectEntry(entry) },
     {
       id: "source",
@@ -223,7 +249,7 @@ async function reprocess(entry: CaptureHistoryEntry) {
     await captureApi.retry(entry.id);
     await load();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = describeError(error);
   } finally {
     loading.value = false;
   }
@@ -234,7 +260,7 @@ async function reveal(path: string | null) {
   try {
     await revealPath(path);
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = describeError(error);
   }
 }
 
@@ -253,6 +279,7 @@ onMounted(async () => {
   await initialize();
   try {
     unlisteners.push(
+      await listen("capture:item-updated", () => { void load(); }),
       await listen<{ captureItemId: string }>("capture:item-purged", () => {
         void load();
       }),
@@ -263,6 +290,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  loadRequest++;
   unlisteners.forEach((unlisten) => unlisten());
 });
 </script>
@@ -304,27 +332,31 @@ onBeforeUnmount(() => {
         <span>{{ total }} 条记录</span>
       </div>
 
-      <PaginationControls
-        v-if="total > 0"
-        :page="page"
-        :page-size="pageSize"
-        :total="total"
-        @update:page="onPageChange"
-        @update:page-size="onPageSizeChange"
-      />
+      <div class="history-pagination-row">
+        <CaptureResetActions class="history-reset-actions" ref="resetActions" v-model:selecting="resetSelecting" :has-items="resetSelectableIds.length > 0" :filter="resetFilter" :selected-ids="resetSelectedIds" :selectable-ids="resetSelectableIds" @clear="resetSelectedIds = []" @select-all="resetSelectedIds = $event" @updated="load" />
+        <PaginationControls
+          v-if="total > 0"
+          :page="page"
+          :page-size="pageSize"
+          :total="total"
+          @update:page="onPageChange"
+          @update:page-size="onPageSizeChange"
+        />
+      </div>
 
       <div class="history-workspace">
         <div class="history-list" role="list" aria-label="截图历史记录">
-          <button
+          <div
             v-for="entry in filtered"
             :key="entry.id"
-            type="button"
             role="listitem"
             class="history-row"
-            :class="{ selected: selected?.id === entry.id }"
-            @click="selectEntry(entry)"
+            :class="{ selected: !resetSelecting && selected?.id === entry.id, 'reset-selected': resetSelecting && resetSelectedIds.includes(entry.id) }"
+            @click="onEntryClick(entry)"
             @contextmenu="onEntryContext($event, entry)"
           >
+            <input v-if="resetSelecting" class="history-selection" :disabled="entry.classification === 'unclassified'" v-model="resetSelectedIds" type="checkbox" :value="entry.id" :aria-label="`勾选重置 ${pathFileName(entry.sourcePath)}`" @click.stop @keydown.stop />
+            <button type="button" class="history-row-select" :aria-label="`查看 ${pathFileName(entry.sourcePath)}`">
             <div class="history-thumb"><CaptureThumbnail :item="entry" /></div>
             <div class="history-main">
               <strong>{{ pathFileName(entry.sourcePath) }}</strong>
@@ -338,7 +370,8 @@ onBeforeUnmount(() => {
               class="file-state-chip"
               :data-state="issue.state"
             >{{ issue.label }}</span>
-          </button>
+            </button>
+          </div>
           <div v-if="!filtered.length && !loading" class="history-empty">没有符合筛选条件的截图。</div>
         </div>
 
@@ -535,4 +568,14 @@ onBeforeUnmount(() => {
 .file-issue-row dd {
   display: inline-flex;
 }
+
+.history-pagination-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
+.history-reset-actions { flex: 0 0 auto; margin: 0; }
+.history-pagination-row :deep(.pagination) { flex: 1 1 auto; width: auto; min-width: 0; padding: 16px 0 14px 18px; }
+.history-selection { position: absolute; left: 8px; top: 8px; z-index: 2; width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+
+.history-row { position: relative; }
+.history-row.reset-selected { background: color-mix(in srgb, var(--accent) 12%, var(--card)); box-shadow: inset 3px 0 0 var(--accent); }
+.history-row-select { display: contents; color: inherit; text-align: left; cursor: pointer; }
+.history-row:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -18,6 +19,8 @@ from ..errors import (
     InputNotFoundError,
     InputReadError,
     OutputWriteError,
+    RoiMultipleFacesError,
+    RoiNoFaceError,
     SceneVaultAiError,
 )
 from .annotator import ImageAnnotator
@@ -394,7 +397,13 @@ class ScreenshotProcessor:
 
         try:
             faces, sharpness_values = detector.detect_faces(image_bgr)
-            return faces, sharpness_values, len(faces)
+            if self.request.face_roi is not None:
+                faces, sharpness_values = self._select_roi_faces(
+                    detector, image_bgr, faces, sharpness_values
+                )
+        except (RoiNoFaceError, RoiMultipleFacesError):
+            # A valid detection with no unique ROI match does not poison the cache.
+            raise
         except Exception as error:
             if self.model_cache is not None:
                 self.model_cache.discard_detector(self.request.yunet)
@@ -404,6 +413,73 @@ class ScreenshotProcessor:
                 "face detection failed",
                 details={"backend": "yunet"},
             ) from error
+        return faces, sharpness_values, len(faces)
+
+    def _select_roi_faces(
+        self,
+        detector: FaceDetector,
+        image_bgr: Any,
+        faces: list[FaceBox],
+        sharpness_values: list[float],
+    ) -> tuple[list[FaceBox], list[float]]:
+        roi = self.request.face_roi
+        assert roi is not None
+        height, width = image_bgr.shape[:2]
+        left, top = roi.x * width, roi.y * height
+        roi_width, roi_height = roi.width * width, roi.height * height
+        right, bottom = (roi.x + roi.width) * width, (roi.y + roi.height) * height
+
+        def candidates(
+            boxes: list[FaceBox], scores: list[float]
+        ) -> list[tuple[FaceBox, float]]:
+            return [
+                (face, score)
+                for face, score in zip(boxes, scores, strict=True)
+                if left <= face.center[0] <= right and top <= face.center[1] <= bottom
+            ]
+
+        matches = candidates(faces, sharpness_values)
+        if not matches:
+            expand = self.request.roi_policy.expand_ratio
+            crop_left = max(0, math.floor(left - expand * roi_width))
+            crop_top = max(0, math.floor(top - expand * roi_height))
+            crop_right = min(width, math.ceil(right + expand * roi_width))
+            crop_bottom = min(height, math.ceil(bottom + expand * roi_height))
+            cropped = image_bgr[crop_top:crop_bottom, crop_left:crop_right].copy()
+            crop_faces, crop_scores = detector.detect_faces(cropped)
+            translated = [
+                replace(
+                    face,
+                    x=face.x + crop_left,
+                    y=face.y + crop_top,
+                    landmarks=(
+                        tuple((x + crop_left, y + crop_top) for x, y in face.landmarks)
+                        if face.landmarks is not None else None
+                    ),
+                )
+                for face in crop_faces
+            ]
+            matches = candidates(translated, crop_scores)
+        if not matches:
+            raise RoiNoFaceError("no face center was detected inside faceRoi")
+        if len(matches) > 1:
+            matches = self._pick_roi_face(matches)
+        face, score = matches[0]
+        return [face], [score]
+
+    def _pick_roi_face(
+        self, matches: list[tuple[FaceBox, float]]
+    ) -> list[tuple[FaceBox, float]]:
+        """Applies the configured policy when the frame covers several faces."""
+        strategy = self.request.roi_policy.multiple_faces
+        if strategy == "largest":
+            return [max(matches, key=lambda match: match[0].width * match[0].height)]
+        if strategy == "sharpest":
+            return [max(matches, key=lambda match: match[1])]
+        raise RoiMultipleFacesError(
+            "multiple face centers were detected inside faceRoi",
+            details={"faceCount": len(matches)},
+        )
 
 
 def _save_images_atomically(outputs: Sequence[tuple[Any, Path]]) -> None:

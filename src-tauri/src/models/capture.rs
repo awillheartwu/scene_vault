@@ -87,6 +87,10 @@ pub struct CaptureItem {
     pub source_file_state: String,
     pub destination_file_state: String,
     pub destination_avatar_file_state: String,
+    pub processing_version: i64,
+    pub manual_face_roi_json: Option<String>,
+    pub manual_face_roi_ready: i64,
+
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +386,16 @@ pub struct CaptureHistoryEntry {
     pub classification: String,
     pub character_name: Option<String>,
     pub asset_id: Option<String>,
+    pub file_size: Option<i64>,
+    pub modified_at_ms: Option<i64>,
+    pub content_hash: Option<String>,
+    pub face_count: Option<i64>,
+    pub suggested_character_id: Option<String>,
+    pub recognition_confidence: Option<f64>,
+    pub recognition_source: Option<String>,
+    pub review_status: String,
+    pub created_at: String,
+    pub updated_at: String,
     pub source_path: String,
     pub annotated_path: Option<String>,
     pub avatar_path: Option<String>,
@@ -400,6 +414,10 @@ pub struct CaptureHistoryEntry {
     pub source_file_state: String,
     pub destination_file_state: String,
     pub destination_avatar_file_state: String,
+    pub processing_version: i64,
+    pub manual_face_roi_json: Option<String>,
+    pub manual_face_roi_ready: i64,
+
 }
 
 /// A page of history entries plus the total number of matching records, so

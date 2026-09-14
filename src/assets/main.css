@@ -254,7 +254,7 @@
   .session-step { display: grid; width: 22px; height: 22px; flex: none; place-items: center; border-radius: 999px; background: var(--accent-gradient); color: var(--accent-foreground); font-size: 11px; font-weight: 800; box-shadow: var(--glow); }
   .session-stage-check { margin-left: auto; flex: none; color: var(--accent); }
   .project-controls { display: flex; min-width: 0; align-items: center; gap: 7px; }
-  .eyebrow, .section-label { display: block; margin-bottom: 6px; color: var(--capture-muted); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+  .eyebrow, .section-label { display: block; margin-bottom: 6px; color: var(--capture-muted, var(--muted-foreground)); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
   .capture-select { width: 100%; min-width: 0; height: 40px; padding: 0 34px 0 11px; border: 1px solid var(--capture-border); border-radius: 9px; background: var(--capture-surface); color: var(--foreground); box-shadow: var(--inner-highlight); }
   .icon-button { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; border: 1px solid var(--capture-border); border-radius: 9px; background: var(--capture-surface); color: var(--muted-foreground); box-shadow: var(--inner-highlight); transition: .18s ease; }
   .icon-button:hover { border-color: var(--accent); color: var(--capture-accent); box-shadow: var(--glow); }
@@ -662,10 +662,20 @@
     .workbench-grid-column { border-right: 0; }
     .workbench-detail.empty { display: none; }
   }
-  .settings-page .capture-alert { width: 100%; max-width: 900px; box-sizing: border-box; }
-  .settings-header { width: 100%; max-width: 900px; }
+  .settings-page .capture-alert { width: 100%; box-sizing: border-box; }
+  .settings-header { width: 100%; }
   .settings-header > svg { color: var(--accent); }
-  .settings-card { display: flex; width: 100%; max-width: 900px; flex-direction: column; gap: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); border-radius: 14px; background: var(--card); box-shadow: var(--card-shadow), var(--inner-highlight); }
+  /* Fields flow into columns on wide windows instead of stretching into one
+     very long row per setting; the page then fills the window like every other
+     page does. */
+  .settings-card { display: grid; width: 100%; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); border-radius: 14px; background: var(--card); box-shadow: var(--card-shadow), var(--inner-highlight); }
+  .settings-card > .settings-card-title,
+  .settings-card > .settings-actions,
+  .settings-card > .engine-banner,
+  .settings-card > .processing-group,
+  .settings-card > .settings-note,
+  .settings-card > .health-card,
+  .settings-card > .capture-alert { grid-column: 1 / -1; }
   .settings-card + .settings-card { margin-top: 18px; }
   .settings-card-title { display: flex; flex-direction: column; gap: 2px; padding: 18px 20px 0; }
   .settings-card-title h2 { margin: 0; font-size: 15px; font-weight: 700; }
@@ -690,7 +700,7 @@
   .processing-group-title h3 { display: flex; align-items: center; gap: 9px; margin: 0; color: var(--foreground); font-size: 14px; font-weight: 750; line-height: 1.35; }
   .processing-group-title h3::before { width: 3px; height: 18px; flex: none; border-radius: 999px; background: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 52%, transparent); content: ""; }
   .processing-group-title h3 > span { min-width: 24px; color: var(--accent); font-size: 11px; font-variant-numeric: tabular-nums; letter-spacing: .06em; }
-  .processing-grid { display: grid; gap: 12px 18px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  .processing-grid { display: grid; gap: 12px 18px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .positioning-config { margin-top: 20px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 4%, var(--background)); box-shadow: var(--inner-highlight); }
   .positioning-header h4 { margin: 0; color: var(--foreground); font-size: 13px; font-weight: 700; }
   .positioning-header p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
@@ -728,7 +738,7 @@
   .toggle input:checked + .toggle-track::after { background: var(--accent-foreground); transform: translateX(18px); }
   .toggle input:focus-visible + .toggle-track { outline: 2px solid var(--ring); outline-offset: 2px; }
   .settings-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 15px 20px; }
-  .health-card { width: 100%; max-width: 900px; margin-top: 14px; padding: 16px 19px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--card-shadow), var(--inner-highlight); box-sizing: border-box; }
+  .health-card { width: 100%; margin-top: 14px; padding: 16px 19px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--card-shadow), var(--inner-highlight); box-sizing: border-box; }
   .health-card.healthy { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, var(--card)); }
   .health-card > div:first-child { display: flex; align-items: center; justify-content: space-between; }
   .health-card strong { font-size: 13px; }
