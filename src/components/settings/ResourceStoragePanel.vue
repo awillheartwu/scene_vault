@@ -32,6 +32,7 @@ import {
 } from "@/lib/capture-api";
 import { recordClientEvent } from "@/lib/client-log";
 import { toast } from "@/lib/toast";
+import { describeError } from "@/lib/vision-errors";
 
 const PROCESS_SAMPLE_INTERVAL_MS = 2_000;
 const props = withDefaults(defineProps<{ recognizer?: "sface" | "arcface" | null }>(), {
@@ -113,7 +114,7 @@ const displayedProcessGroups = computed<ProcessResourceGroup[]>(() => {
 });
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -644,9 +645,9 @@ onBeforeUnmount(() => {
 }
 
 .resource-section {
-  padding: 24px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 14px;
   background: var(--card);
   box-shadow: var(--card-shadow), var(--inner-highlight);
 }
@@ -656,28 +657,22 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
+/* Same title language as the settings cards: muted eyebrow, 15px heading. */
 .section-heading h2 {
-  margin: 3px 0 5px;
-  font-size: 20px;
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .section-heading p,
 .sample-note {
-  margin: 0;
+  margin: 6px 0 0;
   color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.eyebrow {
-  color: var(--accent);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  line-height: 1.6;
 }
 
 .section-action,

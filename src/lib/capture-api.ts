@@ -218,8 +218,16 @@ export interface ProcessingSettings {
   detection: DetectionSettings | null;
   annotation: AnnotationSettings | null;
   crop: CropSettings | null;
+  roi: RoiSettings | null;
   /** False skips drawing the character name onto a labeled copy. */
   annotatePerson: boolean | null;
+}
+
+export interface RoiSettings {
+  /** Extra margin (fraction of the frame) used by the retry detection pass. */
+  expandRatio: number | null;
+  /** "error" | "largest" | "sharpest" */
+  multipleFaces: string | null;
 }
 
 export interface CaptureSession {
@@ -267,6 +275,9 @@ export type CaptureDestinationFileState =
   | "unavailable";
 
 export interface CaptureItem {
+  processingVersion?: number;
+  manualFaceRoiJson?: string | null;
+  manualFaceRoiReady?: number;
   id: string;
   projectId: string;
   sessionId: string;
@@ -302,6 +313,33 @@ export interface CaptureItem {
   sourceFileState?: CaptureSourceFileState;
   destinationFileState?: CaptureDestinationFileState;
   destinationAvatarFileState?: CaptureDestinationFileState;
+}
+
+export interface FaceRoi { x: number; y: number; width: number; height: number }
+export interface CaptureResetInput {
+  projectId: string;
+  captureItemIds?: string[];
+  sessionId?: string | null;
+  characterId?: string | null;
+  status?: string | null;
+  includePrivate?: boolean;
+}
+export interface ResetJob {
+  executing: boolean;
+  deleteDestinationFiles: boolean | null;
+  allowPermanentNetworkDelete: boolean | null;
+  id: string;
+  status: string;
+  items: Array<{
+    captureItemId: string;
+    sourcePath: string;
+    status: string;
+    /** Failure class (source_gone, network, locked, denied, changed, busy, unknown). */
+    reason: string | null;
+    error: string | null;
+  }>;
+  destinationFileCount: number;
+  networkDestinationFileCount: number;
 }
 
 export interface CaptureHistoryEntry extends CaptureItem {
@@ -612,6 +650,17 @@ export interface OpenProjectNoteResult {
 }
 
 export const captureApi = {
+  getCaptureFaceRoi: (captureItemId: string) => invoke<FaceRoi | null>("get_capture_face_roi", { captureItemId }),
+  setCaptureFaceRoi: (captureItemId: string, faceRoi: FaceRoi | null) =>
+    invoke<CaptureItem>("set_capture_face_roi", { input: { captureItemId, faceRoi } }),
+  previewCaptureReset: (input: CaptureResetInput) => invoke<ResetJob>("preview_capture_reset", { input }),
+  executeCaptureReset: (input: { jobId: string; deleteDestinationFiles: boolean; allowPermanentNetworkDelete: boolean }) =>
+    invoke<ResetJob>("execute_capture_reset", { input }),
+  getCaptureReset: (jobId: string) => invoke<ResetJob>("get_capture_reset", { jobId }),
+  /** Drops an unconfirmed preview so an abandoned dialog cannot pile up. */
+  discardCaptureReset: (jobId: string) => invoke<void>("discard_capture_reset", { jobId }),
+  listCaptureResetCandidates: (input: CaptureResetInput) => invoke<string[]>("list_capture_reset_candidates", { input }),
+  listProjectPendingCaptures: (projectId: string) => invoke<CaptureItem[]>("list_project_pending_captures", { projectId }),
   listProjects: () => invoke<Project[]>("list_projects"),
   listProjectOverviews: () =>
     invoke<ProjectOverviewSummary[]>("list_project_overviews"),
@@ -1023,4 +1072,12 @@ export function pathMimeType(path: string): string {
   if (suffix === "webp") return "image/webp";
   if (suffix === "bmp") return "image/bmp";
   return "image/png";
+}
+
+/** Reject late responses from an older reset/ROI generation or older row snapshot. */
+export function isOlderCapture(incoming: CaptureItem, current: CaptureItem): boolean {
+  const next = incoming.processingVersion ?? 0;
+  const prior = current.processingVersion ?? 0;
+  if (next !== prior) return next < prior;
+  return Date.parse(incoming.updatedAt) < Date.parse(current.updatedAt);
 }

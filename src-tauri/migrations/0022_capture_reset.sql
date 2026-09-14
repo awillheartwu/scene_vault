@@ -1,0 +1,12 @@
+-- Requires 0021 capture_items processing_version / operation_owner.
+--
+-- Undo-classification (撤销分类并返回待分类) deliberately keeps no queue tables:
+-- a reset job lives in memory, every deletion is bound to the file identity
+-- captured by its preview, and the log is the only durable trace. Coordination
+-- with recognition/labeling uses capture_items.operation_owner, and the claim
+-- is released when each picture finishes, successfully or not.
+--
+-- The one durable fact a reset must leave behind is its generation: when an
+-- archive is retained but the picture is re-archived later, the new file needs
+-- a name that cannot collide with the retained one.
+ALTER TABLE capture_items ADD COLUMN reset_generation INTEGER NOT NULL DEFAULT 0;

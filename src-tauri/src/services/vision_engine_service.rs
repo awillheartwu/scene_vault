@@ -157,7 +157,7 @@ pub async fn health(settings: &VisionSettings) -> Result<VisionHealth, AppError>
     })
 }
 
-pub async fn process_screenshot(
+pub async fn process_screenshot_with_roi(
     settings: &VisionSettings,
     input_path: &Path,
     annotated_output_path: &Path,
@@ -165,6 +165,7 @@ pub async fn process_screenshot(
     character_name: &str,
     processing_settings: &ProcessingSettings,
     progress: Option<ProgressCallback>,
+    face_roi: Option<&super::capture_roi_service::FaceRoi>,
 ) -> Result<VisionProcessData, AppError> {
     if !vision_settings_service::is_engine_available(settings) {
         return Err(AppError::Vision(
@@ -184,6 +185,7 @@ pub async fn process_screenshot(
             "avatarOutputPath": avatar_output_path.to_string_lossy(),
             "characterName": character_name,
             "detectFace": true,
+            "faceRoi": face_roi,
             "cropAvatar": true,
             "yunetModelPath": settings.yunet_model_path,
             "sfaceModelPath": settings.sface_model_path,
@@ -201,11 +203,12 @@ pub async fn process_screenshot(
 
 /// Feature-only extraction used by the pre-label pass: detects the primary
 /// face and returns its SFace vector without writing any output files.
-pub async fn extract_face_feature(
+pub async fn extract_face_feature_with_roi(
     settings: &VisionSettings,
     input_path: &Path,
     processing_settings: &ProcessingSettings,
     progress: Option<ProgressCallback>,
+    face_roi: Option<&super::capture_roi_service::FaceRoi>,
 ) -> Result<VisionProcessData, AppError> {
     if !vision_settings_service::is_engine_available(settings) {
         return Err(AppError::Vision(
@@ -222,6 +225,7 @@ pub async fn extract_face_feature(
             "annotatedOutputPath": Value::Null,
             "avatarOutputPath": Value::Null,
             "detectFace": true,
+            "faceRoi": face_roi,
             "annotate": false,
             "cropAvatar": false,
             "yunetModelPath": settings.yunet_model_path,
@@ -270,6 +274,16 @@ fn processing_payload(
             detection.blur_penalty_weight,
         );
         payload["detection"] = Value::Object(object);
+    }
+    if let Some(roi) = &processing.roi {
+        let mut object = serde_json::Map::new();
+        insert_number(&mut object, "expandRatio", roi.expand_ratio);
+        if let Some(strategy) = &roi.multiple_faces {
+            object.insert("multipleFaces".to_owned(), json!(strategy));
+        }
+        if !object.is_empty() {
+            payload["roi"] = Value::Object(object);
+        }
     }
     if let Some(annotation) = &processing.annotation {
         let mut object = serde_json::Map::new();
@@ -939,8 +953,31 @@ fn log_request_failure(request_id: &str, started: Instant, mode: ProcessMode, er
 mod tests {
     use super::*;
     use crate::models::vision::{
-        AnnotationSettings, CropSettings, DetectionSettings, ProcessingSettings, VisionSettings,
+        AnnotationSettings, CropSettings, DetectionSettings, ProcessingSettings, RoiSettings,
+        VisionSettings,
     };
+
+    #[test]
+    fn processing_payload_merges_roi_settings() {
+        let settings = VisionSettings::default();
+        let payload = processing_payload(
+            &settings,
+            &ProcessingSettings {
+                roi: Some(RoiSettings {
+                    expand_ratio: Some(0.25),
+                    multiple_faces: Some("sharpest".to_owned()),
+                }),
+                ..Default::default()
+            },
+            json!({}),
+        );
+        assert_eq!(payload["roi"]["expandRatio"], 0.25);
+        assert_eq!(payload["roi"]["multipleFaces"], "sharpest");
+
+        // Unset settings keep the engine defaults instead of sending an empty group.
+        let untouched = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
+        assert!(untouched.get("roi").is_none());
+    }
 
     #[test]
     fn parses_progress_lines_and_ignores_noise() {

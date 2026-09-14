@@ -32,12 +32,24 @@ pub struct ProcessingSettings {
     pub detection: Option<DetectionSettings>,
     pub annotation: Option<AnnotationSettings>,
     pub crop: Option<CropSettings>,
+    /// Manual primary-face framing: how far to search around the frame when it
+    /// holds no face, and what to do when it holds several.
+    pub roi: Option<RoiSettings>,
     /// When false, the Python worker skips drawing the character name onto a
     /// labeled copy; recognition, face features and Face Bank suggestions are
     /// unaffected. `None` keeps the historical default (annotate on).
     pub annotate_person: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RoiSettings {
+    /// Extra margin (fraction of the frame) used by the retry detection pass.
+    pub expand_ratio: Option<f64>,
+    /// "error" keeps the manual selection strict; "largest" and "sharpest" pick
+    /// one face automatically when the frame covers several.
+    pub multiple_faces: Option<String>,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DetectionSettings {

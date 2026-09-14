@@ -34,6 +34,9 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
     deleteCaptureItem: vi.fn(),
     previewCharacterDeletion: vi.fn(),
     deleteCharacter: vi.fn(),
+    listCaptureResetCandidates: vi.fn(async () => ['a', 'b']),
+    discardCaptureReset: vi.fn(async () => {}),
+    previewCaptureReset: vi.fn(),
     reconcileProjectFiles: vi.fn(),
     setProjectCover: vi.fn(),
     revealPath: vi.fn(),
@@ -1323,6 +1326,7 @@ describe("Workbench context menus", () => {
     await flushPromises();
     const menu = document.body.querySelector('[role="menu"]');
     expect(menu!.textContent).toContain("查看详情");
+    expect(menu!.textContent).toContain("撤销图片分类");
     expect(menu!.textContent).toContain("确认建议");
     expect(menu!.textContent).toContain("拒绝建议");
     expect(menu!.textContent).toContain("拒绝并登记");
@@ -1460,4 +1464,40 @@ describe("Workbench context menus", () => {
     expect(checkbox.checked).toBe(true);
     wrapper.unmount();
   });
+});
+
+it('selects multiple characters from maintenance and freezes only their pictures', async () => {
+  api.listProjectCharacterSummaries.mockResolvedValue(summaries.map(summary => ({...summary,captureCount:2})));
+  api.listCaptureResetCandidates.mockResolvedValueOnce(['one']).mockResolvedValueOnce(['two']);
+  api.previewCaptureReset.mockResolvedValue({id:'preview-job',status:'preview',executing:false,deleteDestinationFiles:null,allowPermanentNetworkDelete:null,items:[],destinationFileCount:0,networkDestinationFileCount:0});
+  const wrapper=mount(Workbench);await flushPromises();
+  await wrapper.get('[aria-label="人物维护"]').trigger('click',{button:0,ctrlKey:false});
+  await flushPromises();
+  const option=[...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(element=>element.textContent?.includes('多选人物撤销截图'));
+  expect(option).toBeDefined();option!.click();await flushPromises();
+  expect(wrapper.find('.character-reset-selection').exists()).toBe(true);
+  for (const card of wrapper.findAll('.character-card').slice(0,2)) await card.trigger('click');
+  expect(wrapper.get('.character-reset-selection').text()).toContain('已选 2 个人物');
+  await wrapper.get('.character-reset-selection').findAll('button').find(button=>button.text()==='结束多选')!.trigger('click');
+  await flushPromises();
+  expect(api.listCaptureResetCandidates).toHaveBeenCalledWith(expect.objectContaining({projectId:project.id,characterId:summaries[0].id}));
+  expect(api.listCaptureResetCandidates).toHaveBeenCalledWith(expect.objectContaining({projectId:project.id,characterId:summaries[1].id}));
+  expect(api.previewCaptureReset).toHaveBeenCalledWith(expect.objectContaining({projectId:project.id,captureItemIds:['one','two']}));
+  wrapper.unmount();
+});
+
+it('picks the whole character from its context menu entry instead of single pictures', async () => {
+  const wrapper=mount(Workbench);await flushPromises();
+  await wrapper.find('.character-card').trigger('contextmenu',{clientX:80,clientY:50});
+  await flushPromises();
+  [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .find(entry=>entry.textContent?.includes('选择此角色的截图撤销'))!.click();
+  await flushPromises();
+  // The entry opens the multi-character selection with this character checked,
+  // so confirming it collects every picture of that character.
+  expect(wrapper.find('.character-reset-selection').exists()).toBe(true);
+  expect(wrapper.get('.character-reset-selection').text()).toContain('已选 1 个人物');
+  expect(wrapper.findAll('.character-card')[0].classes()).toContain('reset-selected');
+  expect(wrapper.find('.workbench-cell.reset-selected').exists()).toBe(false);
+  wrapper.unmount();
 });

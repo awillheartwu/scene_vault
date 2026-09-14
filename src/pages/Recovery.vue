@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { describeError } from "@/lib/vision-errors";
 import {
   AlertTriangle,
   Copy,
@@ -38,7 +39,7 @@ const canRestart = computed(
 );
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 function formatTime(value: string | null | undefined): string {

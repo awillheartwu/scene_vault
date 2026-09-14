@@ -251,6 +251,19 @@ pub fn run() {
                     ..Default::default()
                 });
             }
+            // A reset job lives in memory only, so a killed process leaves its
+            // claims behind. Release them here; otherwise those pictures would
+            // stay locked out of labeling and recognition forever.
+            if let Err(error) =
+                tauri::async_runtime::block_on(services::capture_reset_service::recover_interrupted(
+                    &pool,
+                ))
+            {
+                services::log_service::error(
+                    "capture.reset",
+                    format!("could not release interrupted reset claims: {error}"),
+                );
+            }
             {
                 let labels: Vec<String> = app.webview_windows().keys().cloned().collect();
                 services::log_service::debug(
@@ -338,6 +351,14 @@ pub fn run() {
             commands::character::delete_character,
             commands::character::set_character_avatar,
             commands::character::list_project_character_summaries,
+            commands::capture_edit::list_capture_reset_candidates,
+            commands::capture_edit::preview_capture_reset,
+            commands::capture_edit::execute_capture_reset,
+            commands::capture_edit::get_capture_reset,
+            commands::capture_edit::discard_capture_reset,
+            commands::capture_edit::get_capture_face_roi,
+            commands::capture_edit::set_capture_face_roi,
+            commands::capture_edit::list_project_pending_captures,
             commands::capture::start_capture_session,
             commands::capture::list_capture_sessions,
             commands::capture::list_project_recent_captures,

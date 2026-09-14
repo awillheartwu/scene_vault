@@ -272,6 +272,29 @@ describe("ContextMenu", () => {
     expect(menuRoot()).not.toBeNull();
   });
 
+  it("keeps a long menu open while it scrolls itself", async () => {
+    await openAt();
+    // Element scroll events do not bubble, but they still reach the capture
+    // listener on the document; scrolling the menu must not close it.
+    menuRoot()!.dispatchEvent(new Event("scroll"));
+    await flushPromises();
+    expect(menuRoot()).not.toBeNull();
+  });
+
+  it("gives the menu the space below the cursor instead of a fixed cap", async () => {
+    await openAt();
+    const root = menuRoot()!;
+    expect(root.style.maxHeight).toBe(`${window.innerHeight - 90 - 8}px`);
+    expect(root.className).not.toContain("max-h-80");
+  });
+
+  it("closes when the page behind the menu scrolls", async () => {
+    await openAt();
+    document.body.dispatchEvent(new Event("scroll"));
+    await flushPromises();
+    expect(menuRoot()).toBeNull();
+  });
+
   it("replaces items when reopened while open", async () => {
     await openAt();
     menu.open(contextEvent(document.body, document.body), [

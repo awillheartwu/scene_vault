@@ -3,6 +3,10 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { api, eventHandlers } = vi.hoisted(() => ({
   api: {
+    getCaptureFaceRoi: vi.fn(async () => null),
+    setCaptureFaceRoi: vi.fn(),
+    previewCaptureReset: vi.fn(),
+    discardCaptureReset: vi.fn(async () => {}),
     classifyPopupContext: vi.fn(),
     getAppSettings: vi.fn(),
     runtimeStatus: vi.fn(),
@@ -30,7 +34,8 @@ vi.mock("@tauri-apps/api/window", () => ({
   })),
 }));
 
-vi.mock("@/lib/capture-api", () => ({
+vi.mock("@/lib/capture-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/capture-api")>()),
   captureApi: api,
   pathMimeType: () => "image/png",
 }));
@@ -181,6 +186,47 @@ describe("PopupClassify", () => {
 
     expect(api.suggestForCapture).toHaveBeenCalledWith("item-1");
     expect(wrapper.text()).toContain("推荐：Mira");
+    wrapper.unmount();
+  });
+
+  it("enlarges the picture while framing and restores the roster afterwards", async () => {
+    api.classifyPopupContext.mockResolvedValue({
+      items: [{ ...item, faceBoxJson: '{"x":300,"y":150,"width":300,"height":300}' }],
+      projectId: "project-1",
+      projectName: null,
+      characters: [character],
+    });
+    // Choosing 人物 asks the engine again; the backend answers with the stored
+    // face box, so the fixture has to keep it.
+    api.suggestForCapture.mockResolvedValue({
+      ...item,
+      faceBoxJson: '{"x":300,"y":150,"width":300,"height":300}',
+    });
+    const wrapper = mount(PopupClassify);
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("人物"))!
+      .trigger("click");
+    await flushPromises();
+
+    const image = wrapper.get(".face-roi-selector img").element;
+    Object.defineProperty(image, "naturalWidth", { value: 1000 });
+    Object.defineProperty(image, "naturalHeight", { value: 1000 });
+    const frameButton = wrapper.findAll("button").find((button) => button.text().includes("框选主脸"));
+    expect(frameButton).toBeDefined();
+    await frameButton!.trigger("click");
+    // Same selector and helper as the capture page: the default box must start
+    // on the detected face here too.
+    expect(wrapper.get(".roi-box").attributes("style")).toContain("left: 30%");
+    expect(wrapper.get(".roi-box").attributes("style")).toContain("width: 30%");
+    expect(wrapper.get(".popup-page").classes()).toContain("framing");
+    expect(wrapper.get(".popup-framing-note").text()).toContain("正在框选主脸");
+
+    await wrapper.findAll("button").find((button) => button.text() === "取消")!.trigger("click");
+    expect(wrapper.get(".popup-page").classes()).not.toContain("framing");
+    expect(wrapper.find(".popup-framing-note").exists()).toBe(false);
     wrapper.unmount();
   });
 });

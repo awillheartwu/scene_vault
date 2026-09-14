@@ -29,3 +29,7 @@ pub mod vision_worker_service;
 
 #[cfg(test)]
 pub mod test_support;
+
+pub mod capture_operation_service;
+pub mod capture_roi_service;
+pub mod capture_reset_service;

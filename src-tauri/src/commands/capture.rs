@@ -396,6 +396,8 @@ pub async fn read_capture_thumbnail(
 ) -> Result<tauri::ipc::Response, AppError> {
     use tauri::Manager;
 
+    let _guard = crate::services::capture_operation_service::lock(&state.pool, &input.capture_item_id).await;
+    crate::services::capture_operation_service::ensure_available(&state.pool, &input.capture_item_id).await?;
     let item = capture_service::get_item(&state.pool, input.capture_item_id.trim()).await?;
     let variant = input.variant.trim();
     let path = readable_capture_path(&state.pool, &item, variant).await?;

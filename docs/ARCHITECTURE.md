@@ -47,6 +47,16 @@ queued ──► processing ──► archive_pending ──► completed
 - `scene` / `private`：跳过 Python，原图进入对应目录。
 - `unclassified`：不处理、不归档。
 
+人工选区、撤销分类和后台识别会同时作用于同一张图片，因此每张图片都有独立的串行锁：
+`capture_operation_service` 提供按图片加锁、读写 `processing_version` 和
+`operation_owner` 占用检查。识别结果写回前必须校验源文件内容身份和本次处理版本，
+撤销分类在取得所有权后执行，迟到的结果被拒绝而不是覆盖新状态。
+
+人工框选的主脸保存在 `manual_face_roi_json`，与检测框和可再生的特征分开；特征提取
+和最终图片处理都接受可选的归一化选区，未提供时保持自动主脸行为。撤销分类通过预览、
+执行和进度查询三组接口完成：预览把名单和每个文件的身份快照冻结在进程内存里，执行逐张
+串行清理并校验文件身份，任务不落库、不排队，应用重启后重新发起即可。
+
 ## 截图文件身份与生命周期
 
 源文件和归档目标是两类独立的文件引用，数据库分别记录其状态：
@@ -91,8 +101,11 @@ Python Provider
 ```
 
 Python 每次只处理 Rust 指定的一张图片及本地输出路径。它不扫描来源目录、不读取角色
-名单、不修改 SQLite，也不把半成品写到 NAS。协议字段和错误码见
-[Python AI 协议](../python/README.md)。
+名单、不修改 SQLite，也不把半成品写到 NAS。`processScreenshot.payload` 支持可选的
+归一化 `faceRoi`：Rust 的特征提取与最终图片处理都传入同一选区，省略时保持自动主脸行为。
+另有 `roi` 组（`expandRatio`、`multipleFaces`）控制框选时的扩边重试比例与多脸处理策略，
+省略时保持引擎默认（0.15 与报错）。
+协议字段、约束和错误码见 [Python AI 协议](../python/README.md)。
 
 Worker 由全局 single-flight 管理器拥有，不与 `capture_items` 状态机竞争任务所有权。
 应用退出时先取消活动请求并关闭 stdin，短暂等待后仍未退出才强制终止子进程。

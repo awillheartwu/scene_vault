@@ -136,6 +136,10 @@ const processingSettings = {
     scaleBottom: null,
     minSize: null,
   },
+  roi: {
+    expandRatio: null,
+    multipleFaces: null,
+  },
   annotatePerson: true,
 };
 
@@ -427,6 +431,7 @@ describe("Settings processing hierarchy", () => {
       "01人脸检测",
       "02文字标注",
       "03头像裁剪",
+      "04主脸框选",
     ]);
 
     await page.get("#face-box-expansion").setValue("48");
@@ -487,6 +492,34 @@ describe("Settings explicit person annotation toggle", () => {
     expect(api.updateAppSettings).toHaveBeenCalledTimes(1);
     expect(api.updateProcessingSettings).toHaveBeenCalledWith(
       expect.objectContaining({ annotatePerson: false }),
+    );
+  });
+});
+
+describe("Settings primary-face framing", () => {
+  it("saves the retry ratio and the multi-face policy, and can reset both", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#settings-tab-processing").trigger("click");
+    expect((page.get("#roi-expand-ratio").element as HTMLInputElement).placeholder).toBe("0.15");
+    await page.get("#roi-expand-ratio").setValue("0.25");
+    await page.get("#roi-multiple-faces").setValue("largest");
+    await page.get("#settings-pane-processing form").trigger("submit");
+    await flushPromises();
+
+    expect(api.updateProcessingSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        roi: { expandRatio: 0.25, multipleFaces: "largest" },
+      }),
+    );
+
+    // 恢复默认 puts the group back to "use the engine default".
+    await page.findAll("#settings-pane-processing .clear-field")[3].trigger("click");
+    await page.get("#settings-pane-processing form").trigger("submit");
+    await flushPromises();
+    expect(api.updateProcessingSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ roi: null }),
     );
   });
 });

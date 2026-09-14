@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { marked } from "marked";
 import createDOMPurify from "dompurify";
+import { describeError } from "@/lib/vision-errors";
 defineProps<{ embedded?: boolean }>();
 import {
   CheckCircle2,
@@ -153,7 +154,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 function noteErrorText(error: unknown): string {

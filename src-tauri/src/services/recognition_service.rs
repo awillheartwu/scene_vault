@@ -149,7 +149,7 @@ pub async fn set_suggestion(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(&input.suggested_character_id)
@@ -212,7 +212,7 @@ pub async fn review_suggestion(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(&decision)
@@ -373,7 +373,7 @@ pub async fn list_character_items(
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ?
@@ -437,7 +437,7 @@ pub async fn list_character_items_paged(
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ?
@@ -1063,6 +1063,8 @@ async fn refresh_project_suggestions(pool: &SqlitePool, project_id: &str) -> Res
     .fetch_all(pool)
     .await?;
     for item_id in &item_ids {
+        let _guard = super::capture_operation_service::lock(pool, item_id).await;
+        if super::capture_operation_service::ensure_available(pool, item_id).await.is_err() { continue; }
         suggest_from_face_bank(pool, item_id).await?;
     }
     Ok(item_ids.len() as u32)
@@ -1142,7 +1144,21 @@ pub async fn rebuild_face_bank(
     for item_id in item_ids {
         processed += 1;
         on_progress(processed, total);
+        let _guard = super::capture_operation_service::lock(pool, &item_id).await;
+        if super::capture_operation_service::ensure_available(pool, &item_id).await.is_err() { failed += 1; continue; }
+        let version = super::capture_operation_service::version(pool, &item_id).await?;
+        let roi = super::capture_roi_service::get(pool, &item_id).await?;
         let item = capture_service::get_item(pool, &item_id).await?;
+        if matches!(item.status.as_str(), "queued" | "processing" | "archive_pending") {
+            // A waiting pipeline item keeps its existing samples instead of being
+            // re-extracted here, but the source file state must still be refreshed so
+            // a replaced or missing source stays visible to the user.
+            let _ = capture_service::validate_source_identity(pool, &item).await;
+            failed += 1;
+            let retained: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM character_face_samples WHERE capture_item_id=?)").bind(&item_id).fetch_one(pool).await?;
+            if retained { stale_preserved += 1; }
+            continue;
+        }
         let source = match capture_service::validate_source_identity(pool, &item).await {
             Ok(source) => source,
             Err(AppError::NotFound(_)) => {
@@ -1168,11 +1184,12 @@ pub async fn rebuild_face_bank(
                 continue;
             }
         };
-        let response = match vision_engine_service::extract_face_feature(
+        let response = match vision_engine_service::extract_face_feature_with_roi(
             &vision_settings,
             &source,
             &processing_settings,
             None,
+            roi.as_ref(),
         )
         .await
         {
@@ -1191,6 +1208,7 @@ pub async fn rebuild_face_bank(
                 continue;
             }
         };
+        if super::capture_operation_service::validate_result(pool, &item_id, version).await.is_err() { failed += 1; continue; }
         let has_feature = response.face_feature.is_some();
         let feature_json = match response.face_feature {
             Some(feature) => serde_json::to_string(&feature).map_err(|error| {
@@ -1274,6 +1292,18 @@ pub async fn refresh_capture_face_feature(
     capture_item_id: &str,
     on_progress: impl FnMut(&str, f64) + Send + 'static,
 ) -> Result<CaptureItem, AppError> {
+    let _guard = super::capture_operation_service::lock(pool, capture_item_id).await;
+    refresh_capture_face_feature_locked(pool, capture_item_id, on_progress).await
+}
+
+pub(crate) async fn refresh_capture_face_feature_locked(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    on_progress: impl FnMut(&str, f64) + Send + 'static,
+) -> Result<CaptureItem, AppError> {
+    super::capture_operation_service::ensure_available(pool, capture_item_id).await?;
+    let version = super::capture_operation_service::version(pool, capture_item_id).await?;
+    let roi = super::capture_roi_service::get(pool, capture_item_id).await?;
     let capture_item_id = capture_item_id.trim();
     if capture_item_id.is_empty() {
         return Err(AppError::Validation(
@@ -1306,13 +1336,15 @@ pub async fn refresh_capture_face_feature(
         ));
     }
     let processing_settings = processing_settings_service::get(pool).await?;
-    let response = vision_engine_service::extract_face_feature(
+    let response = vision_engine_service::extract_face_feature_with_roi(
         &vision_settings,
         &source,
         &processing_settings,
         Some(Box::new(on_progress)),
+        roi.as_ref(),
     )
     .await?;
+    super::capture_operation_service::validate_result(pool, capture_item_id, version).await?;
     let feature_json = match response.face_feature {
         Some(feature) => serde_json::to_string(&feature)
             .map_err(|error| AppError::Vision(format!("cannot encode face feature: {error}")))?,

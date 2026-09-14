@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { isOlderCapture } from "@/lib/capture-api";
+import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
+import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
+import { parseFaceBox } from "@/lib/face-box";
+import { describeError } from "@/lib/vision-errors";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 defineProps<{ embedded?: boolean }>();
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -52,8 +57,25 @@ let previewRequest = 0;
 const unlisteners: UnlistenFn[] = [];
 
 const currentItem = computed(() => ctx.value?.items[currentIndex.value] ?? null);
+// The last detected primary face drives the default framing box, exactly like
+// the capture page.
+const detectedFaceBox = computed(() => parseFaceBox(currentItem.value?.faceBoxJson));
+/** True while the picture is being framed, so the preview can take the space. */
+const framing = ref(false);
+// Leaving person mode unmounts the selector without a chance to report "not
+// editing" any more, so the flag is cleared whenever the mode changes.
+watch(mode, () => {
+  framing.value = false;
+});
+function updateRoiItem(updated: CaptureItem) {
+  if (!ctx.value) return;
+  ctx.value = { ...ctx.value, items: ctx.value.items.map(item => item.id === updated.id && !isOlderCapture(updated, item) ? updated : item) };
+}
+const { roi: faceRoi, busy: roiBusy, blocked: roiBlocked, loading: roiLoading, error: roiError, revision: roiRevision, save: saveFaceRoi } = useCaptureFaceRoi(currentItem, updateRoiItem);
+watch(roiRevision, () => { pendingVerification.value = null; });
 const suggestedCharacter = computed(() => {
   const item = currentItem.value;
+  if (roiBusy.value || roiBlocked.value) return null;
   if (!item || item.reviewStatus !== "pending" || !item.suggestedCharacterId) return null;
   return (
     ctx.value?.characters.find((character) => character.id === item.suggestedCharacterId) ?? null
@@ -142,9 +164,11 @@ function choosePerson() {
 // suggestion remains if the refresh fails.
 async function refreshCurrentSuggestion() {
   const item = currentItem.value;
-  if (!item || busy.value) return;
+  if (!item || busy.value || roiBusy.value || roiBlocked.value) return;
+  const revision = roiRevision.value;
   try {
     const updated = await captureApi.suggestForCapture(item.id);
+    if (revision !== roiRevision.value || currentItem.value?.id !== item.id) return;
     const ctxValue = ctx.value;
     if (!ctxValue) return;
     const index = ctxValue.items.findIndex((entry) => entry.id === updated.id);
@@ -196,12 +220,18 @@ function finishAll() {
 
 // Refresh the queue in place when a new screenshot is discovered, without
 // resetting the user's current selection or the character input.
+let refreshRequest = 0;
 async function refreshItems() {
+  const request = ++refreshRequest;
   busy.value = true;
   errorMessage.value = "";
   try {
     const context = await captureApi.classifyPopupContext();
+    if (request !== refreshRequest) return;
+    const selectedId = currentItem.value?.id;
     ctx.value = context;
+    const selectedIndex = context.items.findIndex(item => item.id === selectedId);
+    if (selectedIndex >= 0) currentIndex.value = selectedIndex;
     if (currentIndex.value >= context.items.length) {
       currentIndex.value = Math.max(0, context.items.length - 1);
     }
@@ -218,6 +248,7 @@ async function refreshItems() {
 }
 
 async function commit(classification: CaptureClassification, characterId: string | null = null) {
+  if (classification === "person" && (roiBusy.value || roiBlocked.value || roiLoading.value)) return;
   const item = currentItem.value;
   if (!item || busy.value) return;
   busy.value = true;
@@ -240,6 +271,8 @@ async function commit(classification: CaptureClassification, characterId: string
 }
 
 async function submitCharacter(character: Character) {
+  if (roiBusy.value || roiBlocked.value || roiLoading.value) return;
+  const revision = roiRevision.value;
   const item = currentItem.value;
   if (!item || busy.value) return;
   busy.value = true;
@@ -249,6 +282,7 @@ async function submitCharacter(character: Character) {
       captureItemId: item.id,
       characterId: character.id,
     });
+    if (currentItem.value?.id !== item.id || revision !== roiRevision.value) return;
     if (result.level === "ok" || result.level === "unverified") {
       busy.value = false;
       await commit("person", character.id);
@@ -264,7 +298,7 @@ async function submitCharacter(character: Character) {
 
 async function confirmForcedConfirm() {
   const pending = pendingVerification.value;
-  if (!pending || busy.value) return;
+  if (!pending || busy.value || roiBusy.value || roiBlocked.value || roiLoading.value) return;
   pendingVerification.value = null;
   busy.value = false;
   await commit("person", pending.characterId);
@@ -308,7 +342,7 @@ function acceptSuggestion() {
 async function createAndSubmit() {
   const name = newName.value.trim();
   const projectId = ctx.value?.projectId;
-  if (!name || !projectId || busy.value) return;
+  if (!name || !projectId || busy.value || roiBusy.value || roiBlocked.value || roiLoading.value) return;
   busy.value = true;
   errorMessage.value = "";
   try {
@@ -394,7 +428,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return describeError(error);
 }
 
 watch(
@@ -418,7 +452,11 @@ onMounted(async () => {
         const updated = event.payload;
         if (!updated?.id || !ctx.value) return;
         const index = ctx.value.items.findIndex((item) => item.id === updated.id);
-        if (index < 0) return;
+        if (index < 0) {
+          if (updated.projectId === ctx.value.projectId && updated.status === 'awaiting_label' && updated.classification === 'unclassified') { ctx.value.items.push(updated); cancelAutoClose(); }
+          return;
+        }
+        if (isOlderCapture(updated, ctx.value.items[index])) return;
         // Feature/suggestion updates keep the capture in the queue: refresh
         // it in place so a fresh recommendation shows up. Only a capture
         // that was actually classified (or reclassified) elsewhere leaves
@@ -467,6 +505,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  refreshRequest++;
   previewRequest += 1;
   if (emptyTimer) {
     clearTimeout(emptyTimer);
@@ -480,7 +519,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="popup-page" :class="{ embedded }">
+  <section class="popup-page" :class="{ embedded, framing }">
     <header v-if="!embedded" class="popup-header" data-tauri-drag-region="deep">
       <div class="popup-title" data-tauri-drag-region="deep">
         <span class="popup-dot" />
@@ -510,7 +549,8 @@ onBeforeUnmount(() => {
 
     <template v-else-if="currentItem">
       <div :class="['popup-preview', { compact: mode === 'person' }]">
-        <img v-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
+        <FaceRoiSelector inline v-if="mode === 'person' && currentItem && currentItem.status === 'awaiting_label' && currentItem.classification === 'unclassified'" v-model:editing="framing" :item-id="currentItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
+      <img v-else-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
         <div v-else class="popup-preview-empty"><ImageOff :size="28" /><span>无法加载预览</span></div>
       </div>
       <CaptureProgress persistent />
@@ -573,6 +613,7 @@ onBeforeUnmount(() => {
           <p class="popup-hint">选择人物（点击即提交）</p>
           <button type="button" class="popup-back" @click="mode = 'choose'">‹ 返回</button>
         </div>
+        <p v-if="framing" class="popup-framing-note" role="status">正在框选主脸：图片已放大，确认或取消后恢复角色列表。</p>
         <button
           v-if="suggestedCharacter"
           type="button"
@@ -605,8 +646,7 @@ onBeforeUnmount(() => {
             type="button"
             class="popup-character"
             :class="{ selected: selectedCharacterId === character.id }"
-            :disabled="busy"
-            @click="submitCharacter(character)"
+            :disabled="busy || roiBusy || roiBlocked || roiLoading" @click="submitCharacter(character)"
           >
             <span class="popup-avatar"><UserRound :size="15" /></span>
             <span class="popup-character-name">{{ character.name }}</span>
@@ -617,7 +657,7 @@ onBeforeUnmount(() => {
         </div>
         <form class="popup-create" @submit.prevent="createAndSubmit">
           <input v-model="newName" placeholder="新建角色名称" />
-          <button type="submit" :disabled="busy || !newName.trim()"><Plus :size="15" />创建并提交</button>
+          <button type="submit" :disabled="busy || roiBusy || roiBlocked || roiLoading || !newName.trim()"><Plus :size="15" />创建并提交</button>
         </form>
         <p class="popup-tip">Enter 提交选中 · Esc 返回 / 关闭</p>
       </div>
@@ -770,6 +810,7 @@ onBeforeUnmount(() => {
 }
 
 .popup-preview {
+  position: relative;
   display: grid;
   flex: 1 1 0;
   min-height: 180px;
@@ -783,8 +824,56 @@ onBeforeUnmount(() => {
 }
 
 .popup-preview.compact {
-  flex: 0 0 190px;
+  /* Never grow: free height belongs to the roster, otherwise the list would be
+     squeezed to nothing on a large window. */
+  flex: 0 1 42%;
+  min-height: 160px;
+}
+
+/* Framing needs the picture, not the roster: the preview takes the whole body
+   and the character list comes back as soon as framing ends. */
+.popup-page.framing .popup-preview.compact {
+  flex: 1 1 auto;
   min-height: 0;
+}
+
+/* While framing the body only holds the hint, so the picture may own every
+   pixel below the header instead of sharing the free space with a grown body. */
+.popup-page.framing .popup-body--fill {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.popup-body--fill {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.popup-page.framing .popup-suggestion,
+.popup-page.framing .popup-verification,
+.popup-page.framing .popup-search,
+.popup-page.framing .popup-characters,
+.popup-page.framing .popup-create,
+.popup-page.framing .popup-tip,
+.popup-page.framing .popup-person-head {
+  display: none;
+}
+
+/* The status strip is noise while framing; the note below the picture explains
+   the mode instead. */
+.popup-page.framing :deep(.capture-progress) {
+  display: none;
+}
+
+.popup-framing-note {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .popup-preview img {
@@ -1126,7 +1215,9 @@ onBeforeUnmount(() => {
 
 .popup-characters {
   display: flex;
-  min-height: 0;
+  /* Keep at least a couple of rows reachable: the preview shrinks first, and on
+     a very short window the body scrolls instead of squeezing the roster away. */
+  min-height: 132px;
   flex: 1;
   flex-direction: column;
   gap: 6px;

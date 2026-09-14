@@ -28,6 +28,8 @@ pub async fn archive(
         ));
     }
 
+    let _guard = super::capture_operation_service::lock(pool, capture_item_id).await;
+    super::capture_operation_service::ensure_available(pool, capture_item_id).await?;
     let current = capture_service::get_item(pool, capture_item_id).await?;
     if current.status == "completed" {
         return Ok(current);
@@ -82,7 +84,16 @@ async fn archive_pending_item(
             ));
         }
     }
-    let naming = archive_naming_settings_service::get(pool).await?;
+    let mut naming = archive_naming_settings_service::get(pool).await?;
+    // Retained archives belong to the previous classification. Give each reset
+    // generation a deterministic new name even for templates without {seq}.
+    let reset_generation: i64 = sqlx::query_scalar("SELECT reset_generation FROM capture_items WHERE id = ?")
+        .bind(&item.id)
+        .fetch_one(pool)
+        .await?;
+    if reset_generation > 0 {
+        naming.template.push_str(&format!(" - reset-{reset_generation}"));
+    }
     let character_name: Option<String> =
         sqlx::query_scalar("SELECT name FROM characters WHERE id = ?")
             .bind(item.character_id.as_deref())
@@ -418,7 +429,7 @@ async fn persist_completed_archive(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
         "#,
     )
     .bind(&asset_id)
@@ -937,6 +948,49 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("destination file name");
         assert_eq!(file_name, "shot-001 2.png");
+    }
+
+    #[tokio::test]
+    async fn reset_generation_names_the_archive_even_without_seq() {
+        let pool = db::test_pool().await;
+        let fixture = ready_to_archive(&pool).await;
+        archive_naming_settings_service::update(
+            &pool,
+            UpdateArchiveNamingSettingsInput {
+                settings: ArchiveNamingSettings {
+                    template: "{source}".to_owned(),
+                    separator: " - ".to_owned(),
+                },
+            },
+        )
+        .await
+        .expect("save naming settings");
+        // The picture was reset before: a retained archive may still hold the
+        // plain name, so the re-archived one has to differ.
+        sqlx::query("UPDATE capture_items SET reset_generation = 1 WHERE id = ?")
+            .bind(&fixture.item.id)
+            .execute(&pool)
+            .await
+            .expect("bump reset generation");
+
+        let completed = archive(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: fixture.item.id.clone(),
+            },
+        )
+        .await
+        .expect("archive");
+        let file_name = completed
+            .destination_path
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .expect("destination file name");
+        assert!(
+            file_name.contains(" - reset-1"),
+            "expected the reset generation in {file_name}"
+        );
     }
 
     #[tokio::test]

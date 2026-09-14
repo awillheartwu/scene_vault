@@ -91,5 +91,13 @@ class DetectionError(SceneVaultAiError):
     code = "face_detection_failed"
 
 
+class RoiNoFaceError(SceneVaultAiError):
+    code = "roi_no_face"
+
+
+class RoiMultipleFacesError(SceneVaultAiError):
+    code = "roi_multiple_faces"
+
+
 class OutputWriteError(SceneVaultAiError):
     code = "output_write_failed"

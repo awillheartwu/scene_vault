@@ -273,6 +273,8 @@ pub async fn suggest_for_capture(
     state: State<'_, AppState>,
     input: CaptureItemIdInput,
 ) -> Result<CaptureItem, AppError> {
+    let _guard = crate::services::capture_operation_service::lock(&state.pool, &input.capture_item_id).await;
+    crate::services::capture_operation_service::ensure_available(&state.pool, &input.capture_item_id).await?;
     recognition_service::suggest_from_face_bank(&state.pool, &input.capture_item_id).await?;
     let item = capture_service::get_item(&state.pool, &input.capture_item_id).await?;
     recognition_item_event("suggestion_refreshed", &item);

@@ -8,19 +8,30 @@ const root = ref<HTMLElement | null>(null);
 const itemEls = ref<(HTMLElement | null)[]>([]);
 const focusedIndex = ref(0);
 const GAP = 8;
+const MIN_HEIGHT = 120;
 
 function close() {
   props.menu.close();
 }
 
-function clampPosition() {
+function place() {
   const el = root.value;
   if (!el) return;
+  const { x, y } = props.menu.state;
+  // Measure the natural height first, then give the menu as much room as the
+  // cursor side offers instead of a fixed cap: a long menu should show in full
+  // whenever the window has space for it, and only scroll when it does not.
+  el.style.maxHeight = "";
   const rect = el.getBoundingClientRect();
-  const maxX = window.innerWidth - rect.width - GAP;
-  const maxY = window.innerHeight - rect.height - GAP;
-  el.style.left = `${Math.max(GAP, Math.min(props.menu.state.x, maxX))}px`;
-  el.style.top = `${Math.max(GAP, Math.min(props.menu.state.y, maxY))}px`;
+  const limit = window.innerHeight - GAP * 2;
+  const below = window.innerHeight - y - GAP;
+  const above = y - GAP;
+  const openUp = rect.height > below && above > below;
+  const room = Math.min(limit, openUp ? above : below);
+  const maxHeight = Math.max(Math.min(MIN_HEIGHT, limit), room);
+  el.style.maxHeight = `${maxHeight}px`;
+  el.style.left = `${Math.max(GAP, Math.min(x, window.innerWidth - rect.width - GAP))}px`;
+  el.style.top = `${Math.max(GAP, openUp ? y - Math.min(rect.height, maxHeight) : y)}px`;
 }
 
 function firstEnabledIndex(): number {
@@ -93,7 +104,10 @@ function onPointerDown(event: PointerEvent) {
   if (!root.value?.contains(event.target as Node)) close();
 }
 
-function onScroll() {
+function onScroll(event: Event) {
+  // The menu scrolls itself when it is taller than the window; that scroll
+  // must not close it. Any other scroll detaches the menu from its target.
+  if (event.target instanceof Node && root.value?.contains(event.target)) return;
   close();
 }
 
@@ -123,11 +137,11 @@ watch(
 );
 
 watch(
-  () => [props.menu.state.open, props.menu.state.x, props.menu.state.y] as const,
+  () => [props.menu.state.open, props.menu.state.x, props.menu.state.y, props.menu.state.items] as const,
   ([open]) => {
     if (!open) return;
     void nextTick(() => {
-      clampPosition();
+      place();
       focusItemAt(firstEnabledIndex());
     });
   },
@@ -148,7 +162,7 @@ onBeforeUnmount(() => {
       ref="root"
       role="menu"
       tabindex="-1"
-      class="fixed z-50 max-h-80 min-w-48 overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md outline-none"
+      class="fixed z-50 min-w-48 overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md outline-none"
       :style="{ left: `${menu.state.x}px`, top: `${menu.state.y}px` }"
       @keydown="onKeydown"
       @contextmenu.prevent
@@ -225,7 +239,9 @@ onBeforeUnmount(() => {
 }
 
 .context-menu-separator {
-  margin: 0.25rem 0.25rem;
+  /* Matches the dropdown menu separator (reka: -mx-1 my-1 h-px) so both menus
+     draw the same hairline instead of one being inset by the container padding. */
+  margin: 0.25rem -0.25rem;
   height: 1px;
   background: var(--border);
 }
