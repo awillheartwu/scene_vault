@@ -11,6 +11,7 @@ pub mod capture_worker_service;
 pub mod character_service;
 pub mod data_maintenance_service;
 pub mod file_recycle_service;
+pub mod file_relink;
 pub mod font_service;
 pub mod log_service;
 pub mod log_settings_service;

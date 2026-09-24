@@ -252,18 +252,19 @@ beforeEach(() => {
   api.readImage.mockResolvedValue(new ArrayBuffer(8));
   api.readThumbnail.mockResolvedValue(new ArrayBuffer(8));
   api.reconcileProjectFiles.mockResolvedValue({
-    scannedDirectoryCount: 1,
-    scannedFileCount: 12,
+    sourceScannedDirectoryCount: 1,
+    sourceScannedFileCount: 12,
     sourceCheckedCount: 2,
-    relocatedCount: 1,
+    sourceRelocatedCount: 1,
     sourceMissingCount: 0,
     sourceReplacedCount: 0,
-    ambiguousCount: 0,
-    unavailableSourceDirectoryCount: 0,
+    sourceAmbiguousCount: 0,
+    sourceUnavailableDirectoryCount: 0,
     destinationMissingCount: 1,
     destinationUnavailableCount: 0,
     destinationRelocatedCount: 0,
     destinationAmbiguousCount: 0,
+    destinationContentMismatchCount: 0,
     destinationScannedFileCount: 0,
   });
 });
@@ -369,18 +370,19 @@ describe("Workbench", () => {
 
     pickDirectoryMock.mockResolvedValueOnce("/volume/renamed-archive");
     api.reconcileProjectFiles.mockResolvedValueOnce({
-      scannedDirectoryCount: 2,
-      scannedFileCount: 40,
+      sourceScannedDirectoryCount: 2,
+      sourceScannedFileCount: 40,
       sourceCheckedCount: 0,
-      relocatedCount: 0,
+      sourceRelocatedCount: 0,
       sourceMissingCount: 0,
       sourceReplacedCount: 0,
-      ambiguousCount: 0,
-      unavailableSourceDirectoryCount: 0,
+      sourceAmbiguousCount: 0,
+      sourceUnavailableDirectoryCount: 0,
       destinationMissingCount: 0,
       destinationUnavailableCount: 0,
       destinationRelocatedCount: 12,
       destinationAmbiguousCount: 1,
+    destinationContentMismatchCount: 0,
       destinationScannedFileCount: 40,
     });
 
