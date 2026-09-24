@@ -75,6 +75,20 @@ async fn execute_releases_the_claim_and_bumps_the_reset_generation() {
 }
 
 #[tokio::test]
+async fn a_completed_reset_schedules_a_manifest_refresh() {
+    let (pool, f, _, _) = fixture().await;
+    let job = preview(&pool, selection(&f.project_id)).await.unwrap();
+    let recycler = Recycler::default();
+    execute(&pool, &f.output_directory, &f.output_directory, request(&job.id, true), &recycler)
+        .await
+        .unwrap();
+    assert!(
+        crate::services::archive_manifest_service::pending_project_ids().contains(&f.project_id),
+        "resetting a capture must schedule a manifest refresh"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_picture_is_reported_released_and_retryable() {
     let (pool,f,_,id) = fixture().await;
     let job = preview(&pool, selection(&f.project_id)).await.unwrap();
