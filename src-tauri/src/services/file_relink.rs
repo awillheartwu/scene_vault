@@ -173,11 +173,7 @@ pub(crate) fn split_avatar_stem(stem: &str) -> (&str, bool) {
 pub(crate) fn index_by_identifier(candidates: &[Candidate]) -> IdentifierIndex {
     let mut index: IdentifierIndex = HashMap::new();
     for (position, candidate) in candidates.iter().enumerate() {
-        let Some(stem) = candidate
-            .path
-            .file_stem()
-            .and_then(|value| value.to_str())
-        else {
+        let Some(stem) = candidate.path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
         let (stem, is_avatar) = split_avatar_stem(stem);

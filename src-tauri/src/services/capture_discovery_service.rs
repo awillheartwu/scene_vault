@@ -454,6 +454,16 @@ async fn discover_with_options(
 /// Runs the same source reconciliation as the background poll and also checks
 /// archive targets on demand. Target-root failure is reported as unavailable,
 /// never as a mass deletion or missing-file conclusion.
+/// One archived target of a session plus its recorded states, as read by the
+/// session level file check.
+type ReconcileTargetRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
 pub async fn reconcile_files(
     pool: &SqlitePool,
     app: Option<&AppHandle>,
@@ -486,7 +496,7 @@ pub async fn reconcile_files(
     .await?;
     let project_id = session_project.as_ref().map(|(id, _)| id.clone());
     let root = session_project.and_then(|(_, directory)| directory);
-    let targets: Vec<(String, Option<String>, Option<String>, String, String)> = sqlx::query_as(
+    let targets: Vec<ReconcileTargetRow> = sqlx::query_as(
         "SELECT id, destination_path, destination_avatar_path, destination_file_state, destination_avatar_file_state FROM capture_items WHERE session_id = ?",
     )
     .bind(&session_id)
