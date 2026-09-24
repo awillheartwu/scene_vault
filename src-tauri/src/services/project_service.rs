@@ -222,6 +222,7 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
                 SUM(CASE WHEN status IN ('queued', 'processing', 'archive_pending') THEN 1 ELSE 0 END) AS processing_count,
                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+                COALESCE(SUM(file_size), 0) AS total_bytes,
                 MAX(captured_at) AS last_capture_at
             FROM capture_items
             WHERE classification <> 'private'
@@ -265,6 +266,7 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
             COALESCE(cs.processing_count, 0) AS processing_count,
             COALESCE(cs.completed_count, 0) AS completed_count,
             COALESCE(cs.failed_count, 0) AS failed_count,
+            COALESCE(cs.total_bytes, 0) AS total_bytes,
             COALESCE(cs.last_capture_at, p.updated_at) AS last_activity_at,
             (
                 SELECT item.id
@@ -630,17 +632,18 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert session");
-        for (id, status, captured_at) in [
-            ("capture-1", "awaiting_label", "2026-08-08T01:00:00Z"),
-            ("capture-2", "processing", "2026-08-08T02:00:00Z"),
-            ("capture-3", "completed", "2026-08-08T03:00:00Z"),
-            ("capture-4", "failed", "2026-08-08T04:00:00Z"),
+        for (id, status, captured_at, file_size) in [
+            ("capture-1", "awaiting_label", "2026-08-08T01:00:00Z", 1_048_576_i64),
+            ("capture-2", "processing", "2026-08-08T02:00:00Z", 2_097_152),
+            ("capture-3", "completed", "2026-08-08T03:00:00Z", 3_145_728),
+            ("capture-4", "failed", "2026-08-08T04:00:00Z", 4_194_304),
         ] {
             sqlx::query(
                 r#"
                 INSERT INTO capture_items (
-                    id, project_id, session_id, source_path, classification, status, captured_at
-                ) VALUES (?, ?, 'session-1', ?, 'person', ?, ?)
+                    id, project_id, session_id, source_path, classification, status,
+                    captured_at, file_size
+                ) VALUES (?, ?, 'session-1', ?, 'person', ?, ?, ?)
                 "#,
             )
             .bind(id)
@@ -648,6 +651,7 @@ mod tests {
             .bind(format!("C:\\shots\\{id}.png"))
             .bind(status)
             .bind(captured_at)
+            .bind(file_size)
             .execute(&pool)
             .await
             .expect("insert capture item");
@@ -663,6 +667,10 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert private capture item");
+        sqlx::query("UPDATE capture_items SET file_size = 8388608 WHERE id = 'capture-private'")
+            .execute(&pool)
+            .await
+            .expect("private capture size");
 
         let summaries = list_overviews(&pool).await.expect("list overviews");
         let active_summary = summaries
@@ -676,6 +684,8 @@ mod tests {
         assert_eq!(active_summary.processing_count, 1);
         assert_eq!(active_summary.completed_count, 1);
         assert_eq!(active_summary.failed_count, 1);
+        // 1 + 2 + 3 + 4 MiB of visible captures; the private row is excluded.
+        assert_eq!(active_summary.total_bytes, 10_485_760);
         assert_eq!(
             active_summary.latest_capture_item_id.as_deref(),
             Some("capture-4")

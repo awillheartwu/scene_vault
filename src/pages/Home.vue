@@ -267,6 +267,14 @@ function formatActivity(value: string): string {
   });
 }
 
+function formatBytes(bytes: number): string {
+  if (!bytes) return "0 B";
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(2) + " GB";
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return bytes + " B";
+}
+
 function setupLabel(project: ProjectOverviewSummary): string {
   if (!project.sourceCount && !project.destinationConfigured) return "尚未配置目录";
   if (!project.sourceCount) return "缺少截图来源";
@@ -436,6 +444,9 @@ function setupLabel(project: ProjectOverviewSummary): string {
               </span>
               <span v-if="!project.captureCount" class="status muted">尚无截图</span>
             </div>
+            <p v-if="project.captureCount" class="project-media">
+              图片 {{ project.captureCount }} 张 · 共 {{ formatBytes(project.totalBytes) }}
+            </p>
             <div class="project-config" :class="{ warning: !project.sourceCount || !project.destinationConfigured }">
               <CircleAlert v-if="!project.sourceCount || !project.destinationConfigured" :size="14" aria-hidden="true" />
               <CheckCircle2 v-else :size="14" aria-hidden="true" />
@@ -911,6 +922,8 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .status.processing, .row-counts .processing { color: var(--info); }
 .status.failed, .row-counts .failed { color: var(--destructive); }
 .status.completed { color: var(--ok); }
+
+.project-media { margin: 8px 0 0; color: var(--muted-foreground); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
 .project-config {
   display: flex;

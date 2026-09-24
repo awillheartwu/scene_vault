@@ -40,6 +40,7 @@ const projects = [
     processingCount: 1,
     completedCount: 8,
     failedCount: 0,
+    totalBytes: 123456789,
     lastActivityAt: "2026-08-08T04:36:00Z",
     latestCaptureItemId: "capture-bad",
     coverCaptureItemId: null,
@@ -58,6 +59,7 @@ const projects = [
     processingCount: 0,
     completedCount: 9,
     failedCount: 0,
+    totalBytes: 987654321,
     lastActivityAt: "2026-08-07T23:10:00Z",
     latestCaptureItemId: "capture-summer",
     coverCaptureItemId: null,
@@ -76,6 +78,7 @@ const projects = [
     processingCount: 0,
     completedCount: 0,
     failedCount: 0,
+    totalBytes: 0,
     lastActivityAt: "2026-08-06T12:00:00Z",
     latestCaptureItemId: null,
     coverCaptureItemId: null,
@@ -134,6 +137,17 @@ describe("Home project library", () => {
     expect(wrapper.find('[aria-label="选择项目"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("待分类 3");
     expect(wrapper.text()).toContain("全部已归档");
+
+    wrapper.unmount();
+  });
+
+  it("shows the image count and total size on each project card", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("图片 12 张 · 共 117.7 MB");
+    expect(wrapper.text()).toContain("图片 9 张 · 共 941.9 MB");
+    expect(wrapper.text()).not.toContain("图片 0 张");
 
     wrapper.unmount();
   });
