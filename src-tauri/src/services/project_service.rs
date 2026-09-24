@@ -472,7 +472,10 @@ pub async fn set_destination_directory(
     .bind(project_id)
     .fetch_optional(pool)
     .await?;
-    project.ok_or_else(|| AppError::NotFound("project".to_owned()))
+    let project = project.ok_or_else(|| AppError::NotFound("project".to_owned()))?;
+    // A new archive root is also a new home for the rating manifest.
+    super::archive_manifest_service::request_rebuild(&project.id);
+    Ok(project)
 }
 
 /// Pins (or clears) the project cover capture. Person, scene and unclassified

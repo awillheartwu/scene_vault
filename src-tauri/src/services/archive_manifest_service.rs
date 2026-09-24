@@ -15,7 +15,7 @@ use crate::{
         archive_manifest::RebuildArchiveManifestResult,
         diagnostics::{LogLevel, LogRecord},
     },
-    services::{capture_service, log_service},
+    services::{app_settings_service, capture_service, log_service},
 };
 
 /// File name the rating workflows look for inside the directory they scan. The
@@ -114,6 +114,14 @@ pub fn request_rebuild(project_id: &str) {
     }
 }
 
+/// Automatic maintenance can be switched off globally; explicit rebuilds
+/// from the workbench stay available either way.
+async fn automatic_writes_enabled(pool: &SqlitePool) -> Result<bool, AppError> {
+    Ok(app_settings_service::get(pool)
+        .await?
+        .archive_manifest_auto_write)
+}
+
 fn take_due() -> Vec<String> {
     let Ok(mut guard) = pending().lock() else {
         return Vec::new();
@@ -130,10 +138,22 @@ fn take_due() -> Vec<String> {
     due
 }
 
+/// Test helper: projects currently waiting for a debounced rebuild.
+#[cfg(test)]
+pub(crate) fn pending_project_ids() -> Vec<String> {
+    pending()
+        .lock()
+        .map(|guard| guard.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Creates manifests that do not exist yet: that covers libraries archived
 /// before this feature and manifests deleted by hand. Existing manifests are
 /// left to the regular triggers so app start stays cheap.
 pub async fn enqueue_missing(pool: &SqlitePool) -> Result<u32, AppError> {
+    if !automatic_writes_enabled(pool).await? {
+        return Ok(0);
+    }
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         r#"
         SELECT DISTINCT ci.project_id, ci.destination_path, p.destination_directory
@@ -200,7 +220,28 @@ pub fn run_background(pool: SqlitePool) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            for project_id in take_due() {
+            let automatic = match automatic_writes_enabled(&pool).await {
+                Ok(value) => value,
+                Err(error) => {
+                    log_service::record_event(LogRecord {
+                        level: LogLevel::Warn,
+                        module: BACKGROUND_MODULE.to_owned(),
+                        message: format!("could not read archive manifest settings: {error}"),
+                        event: Some("archive_manifest_settings_failed".to_owned()),
+                        outcome: Some("failed".to_owned()),
+                        error_code: Some("archive_manifest_settings_error".to_owned()),
+                        ..Default::default()
+                    });
+                    true
+                }
+            };
+            let due = take_due();
+            if !automatic {
+                // Turning automatic maintenance off drops queued requests instead
+                // of replaying them when it is switched back on later.
+                continue;
+            }
+            for project_id in due {
                 if let Err(error) = rebuild(&pool, &project_id).await {
                     log_service::record_event(LogRecord {
                         level: LogLevel::Warn,
@@ -756,5 +797,39 @@ mod tests {
         let result = rebuild(&pool, &fixture.project_id).await.expect("second");
         assert_eq!(result.entry_count, 0);
         assert!(!manifest_path(&fixture, "人物图").exists());
+    }
+
+    #[tokio::test]
+    async fn skips_the_startup_backfill_when_automatic_writes_are_disabled() {
+        let pool = db::test_pool().await;
+        let fixture = test_support::project_with_directories(&pool, "AutoWriteOff")
+            .await
+            .expect("fixture");
+        let ginevra = character(&pool, &fixture, "吉妮瓦").await;
+        archived_item(
+            &pool,
+            &fixture,
+            "人物图",
+            "u4ia_0001 - 吉妮瓦 - 631cd9c5.png",
+            Some(&ginevra),
+            b"one",
+        )
+        .await;
+
+        assert_eq!(enqueue_missing(&pool).await.expect("scan"), 1);
+
+        crate::services::app_settings_service::update(
+            &pool,
+            crate::models::app_settings::UpdateAppSettingsInput {
+                settings: crate::models::app_settings::AppSettings {
+                    archive_manifest_auto_write: false,
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("disable automatic maintenance");
+
+        assert_eq!(enqueue_missing(&pool).await.expect("scan"), 0);
     }
 }

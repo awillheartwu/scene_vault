@@ -70,6 +70,7 @@ const appSettings = {
   autoSaveNotes: true,
   splitPopupWindows: false,
   autoCloseEmptyPopup: false,
+  archiveManifestAutoWrite: true,
   thumbnailCacheSizeMb: 256,
   imageProcessingCoreLimit: 4,
 };
@@ -235,6 +236,28 @@ describe("Settings category navigation", () => {
     expect(page.get("#naming-template").isVisible()).toBe(false);
     expect(page.find("#naming-template").exists()).toBe(true);
     expect(page.find(".settings-nav-dirty").exists()).toBe(false);
+  });
+
+  it("toggles automatic rating manifest maintenance and saves it", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    const toggle = page.get("#archive-manifest-auto");
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+    await toggle.setValue(false);
+
+    const saveButton = page
+      .findAll("button")
+      .find((entry) => entry.text().includes("保存通用设置"));
+    expect(saveButton).toBeDefined();
+    await saveButton!.trigger("click");
+    await flushPromises();
+
+    const calls = api.updateAppSettings.mock.calls;
+    const saved = calls[calls.length - 1]?.[0] as {
+      archiveManifestAutoWrite: boolean;
+    };
+    expect(saved.archiveManifestAutoWrite).toBe(false);
   });
 
   it("preserves input drafts across category switches and supports keyboard navigation", async () => {

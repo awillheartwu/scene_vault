@@ -146,12 +146,11 @@ mod tests {
             .await
             .expect("store legacy settings");
 
-        assert_eq!(
-            get(&pool)
-                .await
-                .expect("read legacy settings")
-                .image_processing_core_limit,
-            4
+        let legacy = get(&pool).await.expect("read legacy settings");
+        assert_eq!(legacy.image_processing_core_limit, 4);
+        assert!(
+            legacy.archive_manifest_auto_write,
+            "older settings keep automatic manifest maintenance enabled"
         );
     }
 }

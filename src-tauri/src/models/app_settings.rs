@@ -25,6 +25,11 @@ pub struct AppSettings {
     /// would hide both panes.
     #[serde(default)]
     pub auto_close_empty_popup: bool,
+    /// Whether archived person images maintain the rating manifest
+    /// (project.json) automatically. Manual rebuilds from the workbench stay
+    /// available either way, and turning this off never deletes a manifest.
+    #[serde(default = "default_true")]
+    pub archive_manifest_auto_write: bool,
     /// Disk budget (MiB) of the thumbnail cache directory. Oldest files are
     /// evicted once the directory exceeds this size.
     #[serde(default = "default_thumbnail_cache_size_mb")]
@@ -45,6 +50,7 @@ impl Default for AppSettings {
             auto_save_notes: default_true(),
             split_popup_windows: false,
             auto_close_empty_popup: false,
+            archive_manifest_auto_write: true,
             thumbnail_cache_size_mb: default_thumbnail_cache_size_mb(),
             image_processing_core_limit: default_image_processing_core_limit(),
         }
