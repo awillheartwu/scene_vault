@@ -900,11 +900,13 @@ onBeforeUnmount(() => {
       </div>
       <div class="settings-field toggle-row">
         <div class="toggle-text">
-          <label for="archive-manifest-auto">自动维护评分清单</label>
-          <p>
-            为归档的人物图维护 project.json（图片与人物对应关系），供打分插件读取。关闭后只在人物工作台
-            手动点「更新评分清单」时写入，已有清单不会被删除。
-          </p>
+          <label
+            for="archive-manifest-auto"
+            title="关闭后只在人物工作台手动点「更新评分清单」时写入；已有清单不会被删除，归档图片不受影响。"
+          >
+            自动维护评分清单
+          </label>
+          <p>归档后维护 project.json（人物与图片对应表），供打分插件读取。</p>
         </div>
         <label class="toggle">
           <input id="archive-manifest-auto" v-model="appSettings.archiveManifestAutoWrite" type="checkbox" />
