@@ -138,6 +138,14 @@ fn take_due() -> Vec<String> {
     due
 }
 
+/// Test helper: forget every queued rebuild request.
+#[cfg(test)]
+pub(crate) fn clear_pending_for_test() {
+    if let Ok(mut guard) = pending().lock() {
+        guard.clear();
+    }
+}
+
 /// Test helper: projects currently waiting for a debounced rebuild.
 #[cfg(test)]
 pub(crate) fn pending_project_ids() -> Vec<String> {

@@ -106,9 +106,17 @@ Scene Vault 在被扫描的归档目录里写一个 `project.json`：
 | 撤销分类 / 回退 | `capture_reset_service` | 该条移出清单；目录里再无归档文件时删除清单 |
 | 删除截图（含人物级联删除） | `capture_deletion_service` | 被删条目移出清单；目录里再无归档文件时删除清单 |
 | 重新归档（重跑 / 改判） | `capture_archive_service` | 按新的归档文件名重写 |
+| 读取归档图时发现文件已不存在 | `commands::capture::readable_capture_path` → `capture_service::note_destination_state` | 该条在下一次重建时移出清单 |
+| 会话级「检查文件」发现归档目标出现/消失 | `capture_discovery_service::reconcile_files` | 状态变化后重建 |
+| 项目级「检查项目文件」 | `project_file_reconcile_service` | 无论是否发生重定位都会重建 |
 
 重建时只列**磁盘上确实存在**的文件，所以即使某条变更漏了触发，下一次触发或手动点按就会
 把幽灵条目剔除；如果归档目录里已经没有对应的归档文件，清单会被删除而不是保留旧内容。
+
+刻意不触发的环节（它们不影响清单内容）：缩略图缓存清理只切换 `annotated_path` /
+`avatar_path`、识别设置变更只清理建议、人物头像设置只写 `avatar_asset_id`。
+另外重新处理期间条目会短暂离开 `status = 'completed'`，因此可能临时不在清单里，
+归档完成后由归档触发重新写回。
 
 ## 写入与容错
 
