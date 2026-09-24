@@ -2482,3 +2482,53 @@ async fn recent_items_surface_awaiting_label_captures_from_ended_sessions() {
         "active-session capture must be visible"
     );
 }
+
+#[tokio::test]
+async fn destination_state_notes_schedule_a_manifest_refresh_when_the_file_is_gone() {
+    let pool = db::test_pool().await;
+    let fixture = test_support::project_with_directories(&pool, "DestinationStateNote")
+        .await
+        .expect("fixture");
+    let session = test_support::start_session(&pool, &fixture.project_id)
+        .await
+        .expect("session");
+    let source = fixture.source_directory.join("shot.png");
+    tokio::fs::write(&source, b"content").await.expect("source");
+    let item = register_capture(
+        &pool,
+        RegisterCaptureInput {
+            session_id: session.id,
+            source_path: path_to_string(&source),
+        },
+    )
+    .await
+    .expect("register");
+
+    // Creating the fixture registers a destination directory, which already
+    // queues a rebuild; start from an empty queue so the assertion is about the
+    // read path only.
+    crate::services::archive_manifest_service::clear_pending_for_test();
+
+    super::note_destination_state(&pool, &item, "available")
+        .await
+        .expect("note available");
+    assert!(
+        !crate::services::archive_manifest_service::pending_project_ids().contains(&item.project_id),
+        "a present archive file must not queue a manifest rebuild"
+    );
+
+    super::note_destination_state(&pool, &item, "missing")
+        .await
+        .expect("note missing");
+    assert!(
+        crate::services::archive_manifest_service::pending_project_ids().contains(&item.project_id),
+        "a disappeared archive file must queue a manifest refresh"
+    );
+    let state: String =
+        sqlx::query_scalar("SELECT destination_file_state FROM capture_items WHERE id = ?")
+            .bind(&item.id)
+            .fetch_one(&pool)
+            .await
+            .expect("state");
+    assert_eq!(state, "missing");
+}

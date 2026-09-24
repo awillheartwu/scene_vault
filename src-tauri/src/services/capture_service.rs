@@ -2479,6 +2479,25 @@ pub(crate) async fn record_failure(
     Ok(())
 }
 
+/// Records the archive state observed while reading a capture file.
+/// A file that disappeared also changes what the rating manifest may advertise,
+/// so that case schedules a debounced rebuild; a present file does not.
+pub(crate) async fn note_destination_state(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+    state: &str,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE capture_items SET destination_file_state = ? WHERE id = ?")
+        .bind(state)
+        .bind(&item.id)
+        .execute(pool)
+        .await?;
+    if state == "missing" {
+        super::archive_manifest_service::request_rebuild(&item.project_id);
+    }
+    Ok(())
+}
+
 pub(crate) fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())

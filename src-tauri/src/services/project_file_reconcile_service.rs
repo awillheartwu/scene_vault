@@ -375,9 +375,9 @@ pub async fn reconcile_project_files(
     }
     transaction.commit().await?;
 
-    if destination_relocated_count > 0 {
-        archive_manifest_service::request_rebuild(project_id);
-    }
+    // The check may have relinked a target or refreshed its state, and the
+    // rating manifest has to follow either way.
+    archive_manifest_service::request_rebuild(project_id);
 
     let (source_missing_count, source_replaced_count_db, destination_missing_count, destination_unavailable_count): (i64, i64, i64, i64) = sqlx::query_as(
         r#"
@@ -679,6 +679,11 @@ mod tests {
                 .await
                 .expect("state");
         assert_eq!(state, "missing");
+        assert!(
+            crate::services::archive_manifest_service::pending_project_ids()
+                .contains(&fixture.project_id),
+            "a project file check must queue a manifest refresh"
+        );
     }
 
     #[tokio::test]

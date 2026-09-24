@@ -473,9 +473,9 @@ pub async fn reconcile_files(
         true,
     )
     .await?;
-    let root: Option<String> = sqlx::query_scalar(
+    let session_project: Option<(String, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT project.destination_directory
+        SELECT project.id, project.destination_directory
         FROM capture_sessions session
         JOIN projects project ON project.id = session.project_id
         WHERE session.id = ?
@@ -483,17 +483,24 @@ pub async fn reconcile_files(
     )
     .bind(&session_id)
     .fetch_optional(pool)
-    .await?
-    .flatten();
-    let targets: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, destination_path, destination_avatar_path FROM capture_items WHERE session_id = ?",
+    .await?;
+    let project_id = session_project.as_ref().map(|(id, _)| id.clone());
+    let root = session_project.and_then(|(_, directory)| directory);
+    let targets: Vec<(String, Option<String>, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT id, destination_path, destination_avatar_path, destination_file_state, destination_avatar_file_state FROM capture_items WHERE session_id = ?",
     )
     .bind(&session_id)
     .fetch_all(pool)
     .await?;
-    for (id, destination, avatar) in targets {
+    let mut destination_state_changed = false;
+    for (id, destination, avatar, previous_destination_state, previous_avatar_state) in targets {
         let destination_state = check_target_state(destination.as_deref(), root.as_deref()).await;
         let avatar_state = check_target_state(avatar.as_deref(), root.as_deref()).await;
+        if destination_state != previous_destination_state.as_str()
+            || avatar_state != previous_avatar_state.as_str()
+        {
+            destination_state_changed = true;
+        }
         sqlx::query(
             "UPDATE capture_items SET destination_file_state = ?, destination_avatar_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
         )
@@ -502,6 +509,13 @@ pub async fn reconcile_files(
         .bind(id)
         .execute(pool)
         .await?;
+    }
+    if destination_state_changed {
+        if let Some(project_id) = project_id.as_deref() {
+            // The rating manifest follows the on-disk archive, so a target that
+            // appeared or disappeared has to converge there as well.
+            super::archive_manifest_service::request_rebuild(project_id);
+        }
     }
     let (source_missing_count, source_replaced_count, destination_missing_count, destination_unavailable_count): (i64, i64, i64, i64) = sqlx::query_as(
         r#"
@@ -1072,6 +1086,11 @@ mod tests {
         assert_eq!(missing.discovered_count, 0);
         assert_eq!(missing.source_missing_count, 1);
         assert_eq!(missing.destination_missing_count, 1);
+        assert!(
+            crate::services::archive_manifest_service::pending_project_ids()
+                .contains(&session.project_id),
+            "a session file check that loses an archive target must queue a manifest refresh"
+        );
 
         tokio::fs::write(&image, b"second generation with different content")
             .await

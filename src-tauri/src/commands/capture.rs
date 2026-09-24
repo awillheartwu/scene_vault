@@ -466,29 +466,16 @@ async fn readable_capture_path(
     }
     match tokio::fs::metadata(&path).await {
         Ok(metadata) if metadata.is_file() => {
-            sqlx::query(
-                "UPDATE capture_items SET destination_file_state = 'available' WHERE id = ?",
-            )
-            .bind(&item.id)
-            .execute(pool)
-            .await?;
+            capture_service::note_destination_state(pool, item, "available").await?;
             Ok(path)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            sqlx::query("UPDATE capture_items SET destination_file_state = 'missing' WHERE id = ?")
-                .bind(&item.id)
-                .execute(pool)
-                .await?;
+            capture_service::note_destination_state(pool, item, "missing").await?;
             Err(AppError::NotFound("capture destination image".to_owned()))
         }
         Ok(_) => Err(AppError::NotFound("capture destination image".to_owned())),
         Err(error) => {
-            sqlx::query(
-                "UPDATE capture_items SET destination_file_state = 'unavailable' WHERE id = ?",
-            )
-            .bind(&item.id)
-            .execute(pool)
-            .await?;
+            capture_service::note_destination_state(pool, item, "unavailable").await?;
             Err(error.into())
         }
     }
