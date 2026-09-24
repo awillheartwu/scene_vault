@@ -317,6 +317,7 @@ pub fn run() {
                 ),
             );
             services::notes_service::run_background(pool.clone());
+            services::archive_manifest_service::run_background(pool.clone());
             tauri::async_runtime::spawn(services::capture_worker_service::run(
                 pool, app_handle, cache_root,
             ));
@@ -370,6 +371,7 @@ pub fn run() {
             commands::capture::delete_capture_item,
             commands::capture::reconcile_capture_files,
             commands::capture::reconcile_project_files,
+            commands::capture::rebuild_archive_manifest,
             commands::capture::register_capture,
             commands::capture::label_capture,
             commands::capture::relabel_capture_item,

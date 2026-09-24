@@ -112,6 +112,21 @@ export interface ProjectFileReconcileResult {
   unavailableSourceDirectoryCount: number;
   destinationMissingCount: number;
   destinationUnavailableCount: number;
+  destinationRelocatedCount: number;
+  destinationAmbiguousCount: number;
+  destinationScannedFileCount: number;
+}
+
+export interface RebuildArchiveManifestResult {
+  projectId: string;
+  manifestCount: number;
+  entryCount: number;
+  characterCount: number;
+  writtenCount: number;
+  unchangedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  message: string;
 }
 
 export interface ProjectSourceDirectory {
@@ -769,8 +784,12 @@ export const captureApi = {
     invoke<CaptureFileReconcileResult>("reconcile_capture_files", {
       input: { sessionId },
     }),
-  reconcileProjectFiles: (projectId: string) =>
+  reconcileProjectFiles: (projectId: string, archiveSearchDirectory?: string | null) =>
     invoke<ProjectFileReconcileResult>("reconcile_project_files", {
+      input: { projectId, archiveSearchDirectory: archiveSearchDirectory ?? null },
+    }),
+  rebuildArchiveManifest: (projectId: string) =>
+    invoke<RebuildArchiveManifestResult>("rebuild_archive_manifest", {
       input: { projectId },
     }),
   label: (

@@ -1,4 +1,5 @@
 pub mod app_settings;
+pub mod archive_manifest;
 pub mod archive_naming;
 pub mod asset;
 pub mod capture;

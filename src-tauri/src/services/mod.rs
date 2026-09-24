@@ -1,4 +1,5 @@
 pub mod app_settings_service;
+pub mod archive_manifest_service;
 pub mod archive_naming;
 pub mod archive_naming_settings_service;
 pub mod asset_service;

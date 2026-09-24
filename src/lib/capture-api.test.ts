@@ -48,12 +48,23 @@ it("continues reporting failures from non-media IPC commands", async () => {
   });
 });
 
-it("sends a project id to the project-wide file checker", async () => {
+it("sends a project id and an optional archive search directory to the file checker", async () => {
   tauri.invoke.mockResolvedValueOnce({});
 
   await captureApi.reconcileProjectFiles("project-1");
 
   expect(tauri.invoke).toHaveBeenCalledWith("reconcile_project_files", {
-    input: { projectId: "project-1" },
+    input: { projectId: "project-1", archiveSearchDirectory: null },
+  });
+
+  tauri.invoke.mockResolvedValueOnce({});
+
+  await captureApi.reconcileProjectFiles("project-1", "/volume/renamed-archive");
+
+  expect(tauri.invoke).toHaveBeenLastCalledWith("reconcile_project_files", {
+    input: {
+      projectId: "project-1",
+      archiveSearchDirectory: "/volume/renamed-archive",
+    },
   });
 });

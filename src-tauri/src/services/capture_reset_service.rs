@@ -961,6 +961,7 @@ async fn clean_and_commit<R: FileRecycler>(
         .await?;
     }
     tx.commit().await?;
+    super::archive_manifest_service::request_rebuild(&snapshot.project_id);
     Ok(())
 }
 
