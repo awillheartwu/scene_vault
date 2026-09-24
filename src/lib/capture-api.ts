@@ -54,6 +54,7 @@ export interface ProjectOverviewSummary {
   processingCount: number;
   completedCount: number;
   failedCount: number;
+  totalBytes: number;
   lastActivityAt: string;
   latestCaptureItemId: string | null;
   coverCaptureItemId: string | null;
