@@ -102,18 +102,19 @@ export interface CaptureFileReconcileResult {
 }
 
 export interface ProjectFileReconcileResult {
-  scannedDirectoryCount: number;
-  scannedFileCount: number;
+  sourceScannedDirectoryCount: number;
+  sourceScannedFileCount: number;
   sourceCheckedCount: number;
-  relocatedCount: number;
+  sourceRelocatedCount: number;
   sourceMissingCount: number;
   sourceReplacedCount: number;
-  ambiguousCount: number;
-  unavailableSourceDirectoryCount: number;
+  sourceAmbiguousCount: number;
+  sourceUnavailableDirectoryCount: number;
   destinationMissingCount: number;
   destinationUnavailableCount: number;
   destinationRelocatedCount: number;
   destinationAmbiguousCount: number;
+  destinationContentMismatchCount: number;
   destinationScannedFileCount: number;
 }
 

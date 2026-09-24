@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-    time::SystemTime,
+    path::Path,
 };
 
 use sqlx::SqlitePool;
@@ -11,17 +10,9 @@ use crate::{
     models::capture::{ProjectFileReconcileResult, ReconcileProjectFilesInput},
     services::{
         archive_manifest_service, archive_naming, capture_discovery_service, capture_service,
+        file_relink,
     },
 };
-
-#[derive(Clone, Debug)]
-struct SourceCandidate {
-    path: PathBuf,
-    normalized_path: String,
-    file_name_key: String,
-    file_size: i64,
-    modified_at_ms: Option<i64>,
-}
 
 #[derive(Debug, sqlx::FromRow)]
 struct CaptureFileRow {
@@ -46,13 +37,6 @@ struct SourceUpdate {
     state: &'static str,
 }
 
-#[derive(Clone, Debug)]
-struct ArchiveCandidate {
-    normalized_path: String,
-    is_avatar: bool,
-    tokens: Vec<String>,
-}
-
 #[derive(Debug)]
 struct DestinationUpdate {
     id: String,
@@ -63,13 +47,6 @@ struct DestinationUpdate {
     destination_avatar_path: Option<String>,
     destination_state: &'static str,
     avatar_state: &'static str,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ArchiveResolution<'a> {
-    Missing,
-    Unique(&'a ArchiveCandidate),
-    Ambiguous,
 }
 
 /// Audits every capture in a project. Existing files are verified by content,
@@ -112,12 +89,14 @@ pub async fn reconcile_project_files(
     .fetch_all(pool)
     .await?;
 
-    let (candidates, unavailable_source_directory_count) = scan_source_roots(&source_roots).await;
-    let scanned_directory_count = source_roots
+    let source_scan = file_relink::scan_roots(&source_roots, file_relink::ScanMode::Flat).await;
+    let candidates = source_scan.candidates;
+    let unavailable_source_directory_count = source_scan.unavailable_roots;
+    let source_scanned_directory_count = source_roots
         .len()
         .saturating_sub(unavailable_source_directory_count as usize)
         as u32;
-    let scanned_file_count = candidates.len() as u32;
+    let source_scanned_file_count = candidates.len() as u32;
     let candidates_by_path: HashMap<String, usize> = candidates
         .iter()
         .enumerate()
@@ -153,7 +132,7 @@ pub async fn reconcile_project_files(
                     old_source_path: row.source_path.clone(),
                     new_source_path: Some(row.source_path.clone()),
                     file_size: Some(i64::try_from(metadata.len()).unwrap_or(i64::MAX)),
-                    modified_at_ms: metadata.modified().ok().and_then(unix_millis),
+                    modified_at_ms: metadata.modified().ok().and_then(file_relink::unix_millis),
                     state,
                 });
             }
@@ -222,21 +201,21 @@ pub async fn reconcile_project_files(
         }
     }
 
-    let mut ambiguous_count = 0_u32;
+    let mut source_ambiguous_count = 0_u32;
     for (identity, update_indexes) in missing_by_identity {
-        let matches = candidates_by_identity
-            .get(&identity)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if update_indexes.len() == 1 && matches.len() == 1 {
-            let candidate = &candidates[matches[0]];
-            let update = &mut updates[update_indexes[0]];
-            update.new_source_path = Some(candidate.normalized_path.clone());
-            update.file_size = Some(candidate.file_size);
-            update.modified_at_ms = candidate.modified_at_ms;
-            update.state = "available";
-        } else if !matches.is_empty() {
-            ambiguous_count = ambiguous_count.saturating_add(update_indexes.len() as u32);
+        match file_relink::resolve(&candidates_by_identity, &candidates, &identity) {
+            file_relink::Match::Unique(candidate) if update_indexes.len() == 1 => {
+                let update = &mut updates[update_indexes[0]];
+                update.new_source_path = Some(candidate.normalized_path.clone());
+                update.file_size = Some(candidate.file_size);
+                update.modified_at_ms = candidate.modified_at_ms;
+                update.state = "available";
+            }
+            file_relink::Match::Unique(_) | file_relink::Match::Ambiguous => {
+                source_ambiguous_count =
+                    source_ambiguous_count.saturating_add(update_indexes.len() as u32);
+            }
+            file_relink::Match::Missing => {}
         }
     }
 
@@ -247,11 +226,12 @@ pub async fn reconcile_project_files(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .or_else(|| destination_root.clone());
-    let mut archive_candidates: Vec<ArchiveCandidate> = Vec::new();
-    let mut archive_index: HashMap<(String, bool), Vec<usize>> = HashMap::new();
+    let mut archive_candidates: Vec<file_relink::Candidate> = Vec::new();
+    let mut archive_index: file_relink::IdentifierIndex = HashMap::new();
     let mut archive_scanned = false;
     let mut destination_relocated_count = 0_u32;
     let mut destination_ambiguous_count = 0_u32;
+    let mut destination_content_mismatch_count = 0_u32;
 
     let mut destination_updates = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -276,35 +256,50 @@ pub async fn reconcile_project_files(
         if (destination_state == "missing" || avatar_state == "missing") && !archive_scanned {
             archive_scanned = true;
             if let Some(root) = archive_search_root.as_deref() {
-                archive_candidates = scan_archive_candidates(root).await;
-                archive_index = index_archive_candidates(&archive_candidates);
+                let archive_scan = file_relink::scan_roots(
+                    &[root.to_owned()],
+                    file_relink::ScanMode::Recursive,
+                )
+                .await;
+                archive_candidates = archive_scan.candidates;
+                archive_index = file_relink::index_by_identifier(&archive_candidates);
             }
         }
         let token = archive_naming::short_identifier(&row.id);
         if destination_state == "missing" {
-            match resolve_archive_candidate(&archive_index, &archive_candidates, &token, false) {
-                ArchiveResolution::Unique(candidate) => {
-                    destination_path = Some(candidate.normalized_path.clone());
-                    destination_state = "available";
-                    destination_relocated_count = destination_relocated_count.saturating_add(1);
+            match file_relink::resolve(&archive_index, &archive_candidates, &(token.clone(), false))
+            {
+                file_relink::Match::Unique(candidate) => {
+                    if archive_is_byte_copy(&candidate.normalized_path)
+                        && !archive_copy_matches(candidate, row.content_hash.as_deref(), row.file_size)
+                            .await
+                    {
+                        destination_content_mismatch_count =
+                            destination_content_mismatch_count.saturating_add(1);
+                    } else {
+                        destination_path = Some(candidate.normalized_path.clone());
+                        destination_state = "available";
+                        destination_relocated_count =
+                            destination_relocated_count.saturating_add(1);
+                    }
                 }
-                ArchiveResolution::Ambiguous => {
+                file_relink::Match::Ambiguous => {
                     destination_ambiguous_count = destination_ambiguous_count.saturating_add(1);
                 }
-                ArchiveResolution::Missing => {}
+                file_relink::Match::Missing => {}
             }
         }
         if avatar_state == "missing" {
-            match resolve_archive_candidate(&archive_index, &archive_candidates, &token, true) {
-                ArchiveResolution::Unique(candidate) => {
+            match file_relink::resolve(&archive_index, &archive_candidates, &(token, true)) {
+                file_relink::Match::Unique(candidate) => {
                     destination_avatar_path = Some(candidate.normalized_path.clone());
                     avatar_state = "available";
                     destination_relocated_count = destination_relocated_count.saturating_add(1);
                 }
-                ArchiveResolution::Ambiguous => {
+                file_relink::Match::Ambiguous => {
                     destination_ambiguous_count = destination_ambiguous_count.saturating_add(1);
                 }
-                ArchiveResolution::Missing => {}
+                file_relink::Match::Missing => {}
             }
         }
         destination_updates.push(DestinationUpdate {
@@ -320,7 +315,7 @@ pub async fn reconcile_project_files(
     }
 
     let mut transaction = pool.begin().await?;
-    let mut relocated_count = 0_u32;
+    let mut source_relocated_count = 0_u32;
     for update in &updates {
         if let Some(path) = &update.new_source_path {
             let applied = sqlx::query(
@@ -335,7 +330,7 @@ pub async fn reconcile_project_files(
             .execute(&mut *transaction)
             .await?;
             if path != &update.old_source_path && applied.rows_affected() == 1 {
-                relocated_count = relocated_count.saturating_add(1);
+                source_relocated_count = source_relocated_count.saturating_add(1);
             }
         } else {
             sqlx::query(
@@ -399,139 +394,53 @@ pub async fn reconcile_project_files(
     .await?;
 
     Ok(ProjectFileReconcileResult {
-        scanned_directory_count,
-        scanned_file_count,
+        source_scanned_directory_count,
+        source_scanned_file_count,
         source_checked_count: rows.len() as u32,
-        relocated_count,
+        source_relocated_count,
         source_missing_count: source_missing_count.max(0) as u32,
         source_replaced_count: source_replaced_count_db.max(0) as u32,
-        ambiguous_count,
-        unavailable_source_directory_count,
+        source_ambiguous_count,
+        source_unavailable_directory_count: unavailable_source_directory_count,
         destination_missing_count: destination_missing_count.max(0) as u32,
         destination_unavailable_count: destination_unavailable_count.max(0) as u32,
         destination_relocated_count,
         destination_ambiguous_count,
+        destination_content_mismatch_count,
         destination_scanned_file_count: archive_candidates.len() as u32,
     })
 }
 
-/// Directories the archive walk never descends into: NAS metadata, recycle
-/// bins and hidden staging directories.
-fn is_skipped_archive_directory(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+/// Archive directories that store a byte-identical copy of the source file.
+/// Annotated person outputs and avatars are derivatives and cannot be verified
+/// against the recorded source hash.
+const BYTE_COPY_DIRECTORIES: [&str; 4] = ["游戏截图", "收藏图", "人物图（原图）", "人物图（未识别）"];
+
+fn archive_is_byte_copy(path: &str) -> bool {
+    Path::new(path)
+        .parent()
+        .and_then(|directory| directory.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| BYTE_COPY_DIRECTORIES.contains(&name))
+}
+
+/// A byte-copy archive target must still hash to the recorded source content,
+/// otherwise the identifier matched a stale or unrelated file.
+async fn archive_copy_matches(
+    candidate: &file_relink::Candidate,
+    content_hash: Option<&str>,
+    source_size: Option<i64>,
+) -> bool {
+    let Some(expected) = content_hash else {
         return true;
     };
-    if name.is_empty() || name.starts_with('@') || name.starts_with('#') || name.starts_with('.') {
-        return true;
+    if source_size.is_some_and(|size| size != candidate.file_size) {
+        return false;
     }
-    name.eq_ignore_ascii_case("$RECYCLE.BIN")
-        || name.eq_ignore_ascii_case("System Volume Information")
-}
-
-/// Every delimited hexadecimal run of at least six characters is treated as a
-/// candidate identifier: Scene Vault appends the short capture id to archive
-/// names, and later processing passes may append their own markers.
-fn identifier_tokens(stem: &str) -> Vec<String> {
-    stem.split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|part| {
-            (6..=16).contains(&part.len()) && part.chars().all(|value| value.is_ascii_hexdigit())
-        })
-        .map(|part| part.to_ascii_lowercase())
-        .collect()
-}
-
-/// Collects archive files below `root`. The walk never follows symlinks and
-/// skips system metadata directories, so pointing it at a share root is safe.
-async fn scan_archive_candidates(root: &str) -> Vec<ArchiveCandidate> {
-    let Ok(canonical_root) = tokio::fs::canonicalize(root).await else {
-        return Vec::new();
-    };
-    let mut candidates = Vec::new();
-    let mut pending = vec![canonical_root.clone()];
-    while let Some(directory) = pending.pop() {
-        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
-            continue;
-        };
-        loop {
-            let Ok(next) = entries.next_entry().await else {
-                break;
-            };
-            let Some(entry) = next else { break };
-            let Ok(file_type) = entry.file_type().await else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            if file_type.is_dir() {
-                if !is_skipped_archive_directory(&path) {
-                    pending.push(path);
-                }
-                continue;
-            }
-            if !file_type.is_file() || !capture_service::is_supported_image(&path) {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata().await else {
-                continue;
-            };
-            if metadata.len() == 0 {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let (stem, is_avatar) = match stem.strip_suffix("-avatar") {
-                Some(value) => (value, true),
-                None => (stem, false),
-            };
-            let tokens = identifier_tokens(stem);
-            if tokens.is_empty() {
-                continue;
-            }
-            candidates.push(ArchiveCandidate {
-                normalized_path: capture_service::path_to_string(&path),
-                is_avatar,
-                tokens,
-            });
-        }
-    }
-    candidates
-}
-
-fn index_archive_candidates(
-    candidates: &[ArchiveCandidate],
-) -> HashMap<(String, bool), Vec<usize>> {
-    let mut index: HashMap<(String, bool), Vec<usize>> = HashMap::new();
-    for (position, candidate) in candidates.iter().enumerate() {
-        for token in &candidate.tokens {
-            index
-                .entry((token.clone(), candidate.is_avatar))
-                .or_default()
-                .push(position);
-        }
-    }
-    index
-}
-
-/// Resolves one missing archive target. Only an unambiguous identifier match is
-/// accepted; guessing would point the database at the wrong file.
-fn resolve_archive_candidate<'a>(
-    index: &HashMap<(String, bool), Vec<usize>>,
-    candidates: &'a [ArchiveCandidate],
-    token: &str,
-    is_avatar: bool,
-) -> ArchiveResolution<'a> {
-    let matches = index
-        .get(&(token.to_ascii_lowercase(), is_avatar))
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    match matches.len() {
-        0 => ArchiveResolution::Missing,
-        1 => ArchiveResolution::Unique(&candidates[matches[0]]),
-        _ => ArchiveResolution::Ambiguous,
-    }
+    capture_service::sha256_file(&candidate.path)
+        .await
+        .map(|actual| actual == expected)
+        .unwrap_or(false)
 }
 
 /// Keeps the indexed asset row in step with a relocated archive target so the
@@ -586,64 +495,6 @@ async fn sync_relocated_asset(
     Ok(())
 }
 
-async fn scan_source_roots(roots: &[String]) -> (Vec<SourceCandidate>, u32) {
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-    let mut unavailable_count = 0_u32;
-    for root in roots {
-        let Ok(canonical_root) = tokio::fs::canonicalize(root).await else {
-            unavailable_count = unavailable_count.saturating_add(1);
-            continue;
-        };
-        let Ok(mut directory) = tokio::fs::read_dir(&canonical_root).await else {
-            unavailable_count = unavailable_count.saturating_add(1);
-            continue;
-        };
-        loop {
-            let Ok(next) = directory.next_entry().await else {
-                break;
-            };
-            let Some(entry) = next else { break };
-            let path = entry.path();
-            if !capture_service::is_supported_image(&path) {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata().await else {
-                continue;
-            };
-            if !metadata.is_file() || metadata.len() == 0 {
-                continue;
-            }
-            let Ok(canonical_path) = tokio::fs::canonicalize(&path).await else {
-                continue;
-            };
-            if !capture_service::path_is_within(&canonical_path, &canonical_root) {
-                continue;
-            }
-            let normalized_path = capture_service::normalized_path_string(&canonical_path);
-            if !seen.insert(normalized_path.clone()) {
-                continue;
-            }
-            let Some(file_name_key) = canonical_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(str::to_lowercase)
-            else {
-                continue;
-            };
-            candidates.push(SourceCandidate {
-                path: canonical_path,
-                normalized_path,
-                file_name_key,
-                file_size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
-                modified_at_ms: metadata.modified().ok().and_then(unix_millis),
-            });
-        }
-    }
-    candidates.sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
-    (candidates, unavailable_count)
-}
-
 fn source_state_or_unknown(state: &str) -> &'static str {
     match state {
         "available" => "available",
@@ -653,15 +504,10 @@ fn source_state_or_unknown(state: &str) -> &'static str {
     }
 }
 
-fn unix_millis(time: SystemTime) -> Option<i64> {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::{
         db,
         models::{
@@ -752,8 +598,8 @@ mod tests {
         )
         .await
         .expect("reconcile project");
-        assert_eq!(result.relocated_count, 1);
-        assert_eq!(result.scanned_file_count, 2);
+        assert_eq!(result.source_relocated_count, 1);
+        assert_eq!(result.source_scanned_file_count, 2);
         assert_eq!(result.source_missing_count, 0);
         assert_eq!(result.destination_missing_count, 1);
         let row: (String, String, String) = sqlx::query_as(
@@ -823,8 +669,8 @@ mod tests {
         )
         .await
         .expect("reconcile project");
-        assert_eq!(result.relocated_count, 0);
-        assert_eq!(result.ambiguous_count, 1);
+        assert_eq!(result.source_relocated_count, 0);
+        assert_eq!(result.source_ambiguous_count, 1);
         assert_eq!(result.source_missing_count, 1);
         let state: String =
             sqlx::query_scalar("SELECT source_file_state FROM capture_items WHERE id = ?")
@@ -855,7 +701,7 @@ mod tests {
         )
         .await
         .expect("reconcile project");
-        assert_eq!(result.unavailable_source_directory_count, 1);
+        assert_eq!(result.source_unavailable_directory_count, 1);
         assert_eq!(result.source_missing_count, 0);
         let state: String =
             sqlx::query_scalar("SELECT source_file_state FROM capture_items WHERE id = ?")
@@ -1100,5 +946,101 @@ mod tests {
         .expect("reconcile project");
         assert_eq!(result.destination_relocated_count, 0);
         assert_eq!(result.destination_missing_count, 2);
+    }
+
+    async fn copy_archive_fixture(
+        pool: &SqlitePool,
+        archived_bytes: &[u8],
+    ) -> (test_support::ProjectFixture, String, PathBuf) {
+        let fixture = test_support::project_with_directories(pool, "CopyArchive")
+            .await
+            .expect("fixture");
+        let item_id = registered_item(pool, &fixture, "shot.png", b"scene bytes").await;
+        let token = crate::services::archive_naming::short_identifier(&item_id);
+        let renamed_root = fixture._workspace.path().join("renamed-archive");
+        let archived = renamed_root
+            .join("游戏截图")
+            .join(format!("shot - {token}.png"));
+        tokio::fs::create_dir_all(archived.parent().expect("parent"))
+            .await
+            .expect("archive directory");
+        tokio::fs::write(&archived, archived_bytes)
+            .await
+            .expect("archive copy");
+        let previous = fixture
+            ._workspace
+            .path()
+            .join("old-archive")
+            .join("游戏截图")
+            .join("shot.png");
+        sqlx::query(
+            "UPDATE capture_items SET classification = 'scene', status = 'completed', archived_at = '2026-09-09T06:00:00.000Z', destination_path = ?, destination_file_state = 'missing' WHERE id = ?",
+        )
+        .bind(capture_service::path_to_string(&previous))
+        .bind(&item_id)
+        .execute(pool)
+        .await
+        .expect("prepare copy archive");
+        project_service::set_destination_directory(
+            pool,
+            SetProjectDestinationInput {
+                project_id: fixture.project_id.clone(),
+                directory: capture_service::path_to_string(&renamed_root),
+            },
+        )
+        .await
+        .expect("rename archive root");
+        (fixture, item_id, archived)
+    }
+
+    #[tokio::test]
+    async fn verifies_byte_copy_archives_by_content_hash_before_relinking() {
+        let pool = db::test_pool().await;
+        let (fixture, item_id, archived) = copy_archive_fixture(&pool, b"scene bytes").await;
+
+        let result = reconcile_project_files(
+            &pool,
+            ReconcileProjectFilesInput {
+                project_id: fixture.project_id.clone(),
+                archive_search_directory: None,
+            },
+        )
+        .await
+        .expect("reconcile project");
+        assert_eq!(result.destination_relocated_count, 1);
+        assert_eq!(result.destination_content_mismatch_count, 0);
+        let path: String =
+            sqlx::query_scalar("SELECT destination_path FROM capture_items WHERE id = ?")
+                .bind(&item_id)
+                .fetch_one(&pool)
+                .await
+                .expect("destination path");
+        assert_eq!(path, capture_service::path_to_string(&archived));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_byte_copy_archive_whose_content_changed() {
+        let pool = db::test_pool().await;
+        let (fixture, item_id, _archived) = copy_archive_fixture(&pool, b"scene bytez").await;
+
+        let result = reconcile_project_files(
+            &pool,
+            ReconcileProjectFilesInput {
+                project_id: fixture.project_id.clone(),
+                archive_search_directory: None,
+            },
+        )
+        .await
+        .expect("reconcile project");
+        assert_eq!(result.destination_relocated_count, 0);
+        assert_eq!(result.destination_content_mismatch_count, 1);
+        assert_eq!(result.destination_missing_count, 1);
+        let state: String =
+            sqlx::query_scalar("SELECT destination_file_state FROM capture_items WHERE id = ?")
+                .bind(&item_id)
+                .fetch_one(&pool)
+                .await
+                .expect("destination state");
+        assert_eq!(state, "missing");
     }
 }

@@ -228,18 +228,19 @@ pub struct ReconcileProjectFilesInput {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFileReconcileResult {
-    pub scanned_directory_count: u32,
-    pub scanned_file_count: u32,
+    pub source_scanned_directory_count: u32,
+    pub source_scanned_file_count: u32,
     pub source_checked_count: u32,
-    pub relocated_count: u32,
+    pub source_relocated_count: u32,
     pub source_missing_count: u32,
     pub source_replaced_count: u32,
-    pub ambiguous_count: u32,
-    pub unavailable_source_directory_count: u32,
+    pub source_ambiguous_count: u32,
+    pub source_unavailable_directory_count: u32,
     pub destination_missing_count: u32,
     pub destination_unavailable_count: u32,
     pub destination_relocated_count: u32,
     pub destination_ambiguous_count: u32,
+    pub destination_content_mismatch_count: u32,
     pub destination_scanned_file_count: u32,
 }
 

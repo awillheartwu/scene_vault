@@ -1949,12 +1949,12 @@ onBeforeUnmount(() => {
         <DialogTitle>项目文件检查完成</DialogTitle>
         <DialogDescription>
           已检查 {{ projectReconcileResult.sourceCheckedCount }} 条截图记录，扫描
-          {{ projectReconcileResult.scannedDirectoryCount }} 个来源目录中的
-          {{ projectReconcileResult.scannedFileCount }} 张图片。没有导入或启动识别。
+          {{ projectReconcileResult.sourceScannedDirectoryCount }} 个来源目录中的
+          {{ projectReconcileResult.sourceScannedFileCount }} 张图片。没有导入或启动识别。
         </DialogDescription>
         <ul class="project-reconcile-list">
-          <li v-if="projectReconcileResult.relocatedCount">
-            已重新定位 {{ projectReconcileResult.relocatedCount }} 张原图，并保留人物、分类、归档和人脸数据
+          <li v-if="projectReconcileResult.sourceRelocatedCount">
+            已重新定位 {{ projectReconcileResult.sourceRelocatedCount }} 张原图，并保留人物、分类、归档和人脸数据
           </li>
           <li v-if="projectReconcileResult.sourceMissingCount">
             {{ projectReconcileResult.sourceMissingCount }} 张原图缺失
@@ -1962,8 +1962,8 @@ onBeforeUnmount(() => {
           <li v-if="projectReconcileResult.sourceReplacedCount">
             {{ projectReconcileResult.sourceReplacedCount }} 张原图路径已出现不同内容
           </li>
-          <li v-if="projectReconcileResult.ambiguousCount">
-            {{ projectReconcileResult.ambiguousCount }} 张原图存在多个同名同内容候选，未自动重定位
+          <li v-if="projectReconcileResult.sourceAmbiguousCount">
+            {{ projectReconcileResult.sourceAmbiguousCount }} 张原图存在多个同名同内容候选，未自动重定位
           </li>
           <li v-if="projectReconcileResult.destinationMissingCount">
             {{ projectReconcileResult.destinationMissingCount }} 个归档/头像目标文件缺失
@@ -1977,11 +1977,14 @@ onBeforeUnmount(() => {
           <li v-if="projectReconcileResult.destinationAmbiguousCount" class="reconcile-warning">
             {{ projectReconcileResult.destinationAmbiguousCount }} 个归档目标存在多个同标识候选，未自动改写
           </li>
-          <li v-if="projectReconcileResult.unavailableSourceDirectoryCount" class="reconcile-warning">
-            {{ projectReconcileResult.unavailableSourceDirectoryCount }} 个来源目录不可访问；为避免误判，未批量改写其缺失状态
+          <li v-if="projectReconcileResult.destinationContentMismatchCount" class="reconcile-warning">
+            {{ projectReconcileResult.destinationContentMismatchCount }} 个归档目标存在同标识但内容不同的文件，未改写
+          </li>
+          <li v-if="projectReconcileResult.sourceUnavailableDirectoryCount" class="reconcile-warning">
+            {{ projectReconcileResult.sourceUnavailableDirectoryCount }} 个来源目录不可访问；为避免误判，未批量改写其缺失状态
           </li>
           <li
-            v-if="!projectReconcileResult.relocatedCount && !projectReconcileResult.sourceMissingCount && !projectReconcileResult.sourceReplacedCount && !projectReconcileResult.ambiguousCount && !projectReconcileResult.destinationMissingCount && !projectReconcileResult.destinationUnavailableCount && !projectReconcileResult.destinationRelocatedCount && !projectReconcileResult.destinationAmbiguousCount && !projectReconcileResult.unavailableSourceDirectoryCount"
+            v-if="!projectReconcileResult.sourceRelocatedCount && !projectReconcileResult.sourceMissingCount && !projectReconcileResult.sourceReplacedCount && !projectReconcileResult.sourceAmbiguousCount && !projectReconcileResult.destinationMissingCount && !projectReconcileResult.destinationUnavailableCount && !projectReconcileResult.destinationRelocatedCount && !projectReconcileResult.destinationAmbiguousCount && !projectReconcileResult.destinationContentMismatchCount && !projectReconcileResult.sourceUnavailableDirectoryCount"
           >
             所有已登记文件状态正常
           </li>
