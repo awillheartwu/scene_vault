@@ -143,34 +143,56 @@ async fn discover_with_options(
         file_size: i64,
         modified_at_ms: Option<i64>,
         content_hash: String,
+        source_file_state: String,
         status: String,
         archived: bool,
     }
-    let mut registered: std::collections::HashMap<String, Vec<RegisteredRow>> =
-        sqlx::query_as::<_, (String, String, i64, Option<i64>, String, String, bool)>(
-            r#"
+    let mut registered: std::collections::HashMap<String, Vec<RegisteredRow>> = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i64,
+            Option<i64>,
+            String,
+            String,
+            String,
+            bool,
+        ),
+    >(
+        r#"
             SELECT id, source_path, file_size, modified_at_ms, content_hash,
-                   status, archived_at IS NOT NULL
+                   source_file_state, status, archived_at IS NOT NULL
             FROM capture_items
             WHERE project_id = ?
             "#,
-        )
-        .bind(&session.project_id)
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .fold(std::collections::HashMap::new(), |mut rows, row| {
-            let (id, source_path, file_size, modified_at_ms, content_hash, status, archived) = row;
-            rows.entry(source_path).or_default().push(RegisteredRow {
-                id,
-                file_size,
-                modified_at_ms,
-                content_hash,
-                status,
-                archived,
-            });
-            rows
+    )
+    .bind(&session.project_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .fold(std::collections::HashMap::new(), |mut rows, row| {
+        let (
+            id,
+            source_path,
+            file_size,
+            modified_at_ms,
+            content_hash,
+            source_file_state,
+            status,
+            archived,
+        ) = row;
+        rows.entry(source_path).or_default().push(RegisteredRow {
+            id,
+            file_size,
+            modified_at_ms,
+            content_hash,
+            source_file_state,
+            status,
+            archived,
         });
+        rows
+    });
 
     // Partition candidates: unchanged known files are skipped, files whose
     // recorded stats changed are re-hashed (content may have been replaced),
@@ -220,23 +242,36 @@ async fn discover_with_options(
                 && row.modified_at_ms == candidate_modified
         });
         if stats_match && !force_rehash_known {
-            sqlx::query(
-                r#"
-                UPDATE capture_items
-                SET source_file_state = CASE
-                        WHEN file_size = ? AND modified_at_ms = ? THEN 'available'
-                        ELSE 'replaced'
-                    END,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE project_id = ? AND source_path = ?
-                "#,
-            )
-            .bind(i64::try_from(candidate.length).unwrap_or(i64::MAX))
-            .bind(candidate_modified)
-            .bind(&session.project_id)
-            .bind(&key)
-            .execute(pool)
-            .await?;
+            // Known files are revisited on every poll (every couple of seconds
+            // while a session is active), so the fast path must stay read-only
+            // unless something is actually wrong: refreshing every row turned an
+            // idle session into a stream of commits, reset updated_at on every
+            // poll and cleared the 'replaced' marker of older generations.
+            // Only the generation whose stats match the file on disk is
+            // repaired, and only when its state is stale.
+            let stale_ids: Vec<String> = rows
+                .iter()
+                .filter(|row| {
+                    row.file_size == candidate.length as i64
+                        && row.modified_at_ms.is_some()
+                        && row.modified_at_ms == candidate_modified
+                        && row.source_file_state != "available"
+                })
+                .map(|row| row.id.clone())
+                .collect();
+            for id in stale_ids {
+                sqlx::query(
+                    r#"
+                    UPDATE capture_items
+                    SET source_file_state = 'available',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            }
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
@@ -456,13 +491,7 @@ async fn discover_with_options(
 /// never as a mass deletion or missing-file conclusion.
 /// One archived target of a session plus its recorded states, as read by the
 /// session level file check.
-type ReconcileTargetRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    String,
-);
+type ReconcileTargetRow = (String, Option<String>, Option<String>, String, String);
 
 pub async fn reconcile_files(
     pool: &SqlitePool,
@@ -952,7 +981,135 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("old state");
+
         assert_eq!(old_state, "replaced");
+
+        // A later poll still holds the old stats for that path, but the older
+        // generation must keep its marker: only the generation whose stats match
+        // the file on disk is repaired.
+        let polled = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: second_session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("poll after replacement");
+        assert_eq!(polled.discovered_count, 0);
+        let old_state_after_poll: String =
+            sqlx::query_scalar("SELECT source_file_state FROM capture_items WHERE id = ?")
+                .bind(&first.id)
+                .fetch_one(&pool)
+                .await
+                .expect("old state after poll");
+        assert_eq!(old_state_after_poll, "replaced");
+    }
+
+    #[tokio::test]
+    async fn polling_leaves_an_unchanged_known_file_untouched() {
+        let pool = db::test_pool().await;
+        let (_workspace, session, source) = session_fixture(&pool).await;
+        let image = source.join("stable.png");
+        tokio::fs::write(&image, b"stable content")
+            .await
+            .expect("write");
+        let item = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover")
+        .discovered_items
+        .into_iter()
+        .next()
+        .expect("item");
+        sqlx::query(
+            "UPDATE capture_items SET source_file_state = 'available', updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+        )
+        .bind(&item.id)
+        .execute(&pool)
+        .await
+        .expect("pin state");
+
+        let polled = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("poll");
+        assert_eq!(polled.discovered_count, 0);
+        let (state, updated_at): (String, String) =
+            sqlx::query_as("SELECT source_file_state, updated_at FROM capture_items WHERE id = ?")
+                .bind(&item.id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(state, "available");
+        assert_eq!(
+            updated_at, "2020-01-01T00:00:00.000Z",
+            "a poll must not rewrite a row whose state is already current"
+        );
+    }
+
+    #[tokio::test]
+    async fn polling_repairs_a_stale_source_state() {
+        let pool = db::test_pool().await;
+        let (_workspace, session, source) = session_fixture(&pool).await;
+        let image = source.join("restored.png");
+        tokio::fs::write(&image, b"restored content")
+            .await
+            .expect("write");
+        let item = discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("discover")
+        .discovered_items
+        .into_iter()
+        .next()
+        .expect("item");
+        sqlx::query(
+            "UPDATE capture_items SET source_file_state = 'missing', updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+        )
+        .bind(&item.id)
+        .execute(&pool)
+        .await
+        .expect("mark missing");
+
+        discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id.clone(),
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("poll");
+
+        let (state, updated_at): (String, String) =
+            sqlx::query_as("SELECT source_file_state, updated_at FROM capture_items WHERE id = ?")
+                .bind(&item.id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(state, "available");
+        assert_ne!(updated_at, "2020-01-01T00:00:00.000Z");
     }
 
     #[tokio::test]
