@@ -623,6 +623,7 @@ export interface AppSettings {
   autoSaveNotes: boolean;
   splitPopupWindows: boolean;
   autoCloseEmptyPopup: boolean;
+  archiveManifestAutoWrite: boolean;
   thumbnailCacheSizeMb: number;
   imageProcessingCoreLimit: number;
 }

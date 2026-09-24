@@ -396,6 +396,15 @@ async fn execute<R: FileRecycler>(
     }
     transaction.commit().await?;
 
+    // The manifest of every touched project still lists the records that were
+    // just removed, so schedule a debounced refresh before the files go away.
+    let mut touched_projects: Vec<&str> = rows.iter().map(|row| row.project_id.as_str()).collect();
+    touched_projects.sort_unstable();
+    touched_projects.dedup();
+    for project_id in touched_projects {
+        super::archive_manifest_service::request_rebuild(project_id);
+    }
+
     for row in &rows {
         for path in [row.annotated_path.as_deref(), row.avatar_path.as_deref()]
             .into_iter()
@@ -742,6 +751,11 @@ mod tests {
                 .await
                 .expect("cover");
         assert!(cover.is_none());
+        assert!(
+            crate::services::archive_manifest_service::pending_project_ids()
+                .contains(&item.project_id),
+            "deleting a capture must schedule a manifest refresh"
+        );
     }
 
     #[tokio::test]
