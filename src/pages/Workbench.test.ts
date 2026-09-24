@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useToasts } from "@/lib/toast";
 import { resetWorkbenchSnapshot } from "@/lib/workbench-cache";
 
-const { api, eventHandlers, listenMock } = vi.hoisted(() => {
+const { api, eventHandlers, listenMock, pickDirectoryMock } = vi.hoisted(() => {
   const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
   return {
     api: {
@@ -38,12 +38,14 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
     discardCaptureReset: vi.fn(async () => {}),
     previewCaptureReset: vi.fn(),
     reconcileProjectFiles: vi.fn(),
+    rebuildArchiveManifest: vi.fn(),
     setProjectCover: vi.fn(),
     revealPath: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
     },
     eventHandlers,
+    pickDirectoryMock: vi.fn(),
     listenMock: vi.fn(
       async (name: string, handler: (event: { payload: unknown }) => void) => {
         eventHandlers.set(name, handler);
@@ -65,6 +67,7 @@ vi.mock("@/lib/capture-api", () => ({
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
   revealPath: api.revealPath,
+  pickDirectory: pickDirectoryMock,
 }));
 
 import Workbench from "./Workbench.vue";
@@ -259,6 +262,9 @@ beforeEach(() => {
     unavailableSourceDirectoryCount: 0,
     destinationMissingCount: 1,
     destinationUnavailableCount: 0,
+    destinationRelocatedCount: 0,
+    destinationAmbiguousCount: 0,
+    destinationScannedFileCount: 0,
   });
 });
 
@@ -317,10 +323,80 @@ describe("Workbench", () => {
     await button!.trigger("click");
     await flushPromises();
 
-    expect(api.reconcileProjectFiles).toHaveBeenCalledWith("project-1");
+    expect(api.reconcileProjectFiles).toHaveBeenCalledWith("project-1", null);
     expect(document.body.textContent).toContain("已重新定位 1 张原图");
     expect(document.body.textContent).toContain("1 个归档/头像目标文件缺失");
     expect(document.body.textContent).toContain("没有导入或启动识别");
+  });
+
+  it("writes the rating manifest for the selected project", async () => {
+    api.rebuildArchiveManifest.mockResolvedValue({
+      projectId: "project-1",
+      manifestCount: 1,
+      entryCount: 41,
+      characterCount: 41,
+      writtenCount: 1,
+      unchangedCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      message: "已更新评分清单：41 张图、41 个人物",
+    });
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const button = wrapper
+      .findAll("button")
+      .find((entry) => entry.text().includes("更新评分清单"));
+    expect(button).toBeDefined();
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(api.rebuildArchiveManifest).toHaveBeenCalledWith("project-1");
+    expect(
+      useToasts().toasts.some((entry) =>
+        entry.message.includes("已更新评分清单：41 张图、41 个人物"),
+      ),
+    ).toBe(true);
+  });
+
+  it("relocates archived targets from a manually chosen archive directory", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    const check = wrapper.findAll("button").find((entry) => entry.text().includes("检查项目文件"));
+    await check!.trigger("click");
+    await flushPromises();
+
+    pickDirectoryMock.mockResolvedValueOnce("/volume/renamed-archive");
+    api.reconcileProjectFiles.mockResolvedValueOnce({
+      scannedDirectoryCount: 2,
+      scannedFileCount: 40,
+      sourceCheckedCount: 0,
+      relocatedCount: 0,
+      sourceMissingCount: 0,
+      sourceReplacedCount: 0,
+      ambiguousCount: 0,
+      unavailableSourceDirectoryCount: 0,
+      destinationMissingCount: 0,
+      destinationUnavailableCount: 0,
+      destinationRelocatedCount: 12,
+      destinationAmbiguousCount: 1,
+      destinationScannedFileCount: 40,
+    });
+
+    const pick = Array.from(document.body.querySelectorAll("button")).find((entry) =>
+      entry.textContent?.includes("指定归档目录找回"),
+    );
+    expect(pick).toBeTruthy();
+    pick!.click();
+    await flushPromises();
+
+    expect(api.reconcileProjectFiles).toHaveBeenLastCalledWith(
+      "project-1",
+      "/volume/renamed-archive",
+    );
+    expect(document.body.textContent).toContain("已找回 12 个归档/头像目标文件");
+    expect(document.body.textContent).toContain("1 个归档目标存在多个同标识候选");
   });
 
   it("shows a stable loading skeleton instead of a false empty workbench", async () => {

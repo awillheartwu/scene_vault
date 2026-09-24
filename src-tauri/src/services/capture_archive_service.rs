@@ -443,6 +443,10 @@ async fn persist_completed_archive(
 
     transaction.commit().await?;
 
+    if item.classification == "person" {
+        super::archive_manifest_service::request_rebuild(&project_id);
+    }
+
     // Reprocessing (degraded fallback or workbench relabel) replaces the
     // previous archive: once the new artifact is verified, move old target
     // files to the Windows recycle bin. There is deliberately no permanent

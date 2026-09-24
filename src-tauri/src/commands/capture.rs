@@ -4,6 +4,7 @@ use crate::{
     db::AppState,
     error::AppError,
     models::{
+        archive_manifest::{RebuildArchiveManifestInput, RebuildArchiveManifestResult},
         capture::{
             CaptureDeletionPreview, CaptureDeletionResult, CaptureFileReconcileResult,
             CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureItemListResponse,
@@ -19,7 +20,8 @@ use crate::{
         diagnostics::{LogLevel, LogRecord},
     },
     services::{
-        capture_archive_service, capture_deletion_service, capture_discovery_service,
+        archive_manifest_service, capture_archive_service, capture_deletion_service,
+        capture_discovery_service,
         capture_service, file_recycle_service::SystemRecycleBin, log_service,
         project_file_reconcile_service, thumbnail_service,
     },
@@ -209,17 +211,56 @@ pub async fn reconcile_project_files(
         level: LogLevel::Info,
         module: "capture.reconcile".to_owned(),
         message: format!(
-            "project file check completed: {} checked, {} relocated, {} source missing, {} source replaced, {} target missing, {} target unavailable",
+            "project file check completed: {} checked, {} relocated, {} source missing, {} source replaced, {} target missing, {} target unavailable, {} target relocated, {} target ambiguous",
             result.source_checked_count,
             result.relocated_count,
             result.source_missing_count,
             result.source_replaced_count,
             result.destination_missing_count,
             result.destination_unavailable_count,
+            result.destination_relocated_count,
+            result.destination_ambiguous_count,
         ),
         event: Some("project_file_reconcile_completed".to_owned()),
         project_id: Some(project_id),
         outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn rebuild_archive_manifest(
+    state: State<'_, AppState>,
+    input: RebuildArchiveManifestInput,
+) -> Result<RebuildArchiveManifestResult, AppError> {
+    let project_id = input.project_id.clone();
+    let result = archive_manifest_service::rebuild(&state.pool, &input.project_id).await?;
+    log_service::record_event(LogRecord {
+        level: if result.failed_count > 0 {
+            LogLevel::Warn
+        } else {
+            LogLevel::Info
+        },
+        module: "capture.manifest".to_owned(),
+        message: format!(
+            "archive manifest rebuilt: {} directories, {} entries, {} characters, {} written, {} unchanged, {} skipped, {} failed",
+            result.manifest_count,
+            result.entry_count,
+            result.character_count,
+            result.written_count,
+            result.unchanged_count,
+            result.skipped_count,
+            result.failed_count,
+        ),
+        event: Some("archive_manifest_rebuilt".to_owned()),
+        project_id: Some(project_id),
+        outcome: Some(if result.failed_count > 0 {
+            "partial".to_owned()
+        } else {
+            "succeeded".to_owned()
+        }),
+        error_code: (result.failed_count > 0).then(|| "archive_manifest_write_error".to_owned()),
         ..Default::default()
     });
     Ok(result)

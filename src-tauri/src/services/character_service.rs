@@ -145,6 +145,7 @@ pub async fn rename(pool: &SqlitePool, input: RenameCharacterInput) -> Result<Ch
     .bind(character_id)
     .fetch_one(pool)
     .await?;
+    super::archive_manifest_service::request_rebuild(&character.project_id);
     Ok(character)
 }
 
@@ -236,6 +237,7 @@ pub async fn merge(pool: &SqlitePool, input: MergeCharactersInput) -> Result<Cha
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    super::archive_manifest_service::request_rebuild(&merged.project_id);
     Ok(merged)
 }
 

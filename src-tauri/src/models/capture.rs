@@ -218,6 +218,11 @@ pub struct CaptureFileReconcileResult {
 #[serde(rename_all = "camelCase")]
 pub struct ReconcileProjectFilesInput {
     pub project_id: String,
+    /// Optional directory searched for archived files whose recorded path is
+    /// missing, so a renamed archive root can be rebound. Falls back to the
+    /// project destination directory when omitted.
+    #[serde(default)]
+    pub archive_search_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -233,6 +238,9 @@ pub struct ProjectFileReconcileResult {
     pub unavailable_source_directory_count: u32,
     pub destination_missing_count: u32,
     pub destination_unavailable_count: u32,
+    pub destination_relocated_count: u32,
+    pub destination_ambiguous_count: u32,
+    pub destination_scanned_file_count: u32,
 }
 
 #[derive(Debug, Deserialize)]

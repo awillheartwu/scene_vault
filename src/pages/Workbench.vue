@@ -54,6 +54,7 @@ import {
   captureApi,
   captureStatusLabel,
   pathFileName,
+  pickDirectory,
   revealPath,
   type CaptureItem,
   type Character,
@@ -98,6 +99,7 @@ const deleteItemTarget = ref<CaptureItem | null>(null);
 const deleteCharacterTarget = ref<CharacterSummary | null>(null);
 const characterSearch = ref("");
 const projectReconcileBusy = ref(false);
+const archiveManifestBusy = ref(false);
 const projectReconcileResult = ref<ProjectFileReconcileResult | null>(null);
 const detailOpen = ref(false);
 const mergeButton = ref<HTMLButtonElement | null>(null);
@@ -551,16 +553,42 @@ function normalizeError(error: unknown): string {
   return describeError(error);
 }
 
-async function runProjectFileReconcile() {
+async function runProjectFileReconcile(archiveSearchDirectory: string | null = null) {
   if (!projectId.value || projectReconcileBusy.value) return;
   projectReconcileBusy.value = true;
   try {
-    projectReconcileResult.value = await captureApi.reconcileProjectFiles(projectId.value);
+    projectReconcileResult.value = await captureApi.reconcileProjectFiles(
+      projectId.value,
+      archiveSearchDirectory,
+    );
     await loadCharacterData({ manageLoading: false });
   } catch (error) {
     toast.error(normalizeError(error));
   } finally {
     projectReconcileBusy.value = false;
+  }
+}
+
+async function relocateFromPickedArchiveDirectory() {
+  const directory = await pickDirectory();
+  if (!directory) return;
+  await runProjectFileReconcile(directory);
+}
+
+async function rebuildArchiveManifest() {
+  if (!projectId.value || archiveManifestBusy.value) return;
+  archiveManifestBusy.value = true;
+  try {
+    const result = await captureApi.rebuildArchiveManifest(projectId.value);
+    if (result.failedCount > 0) {
+      toast.error(result.message);
+    } else {
+      toast.success(result.message);
+    }
+  } catch (error) {
+    toast.error(normalizeError(error));
+  } finally {
+    archiveManifestBusy.value = false;
   }
 }
 
@@ -1214,10 +1242,20 @@ onBeforeUnmount(() => {
           class="secondary-action"
           :disabled="loading || projectReconcileBusy || !projectId"
           title="检查整个项目的原图路径和归档目标；不会导入或识别新文件"
-          @click="runProjectFileReconcile"
+          @click="runProjectFileReconcile()"
         >
           <Search :size="17" :class="{ 'animate-spin': projectReconcileBusy }" />
           {{ projectReconcileBusy ? "检查中…" : "检查项目文件" }}
+        </button>
+        <button
+          type="button"
+          class="secondary-action"
+          :disabled="loading || archiveManifestBusy || !projectId"
+          title="为评分流程生成或更新人物与图片对应清单（project.json），不会改动归档文件"
+          @click="rebuildArchiveManifest"
+        >
+          <Archive :size="17" :class="{ 'animate-spin': archiveManifestBusy }" />
+          {{ archiveManifestBusy ? "写入中…" : "更新评分清单" }}
         </button>
         <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData()">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
@@ -1933,16 +1971,32 @@ onBeforeUnmount(() => {
           <li v-if="projectReconcileResult.destinationUnavailableCount">
             {{ projectReconcileResult.destinationUnavailableCount }} 个归档/头像目标当前不可访问
           </li>
+          <li v-if="projectReconcileResult.destinationRelocatedCount">
+            已找回 {{ projectReconcileResult.destinationRelocatedCount }} 个归档/头像目标文件；文件仍在原位置，只更新数据库指向
+          </li>
+          <li v-if="projectReconcileResult.destinationAmbiguousCount" class="reconcile-warning">
+            {{ projectReconcileResult.destinationAmbiguousCount }} 个归档目标存在多个同标识候选，未自动改写
+          </li>
           <li v-if="projectReconcileResult.unavailableSourceDirectoryCount" class="reconcile-warning">
             {{ projectReconcileResult.unavailableSourceDirectoryCount }} 个来源目录不可访问；为避免误判，未批量改写其缺失状态
           </li>
           <li
-            v-if="!projectReconcileResult.relocatedCount && !projectReconcileResult.sourceMissingCount && !projectReconcileResult.sourceReplacedCount && !projectReconcileResult.ambiguousCount && !projectReconcileResult.destinationMissingCount && !projectReconcileResult.destinationUnavailableCount && !projectReconcileResult.unavailableSourceDirectoryCount"
+            v-if="!projectReconcileResult.relocatedCount && !projectReconcileResult.sourceMissingCount && !projectReconcileResult.sourceReplacedCount && !projectReconcileResult.ambiguousCount && !projectReconcileResult.destinationMissingCount && !projectReconcileResult.destinationUnavailableCount && !projectReconcileResult.destinationRelocatedCount && !projectReconcileResult.destinationAmbiguousCount && !projectReconcileResult.unavailableSourceDirectoryCount"
           >
             所有已登记文件状态正常
           </li>
         </ul>
         <div class="rename-actions">
+          <button
+            v-if="projectReconcileResult.destinationMissingCount || projectReconcileResult.destinationRelocatedCount"
+            type="button"
+            class="secondary-action"
+            :disabled="projectReconcileBusy"
+            title="归档目录被改名或搬迁后，指定要搜索的目录，再按归档标识找回"
+            @click="relocateFromPickedArchiveDirectory"
+          >
+            指定归档目录找回…
+          </button>
           <button type="button" class="primary-action" @click="projectReconcileResult = null">完成</button>
         </div>
       </DialogContent>
