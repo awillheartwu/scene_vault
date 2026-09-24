@@ -276,7 +276,7 @@ fn manifest_directory(destination_root: &str, destination_path: &str) -> Option<
         return None;
     }
     let parent = directory.parent()?;
-    let root = destination_root.trim_end_matches(|character| character == '\\' || character == '/');
+    let root = destination_root.trim_end_matches(['\\', '/']);
     if !capture_service::path_to_string(parent).eq_ignore_ascii_case(root) {
         return None;
     }
@@ -291,7 +291,12 @@ async fn directory_file_names(directory: &Path) -> Option<HashSet<String>> {
             break;
         };
         let Some(entry) = next else { break };
-        if !entry.file_type().await.map(|kind| kind.is_file()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .await
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Some(name) = entry.file_name().to_str() {
@@ -324,17 +329,15 @@ async fn write_manifest(
     document: &ManifestDocument,
 ) -> Result<ManifestWrite, AppError> {
     let target = directory.join(MANIFEST_FILE_NAME);
-    let contents = serde_json::to_string_pretty(document)
-        .map_err(|error| AppError::Validation(format!("cannot encode archive manifest: {error}")))?;
+    let contents = serde_json::to_string_pretty(document).map_err(|error| {
+        AppError::Validation(format!("cannot encode archive manifest: {error}"))
+    })?;
     if let Ok(existing) = tokio::fs::read_to_string(&target).await {
         if manifest_payload_matches(&existing, &contents) {
             return Ok(ManifestWrite::Unchanged);
         }
     }
-    let temporary = directory.join(format!(
-        ".{MANIFEST_FILE_NAME}.{}.partial",
-        Uuid::new_v4()
-    ));
+    let temporary = directory.join(format!(".{MANIFEST_FILE_NAME}.{}.partial", Uuid::new_v4()));
     tokio::fs::write(&temporary, contents.as_bytes()).await?;
     let verified = tokio::fs::metadata(&temporary)
         .await
@@ -362,7 +365,9 @@ pub async fn rebuild(
 ) -> Result<RebuildArchiveManifestResult, AppError> {
     let project_id = project_id.trim();
     if project_id.is_empty() {
-        return Err(AppError::Validation("project id cannot be empty".to_owned()));
+        return Err(AppError::Validation(
+            "project id cannot be empty".to_owned(),
+        ));
     }
     let project: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT name, destination_directory FROM projects WHERE id = ?")
@@ -394,10 +399,9 @@ pub async fn rebuild(
     .bind(project_id)
     .fetch_all(pool)
     .await?;
-    let generated_at: String =
-        sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
-            .fetch_one(pool)
-            .await?;
+    let generated_at: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+        .fetch_one(pool)
+        .await?;
 
     let mut groups: Vec<(PathBuf, Vec<ArchivedRow>)> = Vec::new();
     for row in rows {
@@ -542,7 +546,7 @@ pub async fn rebuild(
     // canonical directories for manifests that no longer describe anything.
     for name in PERSON_DIRECTORIES {
         let directory = Path::new(&destination_root).join(name);
-        if described.iter().any(|value| *value == directory) {
+        if described.contains(&directory) {
             continue;
         }
         let target = directory.join(MANIFEST_FILE_NAME);
@@ -626,7 +630,10 @@ mod tests {
         let session = test_support::start_session(pool, &fixture.project_id)
             .await
             .expect("session");
-        let destination = fixture.destination_directory.join(directory).join(file_name);
+        let destination = fixture
+            .destination_directory
+            .join(directory)
+            .join(file_name);
         if !content.is_empty() {
             tokio::fs::create_dir_all(destination.parent().expect("parent"))
                 .await
@@ -701,14 +708,8 @@ mod tests {
         assert_eq!(document["project"]["directory"], "人物图");
         assert_eq!(document["files"].as_array().expect("files").len(), 2);
         let characters = document["characters"].as_object().expect("characters");
-        assert_eq!(
-            characters["吉妮瓦"][0],
-            "u4ia_0001 - 吉妮瓦 - 631cd9c5.png"
-        );
-        assert_eq!(
-            characters["蒂根"][0],
-            "u4ia_0002 - 蒂根 - d40a1207.png"
-        );
+        assert_eq!(characters["吉妮瓦"][0], "u4ia_0001 - 吉妮瓦 - 631cd9c5.png");
+        assert_eq!(characters["蒂根"][0], "u4ia_0002 - 蒂根 - d40a1207.png");
         assert_eq!(document["entries"][1]["characterName"], "蒂根");
     }
 

@@ -366,7 +366,7 @@ pub async fn reconcile_project_files(
             continue;
         };
         sync_relocated_asset(
-            &mut *transaction,
+            &mut transaction,
             asset_id,
             destination_path,
             update.destination_avatar_path.as_deref(),

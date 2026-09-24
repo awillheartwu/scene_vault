@@ -170,6 +170,16 @@ NAS 断线、重试和恢复
 采样失败、权限拒绝和进程中途退出应返回局部结果，并标记 `approximate=true`，不能让
 资源页失败影响 Capture worker。
 
+### 日常使用长期采样脚本
+
+资源页快照只反映当前时刻，长期趋势用仓库脚本采样：`scripts/monitor-scene-vault.ps1`
+（双击入口 `scripts/monitor-scene-vault.cmd`）按间隔把主进程 Working Set / Private Bytes /
+累计 CPU、Python worker 内存、按命令行归属本应用的 WebView2、`capture-output` /
+缩略图 / 日志 / WebView2 缓存体积和系统可用内存写入 CSV，输出目录
+`%LOCALAPPDATA%\com.scenevault.desktop\diagnostics`；同目录 `.meta.json` 记录应用路径与
+版本，`note.txt` 可标注当时在做什么。脚本只读，不修改应用、数据库或缓存；
+本地发布构建会把同一份脚本复制到 `dist-release`，便于和安装包一起分发。
+
 ## “资源与存储”页面方案
 
 建议放在 Settings 下的新分类，而不是 History 日志页。

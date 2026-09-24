@@ -143,6 +143,9 @@ benchmark。ArcFace 已接入，权重由用户自备；当前模型结论见
   归档、找回、改名、合并、撤销分类、删除记录与归档目录变更都会触发重建，
   「设置 → 通用设置 → 自动维护评分清单」是唯一开关（关闭后仅手动写入），
   设计见 [归档人物清单决策](decisions/2026-09-24-archive-character-manifest.md)
+- [x] 日常使用资源采样脚本（2026-09-25）：`scripts/monitor-scene-vault.ps1` 按间隔记录
+  主进程、Python worker、本应用 WebView2 内存与各缓存目录体积，输出 CSV 供长期趋势分析；
+  本地发布构建会把它复制到 `dist-release`
 - [ ] 特征向量存储优化（JSON → BLOB），控制数据库体积（全量约 10 万级截图时可达
   400–600MB，影响备份、checkpoint 与启动）
 - [x] GitHub / Forgejo 远程双重推送流程
