@@ -728,7 +728,7 @@
   .settings-field .preview-warning { color: var(--destructive); }
   .settings-field.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
   .settings-field.toggle-row .toggle-text { min-width: 0; }
-  .settings-field.toggle-row label:not(.toggle) { display: block; }
+  .settings-field.toggle-row label:not(.toggle) { display: block; white-space: nowrap; }
   .settings-field.toggle-row p { margin: 4px 0 0; }
   .toggle { position: relative; display: inline-flex; flex: none; cursor: pointer; }
   .toggle input { position: absolute; opacity: 0; pointer-events: none; }
