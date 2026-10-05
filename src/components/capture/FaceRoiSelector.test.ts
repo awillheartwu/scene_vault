@@ -13,7 +13,7 @@ describe('FaceRoiSelector', () => {
     await area.trigger('pointerup',{pointerId:1,clientX:600,clientY:300});
     expect(wrapper.emitted('confirm')).toBeUndefined();
     await wrapper.findAll('button').find(b=>b.text()==='确认主脸')!.trigger('click');
-    expect(wrapper.emitted('confirm')?.[0]).toEqual([{x:.25,y:.25,width:.75,height:.75}]);
+    expect(wrapper.emitted('confirm')?.[0]).toEqual([{x:.25,y:.25,width:.75,height:.75}, 'auto']);
     await wrapper.get('button').trigger('click');
     await wrapper.setProps({itemId:'two'});
     expect(wrapper.find('.face-roi-selector.editing').exists()).toBe(false);
@@ -30,7 +30,7 @@ describe('FaceRoiSelector', () => {
     await area.trigger('pointerdown',{button:0,clientX:275,clientY:100});
     await area.trigger('pointerup',{clientX:325,clientY:200});
     await wrapper.findAll('button').find(b=>b.text()==='确认主脸')!.trigger('click');
-    expect(wrapper.emitted('confirm')?.[0]).toEqual([{x:.25,y:.25,width:.5,height:.5}]);
+    expect(wrapper.emitted('confirm')?.[0]).toEqual([{x:.25,y:.25,width:.5,height:.5}, 'auto']);
     wrapper.unmount();
   });
   it('supports keyboard adjustment and Escape cancellation without recognizing', async () => {
@@ -67,6 +67,21 @@ describe('FaceRoiSelector', () => {
     expect(wrapper.get('.roi-hint').text()).toContain('拖动框选一张脸');
     expect(wrapper.get('.roi-message.error').text()).toContain('选区内检测到多张脸');
     wrapper.unmount();
+  });
+  it('toggles the whole-face optimization for the submitted frame', async () => {
+    const wrapper=mount(FaceRoiSelector,{props});
+    await wrapper.get('button').trigger('click');
+    await wrapper.findAll('button').find(b=>b.text()==='整脸优化')!.trigger('click');
+    expect(wrapper.emitted('confirm')?.[0]).toEqual([{x:.25,y:.25,width:.5,height:.5}, 'normalized']);
+    wrapper.unmount();
+
+    const forced=mount(FaceRoiSelector,{props:{...props,mode:'normalized'}});
+    await forced.get('button').trigger('click');
+    expect(forced.get('.roi-big-face').classes()).toContain('active');
+    expect(forced.get('.roi-big-face').attributes('aria-pressed')).toBe('true');
+    await forced.findAll('button').find(b=>b.text()==='整脸优化')!.trigger('click');
+    expect(forced.emitted('confirm')?.[0]).toEqual([{x:.25,y:.25,width:.5,height:.5}, 'auto']);
+    forced.unmount();
   });
   it('reports the framing state so a host can enlarge the picture', async () => {
     const wrapper=mount(FaceRoiSelector,{props});

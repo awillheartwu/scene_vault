@@ -403,7 +403,7 @@
   .suggestion-row small { color: var(--muted-foreground); font-size: 10.5px; }
   .suggestion-row.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--card)); box-shadow: var(--glow); }
   .character-row.selected { border-color: var(--capture-accent); background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 18%, var(--card)), color-mix(in srgb, var(--accent) 7%, var(--card))); box-shadow: inset 3px 0 var(--capture-accent), 0 0 16px -6px color-mix(in srgb, var(--accent) 55%, transparent); }
-  .character-row .avatar { display: grid; width: 31px; height: 31px; place-items: center; border-radius: 9px; background: var(--muted); color: var(--muted-foreground); }
+  .character-row .avatar { display: grid; width: 31px; height: 31px; place-items: center; overflow: hidden; border-radius: 9px; background: var(--muted); color: var(--muted-foreground); }
   .character-row strong, .character-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .verification-warning { display: flex; flex-direction: column; gap: 9px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--warn) 12%, var(--card)); }
   .verification-warning p { margin: 0; color: var(--foreground); font-size: 11.5px; line-height: 1.5; }

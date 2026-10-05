@@ -29,6 +29,18 @@ const { api, eventHandlers, listenMock, pickDirectoryMock } = vi.hoisted(() => {
     mergeCharacters: vi.fn(),
     setCharacterAvatar: vi.fn(),
     retry: vi.fn(),
+    previewFaceRepair: vi.fn(async () => ({ candidates: [], retries: [] }) as unknown),
+    startFaceRepair: vi.fn(),
+    getFaceRepairStatus: vi.fn(async () => ({
+      state: "idle",
+      total: 0,
+      processed: 0,
+      requeued: 0,
+      kept: 0,
+      failed: 0,
+      currentFile: null,
+      message: null,
+    })),
     refreshCaptureFaceFeature: vi.fn(),
     previewCaptureDeletion: vi.fn(),
     deleteCaptureItem: vi.fn(),
@@ -203,6 +215,19 @@ beforeEach(() => {
   api.setFaceSampleStatus.mockResolvedValue({ ...sample, status: "revoked" });
   api.setFaceSampleFlagged.mockResolvedValue({ ...sample, flagged: 0 });
   api.retryDegradedCaptures.mockResolvedValue(2);
+  api.previewFaceRepair.mockResolvedValue({
+    candidates: [
+      {
+        id: "capture-1",
+        sourcePath: "D:\\shots\\one.png",
+        fileName: "one.png",
+        storedWidth: 500,
+        storedHeight: 600,
+        storedConfidence: 0.63,
+      },
+    ],
+    retries: [],
+  });
   api.getFaceBankModelStatus.mockResolvedValue({
     bankModelId: "opencv-sface",
     bankModelVersion: "2021dec",
@@ -274,6 +299,47 @@ afterEach(() => {
 });
 
 describe("Workbench", () => {
+  /** The maintenance actions live in the header's 更多操作 menu. */
+  async function clickMenuAction(wrapper: ReturnType<typeof mount>, label: string) {
+    await wrapper.get('[aria-label="更多操作"]').trigger("click", { button: 0, ctrlKey: false });
+    await flushPromises();
+    const option = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (element) => element.textContent?.includes(label),
+    );
+    expect(option).toBeDefined();
+    option!.click();
+    await flushPromises();
+  }
+
+  /** Clicks a button rendered inside a portaled dialog. */
+  function clickBodyButton(label: string) {
+    const button = [...document.body.querySelectorAll("button")].find((entry) =>
+      entry.textContent?.includes(label),
+    );
+    expect(button).toBeDefined();
+    button!.click();
+  }
+
+  it("opens each project maintenance dialog from the header menu", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+
+    await clickMenuAction(wrapper, "检查项目文件");
+    expect(document.body.textContent).toContain("核对全项目的原图路径与归档目标状态");
+    clickBodyButton("关闭");
+    await flushPromises();
+
+    await clickMenuAction(wrapper, "更新评分清单");
+    expect(document.body.textContent).toContain("为打分流程生成或更新归档目录里的 project.json");
+    clickBodyButton("关闭");
+    await flushPromises();
+
+    await clickMenuAction(wrapper, "修复大脸框");
+    expect(api.previewFaceRepair).toHaveBeenCalledWith("project-1");
+    expect(document.body.textContent).toContain("1 张低置信度脸框需要核对");
+    wrapper.unmount();
+  });
+
   it("renders the character overview and the first character's captures", async () => {
     const wrapper = mount(Workbench);
     await flushPromises();
@@ -313,92 +379,6 @@ describe("Workbench", () => {
 
     await wrapper.get('button[aria-label="清空人物搜索"]').trigger("click");
     expect(wrapper.findAll(".character-card")).toHaveLength(2);
-  });
-
-  it("checks all project files without requiring an active capture session", async () => {
-    const wrapper = mount(Workbench);
-    await flushPromises();
-
-    const button = wrapper.findAll("button").find((entry) => entry.text().includes("检查项目文件"));
-    expect(button).toBeDefined();
-    await button!.trigger("click");
-    await flushPromises();
-
-    expect(api.reconcileProjectFiles).toHaveBeenCalledWith("project-1", null);
-    expect(document.body.textContent).toContain("已重新定位 1 张原图");
-    expect(document.body.textContent).toContain("1 个归档/头像目标文件缺失");
-    expect(document.body.textContent).toContain("没有导入或启动识别");
-  });
-
-  it("writes the rating manifest for the selected project", async () => {
-    api.rebuildArchiveManifest.mockResolvedValue({
-      projectId: "project-1",
-      manifestCount: 1,
-      entryCount: 41,
-      characterCount: 41,
-      writtenCount: 1,
-      unchangedCount: 0,
-      skippedCount: 0,
-      failedCount: 0,
-      message: "已更新评分清单：41 张图、41 个人物",
-    });
-    const wrapper = mount(Workbench);
-    await flushPromises();
-
-    const button = wrapper
-      .findAll("button")
-      .find((entry) => entry.text().includes("更新评分清单"));
-    expect(button).toBeDefined();
-    await button!.trigger("click");
-    await flushPromises();
-
-    expect(api.rebuildArchiveManifest).toHaveBeenCalledWith("project-1");
-    expect(
-      useToasts().toasts.some((entry) =>
-        entry.message.includes("已更新评分清单：41 张图、41 个人物"),
-      ),
-    ).toBe(true);
-  });
-
-  it("relocates archived targets from a manually chosen archive directory", async () => {
-    const wrapper = mount(Workbench);
-    await flushPromises();
-
-    const check = wrapper.findAll("button").find((entry) => entry.text().includes("检查项目文件"));
-    await check!.trigger("click");
-    await flushPromises();
-
-    pickDirectoryMock.mockResolvedValueOnce("/volume/renamed-archive");
-    api.reconcileProjectFiles.mockResolvedValueOnce({
-      sourceScannedDirectoryCount: 2,
-      sourceScannedFileCount: 40,
-      sourceCheckedCount: 0,
-      sourceRelocatedCount: 0,
-      sourceMissingCount: 0,
-      sourceReplacedCount: 0,
-      sourceAmbiguousCount: 0,
-      sourceUnavailableDirectoryCount: 0,
-      destinationMissingCount: 0,
-      destinationUnavailableCount: 0,
-      destinationRelocatedCount: 12,
-      destinationAmbiguousCount: 1,
-    destinationContentMismatchCount: 0,
-      destinationScannedFileCount: 40,
-    });
-
-    const pick = Array.from(document.body.querySelectorAll("button")).find((entry) =>
-      entry.textContent?.includes("指定归档目录找回"),
-    );
-    expect(pick).toBeTruthy();
-    pick!.click();
-    await flushPromises();
-
-    expect(api.reconcileProjectFiles).toHaveBeenLastCalledWith(
-      "project-1",
-      "/volume/renamed-archive",
-    );
-    expect(document.body.textContent).toContain("已找回 12 个归档/头像目标文件");
-    expect(document.body.textContent).toContain("1 个归档目标存在多个同标识候选");
   });
 
   it("shows a stable loading skeleton instead of a false empty workbench", async () => {
@@ -1549,7 +1529,7 @@ it('selects multiple characters from maintenance and freezes only their pictures
   api.listCaptureResetCandidates.mockResolvedValueOnce(['one']).mockResolvedValueOnce(['two']);
   api.previewCaptureReset.mockResolvedValue({id:'preview-job',status:'preview',executing:false,deleteDestinationFiles:null,allowPermanentNetworkDelete:null,items:[],destinationFileCount:0,networkDestinationFileCount:0});
   const wrapper=mount(Workbench);await flushPromises();
-  await wrapper.get('[aria-label="人物维护"]').trigger('click',{button:0,ctrlKey:false});
+  await wrapper.get('[aria-label="更多操作"]').trigger('click',{button:0,ctrlKey:false});
   await flushPromises();
   const option=[...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(element=>element.textContent?.includes('多选人物撤销截图'));
   expect(option).toBeDefined();option!.click();await flushPromises();

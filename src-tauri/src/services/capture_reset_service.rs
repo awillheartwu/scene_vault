@@ -907,6 +907,7 @@ async fn clean_and_commit<R: FileRecycler>(
          destination_path = NULL, destination_avatar_path = NULL, destination_file_state = 'none',
          destination_avatar_file_state = 'none', face_box_json = NULL, face_count = NULL,
          face_feature_json = NULL, manual_face_roi_json = NULL, manual_face_roi_ready = 0,
+         face_detection_mode = 'auto',
          suggested_character_id = NULL, recognition_confidence = NULL, recognition_source = NULL,
          review_status = 'none', recognition_deferred = 0, verification_score = NULL,
          verification_status = 'unverified', best_other_score = NULL, best_other_character_id = NULL,

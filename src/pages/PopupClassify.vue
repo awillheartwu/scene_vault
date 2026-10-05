@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { isOlderCapture } from "@/lib/capture-api";
 import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
+import CharacterAvatar from '@/components/character/CharacterAvatar.vue';
 import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
 import { parseFaceBox } from "@/lib/face-box";
 import { describeError } from "@/lib/vision-errors";
@@ -549,7 +550,7 @@ onBeforeUnmount(() => {
 
     <template v-else-if="currentItem">
       <div :class="['popup-preview', { compact: mode === 'person' }]">
-        <FaceRoiSelector inline v-if="mode === 'person' && currentItem && currentItem.status === 'awaiting_label' && currentItem.classification === 'unclassified'" v-model:editing="framing" :item-id="currentItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
+        <FaceRoiSelector inline v-if="mode === 'person' && currentItem && currentItem.status === 'awaiting_label' && currentItem.classification === 'unclassified'" v-model:editing="framing" :item-id="currentItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :mode="currentItem.faceDetectionMode === 'normalized' ? 'normalized' : 'auto'" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
       <img v-else-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
         <div v-else class="popup-preview-empty"><ImageOff :size="28" /><span>无法加载预览</span></div>
       </div>
@@ -648,7 +649,7 @@ onBeforeUnmount(() => {
             :class="{ selected: selectedCharacterId === character.id }"
             :disabled="busy || roiBusy || roiBlocked || roiLoading" @click="submitCharacter(character)"
           >
-            <span class="popup-avatar"><UserRound :size="15" /></span>
+            <span class="popup-avatar"><CharacterAvatar :character="character" /></span>
             <span class="popup-character-name">{{ character.name }}</span>
             <kbd v-if="index < 5">{{ index + 1 }}</kbd>
             <Check v-if="selectedCharacterId === character.id" :size="15" />
@@ -1261,6 +1262,7 @@ onBeforeUnmount(() => {
   width: 28px;
   height: 28px;
   place-items: center;
+  overflow: hidden;
   border-radius: 8px;
   background: var(--muted);
   color: var(--muted-foreground);

@@ -31,10 +31,15 @@ _PAYLOAD_FIELDS = frozenset(
         "crop",
         "roi",
         "faceRoi",
+        "bigFace",
     }
 )
 _ROI_FIELDS = frozenset({"expandRatio", "multipleFaces"})
 _ROI_MULTIPLE_FACES = ("error", "largest", "sharpest")
+_BIG_FACE_FIELDS = frozenset({"mode", "minImageSide", "minFaceSize"})
+_BIG_FACE_MODES = ("auto", "normalized", "off")
+_BIG_FACE_DEFAULT_MIN_IMAGE_SIDE = 1600
+_BIG_FACE_DEFAULT_MIN_FACE_SIZE = 600
 _DETECTION_FIELDS = frozenset(
     {
         "scoreThreshold",
@@ -137,6 +142,27 @@ class RoiPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class BigFacePolicy:
+    """How detection handles close-up faces that a native-resolution pass
+    splits into several partial boxes.
+
+    ``off`` keeps the historical single native pass; ``auto`` additionally
+    detects on a downscaled copy of large images and adopts that result only
+    when it is clearly the more complete face; ``normalized`` always uses the
+    downscaled pass."""
+
+    mode: str = "off"
+    min_image_side: int = _BIG_FACE_DEFAULT_MIN_IMAGE_SIDE
+    min_face_size: int = _BIG_FACE_DEFAULT_MIN_FACE_SIZE
+    # Target long side of the downscaled detection copy.
+    target_side: int = 512
+    # The scaled result must be at least this much larger (area) than the
+    # native best face and must not lose more than this much confidence.
+    area_ratio: float = 1.5
+    confidence_margin: float = 0.05
+
+
+@dataclass(frozen=True, slots=True)
 class FaceRoi:
     """Manual selection in normalized image coordinates, not a detected box."""
 
@@ -181,6 +207,7 @@ class ProcessingRequest:
     arcface_model_path: Path | None = None
     face_roi: FaceRoi | None = None
     roi_policy: RoiPolicy = RoiPolicy()
+    big_face_policy: BigFacePolicy = BigFacePolicy()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ProcessingRequest":
@@ -456,6 +483,7 @@ class ProcessingRequest:
             ),
             multiple_faces=_roi_multiple_faces(roi_payload.get("multipleFaces")),
         )
+        big_face_policy = _big_face_policy(payload.get("bigFace"))
 
         output_paths = [
             path
@@ -483,6 +511,7 @@ class ProcessingRequest:
         return cls(
             face_roi=face_roi,
             roi_policy=roi_policy,
+            big_face_policy=big_face_policy,
             input_path=input_path,
             annotated_output_path=annotated_output_path,
             avatar_output_path=avatar_output_path,
@@ -598,6 +627,39 @@ def _roi_multiple_faces(value: object) -> str:
             "roi.multipleFaces",
         )
     return value
+
+
+def _big_face_policy(value: object) -> BigFacePolicy:
+    """Parses the optional bigFace group; a missing group keeps ``off`` so
+    callers that predate the group see exactly the historical behaviour."""
+    if value is None:
+        return BigFacePolicy()
+    if not isinstance(value, dict):
+        raise _invalid("bigFace must be an object", "bigFace")
+    _reject_unknown_fields(value, _BIG_FACE_FIELDS, "bigFace")
+    mode = value.get("mode", "auto")
+    if not isinstance(mode, str) or mode not in _BIG_FACE_MODES:
+        raise InvalidPayloadError(
+            f"mode must be one of {', '.join(_BIG_FACE_MODES)}",
+            details={"field": "bigFace.mode", "allowed": list(_BIG_FACE_MODES)},
+        )
+    return BigFacePolicy(
+        mode=mode,
+        min_image_side=_integer(
+            value,
+            "minImageSide",
+            _BIG_FACE_DEFAULT_MIN_IMAGE_SIDE,
+            minimum=0,
+            maximum=16_384,
+        ),
+        min_face_size=_integer(
+            value,
+            "minFaceSize",
+            _BIG_FACE_DEFAULT_MIN_FACE_SIZE,
+            minimum=0,
+            maximum=8_192,
+        ),
+    )
 
 
 def _color(value: object, default: tuple[int, int, int]) -> tuple[int, int, int]:

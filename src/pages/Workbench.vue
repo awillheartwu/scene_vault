@@ -27,6 +27,9 @@ import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
 import CaptureResetActions from "@/components/capture/CaptureResetActions.vue";
+import ProjectFileCheckDialog from "@/components/project/ProjectFileCheckDialog.vue";
+import ArchiveManifestDialog from "@/components/project/ArchiveManifestDialog.vue";
+import CaptureFaceRepairDialog from "@/components/capture/CaptureFaceRepairDialog.vue";
 import {
   captureFileIssues,
   captureVariantReadReason,
@@ -42,6 +45,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -54,7 +58,6 @@ import {
   captureApi,
   captureStatusLabel,
   pathFileName,
-  pickDirectory,
   revealPath,
   type CaptureItem,
   type Character,
@@ -62,7 +65,6 @@ import {
   type FaceBankModelStatus,
   type FaceSample,
   type Project,
-  type ProjectFileReconcileResult,
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
 import { describeError } from "@/lib/vision-errors";
@@ -91,6 +93,9 @@ const selectedItemId = ref<string | null>(cachedWorkbench?.selectedItemId ?? nul
 const previewVariant = ref<"source" | "annotated" | "avatar" | "destination">("source");
 const loading = ref(!cachedWorkbench);
 const busy = ref(false);
+const fileCheckOpen = ref(false);
+const manifestOpen = ref(false);
+const faceRepairOpen = ref(false);
 const renameOpen = ref(false);
 const renameName = ref("");
 const renameBusy = ref(false);
@@ -98,9 +103,6 @@ const mergeOpen = ref(false);
 const deleteItemTarget = ref<CaptureItem | null>(null);
 const deleteCharacterTarget = ref<CharacterSummary | null>(null);
 const characterSearch = ref("");
-const projectReconcileBusy = ref(false);
-const archiveManifestBusy = ref(false);
-const projectReconcileResult = ref<ProjectFileReconcileResult | null>(null);
 const detailOpen = ref(false);
 const mergeButton = ref<HTMLButtonElement | null>(null);
 let purgeReloadTimer: number | null = null;
@@ -551,45 +553,6 @@ function suggestionEmptyReason(item: CaptureItem): string {
 
 function normalizeError(error: unknown): string {
   return describeError(error);
-}
-
-async function runProjectFileReconcile(archiveSearchDirectory: string | null = null) {
-  if (!projectId.value || projectReconcileBusy.value) return;
-  projectReconcileBusy.value = true;
-  try {
-    projectReconcileResult.value = await captureApi.reconcileProjectFiles(
-      projectId.value,
-      archiveSearchDirectory,
-    );
-    await loadCharacterData({ manageLoading: false });
-  } catch (error) {
-    toast.error(normalizeError(error));
-  } finally {
-    projectReconcileBusy.value = false;
-  }
-}
-
-async function relocateFromPickedArchiveDirectory() {
-  const directory = await pickDirectory();
-  if (!directory) return;
-  await runProjectFileReconcile(directory);
-}
-
-async function rebuildArchiveManifest() {
-  if (!projectId.value || archiveManifestBusy.value) return;
-  archiveManifestBusy.value = true;
-  try {
-    const result = await captureApi.rebuildArchiveManifest(projectId.value);
-    if (result.failedCount > 0) {
-      toast.error(result.message);
-    } else {
-      toast.success(result.message);
-    }
-  } catch (error) {
-    toast.error(normalizeError(error));
-  } finally {
-    archiveManifestBusy.value = false;
-  }
 }
 
 function thumbnailItem(id: string): CaptureItem {
@@ -1119,7 +1082,6 @@ watch(projectId, async () => {
   modelStatus.value = null;
   selectedItemId.value = null;
   characterSearch.value = "";
-  projectReconcileResult.value = null;
   selectedCharacterId.value = projectId.value
     ? localStorage.getItem(`scene-vault.workbench.character.${projectId.value}`)
     : null;
@@ -1237,26 +1199,6 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </label>
-        <button
-          type="button"
-          class="secondary-action"
-          :disabled="loading || projectReconcileBusy || !projectId"
-          title="检查整个项目的原图路径和归档目标；不会导入或识别新文件"
-          @click="runProjectFileReconcile()"
-        >
-          <Search :size="17" :class="{ 'animate-spin': projectReconcileBusy }" />
-          {{ projectReconcileBusy ? "检查中…" : "检查项目文件" }}
-        </button>
-        <button
-          type="button"
-          class="secondary-action"
-          :disabled="loading || archiveManifestBusy || !projectId"
-          title="为评分流程生成或更新人物与图片对应清单（project.json），不会改动归档文件"
-          @click="rebuildArchiveManifest"
-        >
-          <Archive :size="17" :class="{ 'animate-spin': archiveManifestBusy }" />
-          {{ archiveManifestBusy ? "写入中…" : "更新评分清单" }}
-        </button>
         <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData()">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
         </button>
@@ -1275,13 +1217,36 @@ onBeforeUnmount(() => {
         />
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
-            <button type="button" class="icon-action" aria-label="人物维护" title="人物维护">
+            <button type="button" class="icon-action" aria-label="更多操作" title="更多操作">
               <MoreHorizontal :size="18" aria-hidden="true" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="workbench-maintenance-menu">
+            <DropdownMenuItem
+              title="检查整个项目的原图路径和归档目标；不会导入或识别新文件"
+              :disabled="loading || !projectId"
+              @select="fileCheckOpen = true"
+            >
+              <Search :size="15" />检查项目文件
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              title="为评分流程生成或更新人物与图片对应清单（project.json），不会改动归档文件"
+              :disabled="loading || !projectId"
+              @select="manifestOpen = true"
+            >
+              <Archive :size="15" />更新评分清单
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              title="核对历史遗留的碎片/半脸框：确认受影响的截图会自动重新处理并替换归档"
+              :disabled="loading || !projectId"
+              @select="faceRepairOpen = true"
+            >
+              <Sparkles :size="15" />修复大脸框
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem :disabled="!resetSelectableIds.length || resetCharacterSelecting" @select="resetActions?.startSelection()"><RotateCcw :size="15" />选择图片撤销分类…</DropdownMenuItem>
             <DropdownMenuItem :disabled="!summaries.some(character => character.captureCount > 0) || resetCollecting" @select="startCharacterSelection"><Users :size="15" />多选人物撤销截图…</DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               title="重新提取特征，保留截图当前角色绑定，并按当前匹配参数刷新待分类建议"
               :disabled="busy || !projectId"
@@ -1935,77 +1900,25 @@ onBeforeUnmount(() => {
       @close="deleteCharacterTarget = null"
       @deleted="onCharacterDeleted"
     />
-    <Dialog
-      :open="projectReconcileResult !== null"
-      @update:open="!$event && (projectReconcileResult = null)"
-    >
-      <DialogContent
-        v-if="projectReconcileResult"
-        class="rename-dialog project-reconcile-dialog"
-        :show-close-button="false"
-        aria-label="项目文件检查结果"
-      >
-        <span class="eyebrow">项目维护</span>
-        <DialogTitle>项目文件检查完成</DialogTitle>
-        <DialogDescription>
-          已检查 {{ projectReconcileResult.sourceCheckedCount }} 条截图记录，扫描
-          {{ projectReconcileResult.sourceScannedDirectoryCount }} 个来源目录中的
-          {{ projectReconcileResult.sourceScannedFileCount }} 张图片。没有导入或启动识别。
-        </DialogDescription>
-        <ul class="project-reconcile-list">
-          <li v-if="projectReconcileResult.sourceRelocatedCount">
-            已重新定位 {{ projectReconcileResult.sourceRelocatedCount }} 张原图，并保留人物、分类、归档和人脸数据
-          </li>
-          <li v-if="projectReconcileResult.sourceMissingCount">
-            {{ projectReconcileResult.sourceMissingCount }} 张原图缺失
-          </li>
-          <li v-if="projectReconcileResult.sourceReplacedCount">
-            {{ projectReconcileResult.sourceReplacedCount }} 张原图路径已出现不同内容
-          </li>
-          <li v-if="projectReconcileResult.sourceAmbiguousCount">
-            {{ projectReconcileResult.sourceAmbiguousCount }} 张原图存在多个同名同内容候选，未自动重定位
-          </li>
-          <li v-if="projectReconcileResult.destinationMissingCount">
-            {{ projectReconcileResult.destinationMissingCount }} 个归档/头像目标文件缺失
-          </li>
-          <li v-if="projectReconcileResult.destinationUnavailableCount">
-            {{ projectReconcileResult.destinationUnavailableCount }} 个归档/头像目标当前不可访问
-          </li>
-          <li v-if="projectReconcileResult.destinationRelocatedCount">
-            已找回 {{ projectReconcileResult.destinationRelocatedCount }} 个归档/头像目标文件；文件仍在原位置，只更新数据库指向
-          </li>
-          <li v-if="projectReconcileResult.destinationAmbiguousCount" class="reconcile-warning">
-            {{ projectReconcileResult.destinationAmbiguousCount }} 个归档目标存在多个同标识候选，未自动改写
-          </li>
-          <li v-if="projectReconcileResult.destinationContentMismatchCount" class="reconcile-warning">
-            {{ projectReconcileResult.destinationContentMismatchCount }} 个归档目标存在同标识但内容不同的文件，未改写
-          </li>
-          <li v-if="projectReconcileResult.sourceUnavailableDirectoryCount" class="reconcile-warning">
-            {{ projectReconcileResult.sourceUnavailableDirectoryCount }} 个来源目录不可访问；为避免误判，未批量改写其缺失状态
-          </li>
-          <li
-            v-if="!projectReconcileResult.sourceRelocatedCount && !projectReconcileResult.sourceMissingCount && !projectReconcileResult.sourceReplacedCount && !projectReconcileResult.sourceAmbiguousCount && !projectReconcileResult.destinationMissingCount && !projectReconcileResult.destinationUnavailableCount && !projectReconcileResult.destinationRelocatedCount && !projectReconcileResult.destinationAmbiguousCount && !projectReconcileResult.destinationContentMismatchCount && !projectReconcileResult.sourceUnavailableDirectoryCount"
-          >
-            所有已登记文件状态正常
-          </li>
-        </ul>
-        <div class="rename-actions">
-          <button
-            v-if="projectReconcileResult.destinationMissingCount || projectReconcileResult.destinationRelocatedCount"
-            type="button"
-            class="secondary-action"
-            :disabled="projectReconcileBusy"
-            title="归档目录被改名或搬迁后，指定要搜索的目录，再按归档标识找回"
-            @click="relocateFromPickedArchiveDirectory"
-          >
-            指定归档目录找回…
-          </button>
-          <button type="button" class="primary-action" @click="projectReconcileResult = null">完成</button>
-        </div>
-      </DialogContent>
-    </Dialog>
     <ContextMenu :menu="characterMenu" />
     <ContextMenu :menu="itemMenu" />
+    <ProjectFileCheckDialog
+      v-if="fileCheckOpen && projectId"
+      :project-id="projectId"
+      @close="fileCheckOpen = false"
+      @updated="loadCharacterData({ manageLoading: false })"
+    />
+    <ArchiveManifestDialog
+      v-if="manifestOpen && projectId"
+      :project-id="projectId"
+      @close="manifestOpen = false"
+    />
+    <CaptureFaceRepairDialog
+      v-if="faceRepairOpen && projectId"
+      :project-id="projectId"
+      @close="faceRepairOpen = false"
+      @updated="loadCharacterData({ manageLoading: false })"
+    />
   </section>
 </template>
 
@@ -2047,23 +1960,6 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-}
-
-.project-reconcile-dialog {
-  max-width: 540px;
-}
-
-.project-reconcile-list {
-  display: grid;
-  gap: 8px;
-  margin: 16px 0;
-  padding-left: 20px;
-  color: var(--foreground);
-  font-size: 13px;
-}
-
-.project-reconcile-list .reconcile-warning {
-  color: var(--warn);
 }
 
 .workbench-cell-meta .file-state-chip {

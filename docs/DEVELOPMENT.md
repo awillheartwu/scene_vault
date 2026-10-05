@@ -63,7 +63,8 @@ python -m scene_vault_ai health
 错误码、测试和 Sidecar 入口由 [python/README.md](../python/README.md) 维护。
 通用设置中的“限制图片处理时的核心数”会通过
 `SCENE_VAULT_IMAGE_PROCESSING_THREADS` 传给 Python/Sidecar，并同步设置 OpenCV、OMP、
-OpenBLAS 和 MKL 的线程上限；截图处理队列和缩略图生成仍保持串行。
+OpenBLAS 和 MKL 的线程上限；截图处理队列仍保持串行，缩略图生成按同一设置限制在
+1–4 路并发（每次解码占用数 MB 到数十 MB 缓冲，避免一屏占位图同时解码打满内存）。
 
 ## Windows 一键配置
 

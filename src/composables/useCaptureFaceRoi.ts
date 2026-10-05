@@ -37,7 +37,7 @@ export function useCaptureFaceRoi(item: Readonly<Ref<CaptureItem | null>>, updat
     if (!current.manualFaceRoiJson || current.manualFaceRoiReady === 1) failedIds.value.delete(current.id);
     revision.value++;
   });
-  async function save(value: FaceRoi | null) {
+  async function save(value: FaceRoi | null, mode?: "auto" | "normalized") {
     const id = item.value?.id;
     if (!id || pending.value.has(id) || loading.value) return;
     revision.value++;
@@ -45,11 +45,11 @@ export function useCaptureFaceRoi(item: Readonly<Ref<CaptureItem | null>>, updat
     roi.value = value;
     const request = generation;
     const original = item.value!;
-    update({ ...original, suggestedCharacterId: null, recognitionConfidence: null, recognitionSource: null, reviewStatus: 'none' });
+    update({ ...original, faceDetectionMode: mode ?? original.faceDetectionMode, suggestedCharacterId: null, recognitionConfidence: null, recognitionSource: null, reviewStatus: 'none' });
     pending.value.add(id);
     error.value = '';
     try {
-      const updated = await captureApi.setCaptureFaceRoi(id, value);
+      const updated = await captureApi.setCaptureFaceRoi(id, value, mode);
       failedIds.value.delete(id);
       if (!disposed && request === generation && item.value?.id === id) {
         roi.value = value;

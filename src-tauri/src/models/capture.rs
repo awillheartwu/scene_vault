@@ -90,7 +90,8 @@ pub struct CaptureItem {
     pub processing_version: i64,
     pub manual_face_roi_json: Option<String>,
     pub manual_face_roi_ready: i64,
-
+    /// Per-capture big-face override: `auto` or `normalized` (整脸优化).
+    pub face_detection_mode: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,7 +427,7 @@ pub struct CaptureHistoryEntry {
     pub processing_version: i64,
     pub manual_face_roi_json: Option<String>,
     pub manual_face_roi_ready: i64,
-
+    pub face_detection_mode: String,
 }
 
 /// A page of history entries plus the total number of matching records, so
@@ -445,5 +446,5 @@ pub struct ClassifyPopupContext {
     pub items: Vec<CaptureItem>,
     pub project_id: Option<String>,
     pub project_name: Option<String>,
-    pub characters: Vec<crate::models::character::Character>,
+    pub characters: Vec<crate::models::character::CharacterListEntry>,
 }

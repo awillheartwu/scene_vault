@@ -254,11 +254,9 @@ pub fn run() {
             // A reset job lives in memory only, so a killed process leaves its
             // claims behind. Release them here; otherwise those pictures would
             // stay locked out of labeling and recognition forever.
-            if let Err(error) =
-                tauri::async_runtime::block_on(services::capture_reset_service::recover_interrupted(
-                    &pool,
-                ))
-            {
+            if let Err(error) = tauri::async_runtime::block_on(
+                services::capture_reset_service::recover_interrupted(&pool),
+            ) {
                 services::log_service::error(
                     "capture.reset",
                     format!("could not release interrupted reset claims: {error}"),
@@ -292,6 +290,9 @@ pub fn run() {
                 services::thumbnail_service::enforce_cache_limit(
                     &services::thumbnail_service::thumbnail_cache_dir(&cache_root),
                     (app_settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024),
+                );
+                services::thumbnail_service::set_processing_parallelism(
+                    app_settings.image_processing_core_limit,
                 );
             }
             {
@@ -359,6 +360,9 @@ pub fn run() {
             commands::capture_edit::discard_capture_reset,
             commands::capture_edit::get_capture_face_roi,
             commands::capture_edit::set_capture_face_roi,
+            commands::capture_edit::preview_face_repair,
+            commands::capture_edit::start_face_repair,
+            commands::capture_edit::get_face_repair_status,
             commands::capture_edit::list_project_pending_captures,
             commands::capture::start_capture_session,
             commands::capture::list_capture_sessions,

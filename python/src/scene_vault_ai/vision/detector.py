@@ -6,7 +6,7 @@ import math
 from typing import Any, Protocol
 
 from ..errors import DetectionError, ResourceNotFoundError
-from .config import YuNetConfig
+from .config import BigFacePolicy, YuNetConfig
 from .types import FaceBox
 
 
@@ -107,7 +107,7 @@ class YuNetFaceDetector:
         try:
             gray = self._cv2.cvtColor(image_bgr, self._cv2.COLOR_BGR2GRAY)
             sharpness_values = [
-                _face_sharpness(gray, face, self._cv2) for face in candidates
+                compute_face_sharpness(gray, face, self._cv2) for face in candidates
             ]
         except Exception as error:
             raise DetectionError(
@@ -223,6 +223,68 @@ def _resolve_yunet_factory(cv2: Any) -> Any | None:
     return legacy_factory if callable(legacy_factory) else None
 
 
+def map_scaled_faces(
+    faces: list[FaceBox],
+    *,
+    scale: float,
+    image_width: int,
+    image_height: int,
+) -> list[FaceBox]:
+    """Maps faces detected on a downscaled copy back to original coordinates.
+
+    The five landmarks are scaled with the box, and every box is re-clamped to
+    the original image so rounding can never push it past the edge."""
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("scale must be a positive finite number")
+    inverse = 1.0 / scale
+    mapped: list[FaceBox] = []
+    for face in faces:
+        landmarks = (
+            tuple((x * inverse, y * inverse) for x, y in face.landmarks)
+            if face.landmarks is not None
+            else None
+        )
+        clamped = _clamp_face(
+            x=face.x * inverse,
+            y=face.y * inverse,
+            width=face.width * inverse,
+            height=face.height * inverse,
+            confidence=face.confidence,
+            landmarks=landmarks,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        if clamped is not None:
+            mapped.append(clamped)
+    return mapped
+
+
+def prefer_scaled_faces(
+    native_faces: list[FaceBox],
+    scaled_faces: list[FaceBox],
+    policy: BigFacePolicy,
+) -> bool:
+    """True when the downscaled pass clearly found the more complete face.
+
+    An empty scaled result never wins; an empty native result always defers to
+    the scaled one. Otherwise the scaled best face must reach the configured
+    minimum size, cover at least ``area_ratio`` times the native best area and
+    keep at least the native confidence minus ``confidence_margin``."""
+    if not scaled_faces:
+        return False
+    if not native_faces:
+        return True
+    native_best = max(native_faces, key=lambda face: face.area)
+    scaled_best = max(scaled_faces, key=lambda face: face.area)
+    if min(scaled_best.width, scaled_best.height) < policy.min_face_size:
+        return False
+    if scaled_best.area < policy.area_ratio * native_best.area:
+        return False
+    if scaled_best.confidence < native_best.confidence - policy.confidence_margin:
+        return False
+    return True
+
+
 def _clamp_face(
     *,
     x: float,
@@ -255,7 +317,10 @@ def _clamp_face(
     )
 
 
-def _face_sharpness(gray: Any, face: FaceBox, cv2: Any) -> float:
+def compute_face_sharpness(gray: Any, face: FaceBox, cv2: Any) -> float:
+    """Variance of the Laplacian inside the face box; used for ranking and
+    for the sharpest/clearest policies. Callers passing a mapped-back box must
+    score it against the original (not the downscaled) grayscale image."""
     right = min(gray.shape[1], face.x + face.width)
     bottom = min(gray.shape[0], face.y + face.height)
     roi = gray[face.y:bottom, face.x:right]

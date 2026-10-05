@@ -12,6 +12,25 @@ pub struct Character {
     pub updated_at: String,
 }
 
+/// Character list row for the classification pickers: the character fields
+/// plus the captures that can supply its small avatar.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterListEntry {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub aliases_json: String,
+    pub avatar_asset_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Capture behind the explicitly chosen representative avatar; null when
+    /// there is no representative asset or it has no readable avatar crop.
+    pub avatar_capture_item_id: Option<String>,
+    /// Newest person capture of this character; used as the avatar fallback.
+    pub latest_capture_item_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCharacterInput {

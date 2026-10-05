@@ -16,7 +16,6 @@ use crate::{
         RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput, SessionSourceDirectory,
         StartCaptureSessionInput, StartCaptureSessionResult, UnimportedCapture,
     },
-    models::character::Character,
 };
 
 #[derive(Debug)]
@@ -274,7 +273,7 @@ pub async fn list_project_recent_items(
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready, item.face_detection_mode
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         -- The strip shows the active session's captures plus every capture
@@ -482,7 +481,7 @@ pub async fn list_items(pool: &SqlitePool, session_id: &str) -> Result<Vec<Captu
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE session_id = ?
         ORDER BY captured_at DESC, created_at DESC, id DESC
@@ -528,7 +527,7 @@ pub async fn list_items_paged(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE session_id = ?
         ORDER BY captured_at DESC, created_at DESC, id DESC
@@ -587,7 +586,7 @@ pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupCo
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready, item.face_detection_mode
         FROM capture_items item
         WHERE item.status = 'awaiting_label' AND item.operation_owner IS NULL
           AND item.project_id = ?
@@ -599,17 +598,37 @@ pub async fn classify_popup_context(pool: &SqlitePool) -> Result<ClassifyPopupCo
     .fetch_all(pool)
     .await?;
 
-    let characters: Vec<Character> = sqlx::query_as::<_, Character>(
-        r#"
-            SELECT id, project_id, name, aliases_json, avatar_asset_id, created_at, updated_at
-            FROM characters
-            WHERE project_id = ?
-            ORDER BY name COLLATE NOCASE ASC
+    let characters: Vec<crate::models::character::CharacterListEntry> =
+        sqlx::query_as::<_, crate::models::character::CharacterListEntry>(
+            r#"
+            SELECT
+                character.id, character.project_id, character.name, character.aliases_json,
+                character.avatar_asset_id, character.created_at, character.updated_at,
+                (
+                    SELECT representative.id
+                    FROM capture_items representative
+                    WHERE representative.asset_id = character.avatar_asset_id
+                      AND representative.classification = 'person'
+                      AND representative.avatar_path IS NOT NULL
+                    ORDER BY representative.captured_at DESC, representative.created_at DESC
+                    LIMIT 1
+                ) AS avatar_capture_item_id,
+                (
+                    SELECT latest.id
+                    FROM capture_items latest
+                    WHERE latest.character_id = character.id
+                      AND latest.classification = 'person'
+                    ORDER BY latest.captured_at DESC, latest.created_at DESC
+                    LIMIT 1
+                ) AS latest_capture_item_id
+            FROM characters character
+            WHERE character.project_id = ?
+            ORDER BY character.name COLLATE NOCASE ASC
             "#,
-    )
-    .bind(&project_id)
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(&project_id)
+        .fetch_all(pool)
+        .await?;
 
     Ok(ClassifyPopupContext {
         items,
@@ -709,7 +728,7 @@ pub async fn list_history(
             item.destination_file_state,
             item.file_size, item.modified_at_ms, item.content_hash, item.face_count,
             item.created_at, item.updated_at,
-            item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
+            item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready, item.face_detection_mode
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         JOIN projects project ON project.id = session.project_id
@@ -786,7 +805,11 @@ pub async fn label_capture(
     }
     if classification == "person" {
         let invalid_roi: bool = sqlx::query_scalar("SELECT manual_face_roi_json IS NOT NULL AND manual_face_roi_ready=0 FROM capture_items WHERE id=?").bind(capture_item_id).fetch_one(pool).await?;
-        if invalid_roi { return Err(AppError::Conflict("选区尚未识别成功，请重新框选或恢复自动选脸后再分类".to_owned())); }
+        if invalid_roi {
+            return Err(AppError::Conflict(
+                "选区尚未识别成功，请重新框选或恢复自动选脸后再分类".to_owned(),
+            ));
+        }
     }
     let character_id = if classification == "person" {
         let raw = input.character_id.as_deref().ok_or_else(|| {
@@ -848,7 +871,7 @@ pub async fn label_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(character_id.clone())
@@ -1077,7 +1100,7 @@ async fn relabel_pending_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(character_id)
@@ -1107,6 +1130,11 @@ async fn relabel_completed_capture(
     classification: &str,
     expected_suggested_character_id: Option<&str>,
 ) -> Result<CaptureItem, AppError> {
+    let previous = get_item(pool, capture_item_id).await?;
+    if previous.status == "completed" {
+        super::capture_archive_service::verify_legacy_outputs_before_reprocessing(pool, &previous)
+            .await?;
+    }
     let mut transaction = pool.begin().await?;
     let item = sqlx::query_as::<_, CaptureItem>(
         r#"
@@ -1115,6 +1143,7 @@ async fn relabel_completed_capture(
             character_id = ?,
             classification = ?,
             status = 'queued',
+            processing_version = processing_version + 1,
             annotated_path = NULL,
             avatar_path = NULL,
             face_box_json = NULL,
@@ -1147,7 +1176,7 @@ async fn relabel_completed_capture(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(character_id)
@@ -1165,6 +1194,37 @@ async fn relabel_completed_capture(
     clear_private_project_cover_tx(&mut transaction, capture_item_id, classification).await?;
     transaction.commit().await?;
     Ok(item)
+}
+
+/// Re-queues a completed capture for a full reprocessing pass without changing
+/// its character or classification. The big-face repair uses this once the
+/// stored box has been confirmed to be a fragment: annotation, avatar and
+/// archive data are regenerated, while the previous archive paths stay on the
+/// row so the old files are removed only after the replacement archive
+/// succeeds.
+pub async fn requeue_completed_capture(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+) -> Result<CaptureItem, AppError> {
+    let capture_item_id = required(capture_item_id, "capture item id")?;
+    let _operation = super::capture_operation_service::lock(pool, capture_item_id).await;
+    super::capture_operation_service::ensure_available(pool, capture_item_id).await?;
+    let current = get_item(pool, capture_item_id).await?;
+    if current.status != "completed" {
+        return Err(AppError::Conflict(
+            "only completed captures can be re-queued for reprocessing".to_owned(),
+        ));
+    }
+    validate_source_identity(pool, &current).await?;
+    let character_id = current.character_id.clone();
+    relabel_completed_capture(
+        pool,
+        capture_item_id,
+        &character_id,
+        &current.classification,
+        None,
+    )
+    .await
 }
 
 /// Private captures are hidden from Home by default, so changing a pinned
@@ -1319,7 +1379,7 @@ pub async fn complete_processing(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(annotated_path)
@@ -1367,7 +1427,7 @@ pub(crate) async fn complete_processing_without_engine(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(warnings_json)
@@ -1401,7 +1461,7 @@ pub async fn mark_failed(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(error_message)
@@ -1473,7 +1533,7 @@ pub async fn retry_capture(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
             "#,
         )
         .bind(capture_item_id)
@@ -1502,7 +1562,7 @@ pub async fn retry_capture(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
             "#,
         )
         .bind(next_status)
@@ -1605,7 +1665,7 @@ fn category_page_query(filter: &str, paged: bool) -> String {
             item.next_retry_at, item.processing_warnings_json,
             item.captured_at, item.processed_at, item.archived_at,
             item.created_at, item.updated_at, item.source_file_state,
-            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready
+            item.destination_file_state, item.destination_avatar_file_state, item.processing_version, item.manual_face_roi_json, item.manual_face_roi_ready, item.face_detection_mode
         FROM capture_items item
         JOIN capture_sessions session ON session.id = item.session_id
         WHERE session.project_id = ? AND {filter}
@@ -1922,7 +1982,7 @@ pub(crate) async fn get_item(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE id = ?
         "#,
@@ -1964,7 +2024,7 @@ pub(crate) async fn claim_next_queued(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(skip_person)
@@ -1988,7 +2048,7 @@ pub(crate) async fn peek_next_queued(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE status = 'queued' AND operation_owner IS NULL
           AND (? = 0 OR classification != 'person')
@@ -2017,7 +2077,7 @@ pub(crate) async fn next_awaiting_label_without_feature(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE status = 'awaiting_label'
           AND recognition_deferred = 0
@@ -2149,7 +2209,7 @@ pub(crate) async fn mark_archive_pending_from_processing(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(capture_item_id)
@@ -2171,7 +2231,7 @@ pub(crate) async fn next_archive_pending(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE status = 'archive_pending'
           AND (next_retry_at IS NULL OR next_retry_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -2218,7 +2278,7 @@ pub(crate) async fn schedule_archive_retry(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(status)
@@ -2283,7 +2343,7 @@ pub(crate) async fn register_discovered_path(
                 suggested_character_id, recognition_confidence, recognition_source,
                 review_status, error_message,
                 failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+                captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
             FROM capture_items
             WHERE id = ?
             "#,
@@ -2327,7 +2387,7 @@ pub(crate) async fn register_discovered_path(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         FROM capture_items
         WHERE project_id = ? AND content_hash = ?
         "#,
@@ -2444,7 +2504,7 @@ pub(crate) async fn set_archive_pending_for_retry(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(capture_item_id)
@@ -2565,7 +2625,7 @@ async fn transition_item(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(to)

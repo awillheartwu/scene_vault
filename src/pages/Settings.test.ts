@@ -141,6 +141,11 @@ const processingSettings = {
     expandRatio: null,
     multipleFaces: null,
   },
+  bigFace: {
+    enabled: null,
+    minImageSide: null,
+    minFaceSize: null,
+  },
   annotatePerson: true,
 };
 
@@ -455,6 +460,7 @@ describe("Settings processing hierarchy", () => {
       "02文字标注",
       "03头像裁剪",
       "04主脸框选",
+      "05特写整脸优化",
     ]);
 
     await page.get("#face-box-expansion").setValue("48");
@@ -543,6 +549,35 @@ describe("Settings primary-face framing", () => {
     await flushPromises();
     expect(api.updateProcessingSettings).toHaveBeenLastCalledWith(
       expect.objectContaining({ roi: null }),
+    );
+  });
+});
+
+describe("Settings close-up whole-face optimization", () => {
+  it("saves the big-face thresholds and can reset the group", async () => {
+    const page = mountSettings();
+    await flushPromises();
+
+    await page.get("#settings-tab-processing").trigger("click");
+    expect((page.get("#big-face-min-image-side").element as HTMLInputElement).placeholder).toBe("1600");
+    await page.get("#big-face-enabled").setValue(false);
+    await page.get("#big-face-min-image-side").setValue("2048");
+    await page.get("#big-face-min-face-size").setValue("700");
+    await page.get("#settings-pane-processing form").trigger("submit");
+    await flushPromises();
+
+    expect(api.updateProcessingSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bigFace: { enabled: false, minImageSide: 2048, minFaceSize: 700 },
+      }),
+    );
+
+    // 恢复默认 puts the group back to "use the engine default".
+    await page.findAll("#settings-pane-processing .clear-field")[4].trigger("click");
+    await page.get("#settings-pane-processing form").trigger("submit");
+    await flushPromises();
+    expect(api.updateProcessingSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ bigFace: null }),
     );
   });
 });

@@ -21,4 +21,13 @@ describe('useCaptureFaceRoi',()=>{
   api.setCaptureFaceRoi.mockRejectedValue(new Error('engine unavailable'));
   await state.save(null);expect(state.blocked.value).toBe(false);wrapper.unmount();
  });
+ it('passes the detection mode through to the API',async()=>{
+  const selected=ref<CaptureItem|null>(item('a'));const update=vi.fn();let state!:ReturnType<typeof useCaptureFaceRoi>;
+  const wrapper=mount(defineComponent({setup(){state=useCaptureFaceRoi(selected,update);return()=>null;}}));await flushPromises();
+  api.setCaptureFaceRoi.mockResolvedValue({...item('a'),faceDetectionMode:'normalized'});
+  await state.save({x:0,y:0,width:.5,height:.5},'normalized');
+  expect(api.setCaptureFaceRoi).toHaveBeenCalledWith('a',{x:0,y:0,width:.5,height:.5},'normalized');
+  expect(update).toHaveBeenCalledWith(expect.objectContaining({faceDetectionMode:'normalized'}));
+  wrapper.unmount();
+ });
 });

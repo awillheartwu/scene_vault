@@ -181,6 +181,33 @@ python\.venv\Scripts\python.exe python\tools\benchmark_worker.py `
 两个字段都可省略，未知字段、越界比例或未知策略返回 `invalid_payload`。不传 `roi`
 时行为与之前完全一致。
 
+### 可选大脸检测策略 bigFace
+
+协议版本仍为 `1`。`processScreenshot.payload` 可添加独立的 `bigFace` object，用于
+修复“特写大脸在原尺寸下被拆成两个碎片框或只给出半脸框”的检测缺陷：
+
+```json
+"bigFace": { "mode": "auto", "minImageSide": 1600, "minFaceSize": 600 }
+```
+
+- `mode`：`off`（默认，保持历史行为）、`auto`（大图额外做一次缩小检测，仅在判定为
+  “缩小结果明显更完整”时采用）、`normalized`（手动强制，只用缩小检测）。
+- `minImageSide`：`auto` 的启用门槛，图片长边小于该值时不跑第二次检测，取值 `0–16384`。
+- `minFaceSize`：判定“大脸”的最小边阈值（缩小结果映射回原图后的像素），取值 `0–8192`。
+
+三个字段可省略；`bigFace` 缺失或为 `null` 时 `mode` 为 `off`，object 存在但省略
+`mode` 时为 `auto`（其余字段默认 `1600` 与 `600`）。未知字段、非法 mode 或越界值
+返回 `invalid_payload`。
+
+`auto` 的行为：先按原尺寸检测，再对长边缩到 `512` 的副本检测一次，把框和五点
+landmarks 映射回原图坐标。采用缩小结果需同时满足：最佳框最小边达到 `minFaceSize`、
+面积至少是原尺寸最佳框的 `1.5` 倍、置信度不低于原尺寸最佳框减 `0.05`；缩小结果为空
+时保留原尺寸结果，原尺寸结果为空时采用缩小结果。`normalized` 不做回退：缩小结果为空
+时按无脸处理（`roi_no_face` 或 `face_not_detected`）。采用缩小结果时响应的
+`faceCount` 为缩小结果的数量（例如两个碎片框合并为一张整脸后为 `1`），标注、头像与
+特征仍使用原图坐标；清晰度按映射回原图的框在原图上重新计算。所有检测入口（含
+`faceRoi` 的扩边重试裁剪）共用这一策略。
+
 仅提特征时使用同一 `processScreenshot` 请求，设置 `annotate=false`、
 `cropAvatar=false`，省略对应输出路径，并提供识别器模型路径。最终处理时传入相同
 `faceRoi`，开启所需输出；特征、标注和头像共用同一选脸结果，均使用原图及原图坐标。
