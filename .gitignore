@@ -52,3 +52,6 @@ python/tests/fixtures/face_eval/
 *.sw?
 
 /qa/
+
+# Local analysis workspace (scratch scripts, exported reports, working images)
+work/
