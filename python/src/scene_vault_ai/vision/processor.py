@@ -27,7 +27,14 @@ from .annotator import ImageAnnotator
 from .cache import VisionModelCache
 from .config import ProcessingRequest, YuNetConfig
 from .cropper import AvatarCropper
-from .detector import FaceDetector, YuNetFaceDetector, select_primary_face
+from .detector import (
+    FaceDetector,
+    YuNetFaceDetector,
+    compute_face_sharpness,
+    map_scaled_faces,
+    prefer_scaled_faces,
+    select_primary_face,
+)
 from .recognizer import (
     ArcfaceConfig,
     ArcfaceFeatureExtractor,
@@ -396,7 +403,9 @@ class ScreenshotProcessor:
             ) from error
 
         try:
-            faces, sharpness_values = detector.detect_faces(image_bgr)
+            faces, sharpness_values = self._detect_faces_with_policy(
+                detector, image_bgr
+            )
             if self.request.face_roi is not None:
                 faces, sharpness_values = self._select_roi_faces(
                     detector, image_bgr, faces, sharpness_values
@@ -414,6 +423,59 @@ class ScreenshotProcessor:
                 details={"backend": "yunet"},
             ) from error
         return faces, sharpness_values, len(faces)
+
+    def _detect_faces_with_policy(
+        self, detector: FaceDetector, image_bgr: Any
+    ) -> tuple[list[FaceBox], list[float]]:
+        """Runs the request's big-face policy around one detector call.
+
+        ``off`` keeps the historical single native pass. ``auto`` runs a
+        second pass on a downscaled copy of large images and adopts it only
+        when it clearly holds the more complete face; ``normalized`` always
+        uses the downscaled pass. Adopted boxes are scored for sharpness on
+        the passed-in image, never on the downscaled copy."""
+        policy = self.request.big_face_policy
+        if policy.mode == "off":
+            return detector.detect_faces(image_bgr)
+
+        image_height, image_width = image_bgr.shape[:2]
+        longest = max(image_width, image_height)
+        if longest <= policy.target_side:
+            return detector.detect_faces(image_bgr)
+        if policy.mode == "auto" and longest < policy.min_image_side:
+            return detector.detect_faces(image_bgr)
+
+        import cv2
+
+        scale = policy.target_side / longest
+        downscaled = cv2.resize(
+            image_bgr,
+            (
+                max(1, int(round(image_width * scale))),
+                max(1, int(round(image_height * scale))),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+
+        native_faces: list[FaceBox] | None = None
+        native_scores: list[float] = []
+        if policy.mode == "auto":
+            native_faces, native_scores = detector.detect_faces(image_bgr)
+        scaled_faces, _ = detector.detect_faces(downscaled)
+        mapped = map_scaled_faces(
+            scaled_faces,
+            scale=scale,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        if native_faces is not None and not prefer_scaled_faces(
+            native_faces, mapped, policy
+        ):
+            return native_faces, native_scores
+        if not mapped:
+            return [], []
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        return mapped, [compute_face_sharpness(gray, face, cv2) for face in mapped]
 
     def _select_roi_faces(
         self,
@@ -446,7 +508,7 @@ class ScreenshotProcessor:
             crop_right = min(width, math.ceil(right + expand * roi_width))
             crop_bottom = min(height, math.ceil(bottom + expand * roi_height))
             cropped = image_bgr[crop_top:crop_bottom, crop_left:crop_right].copy()
-            crop_faces, crop_scores = detector.detect_faces(cropped)
+            crop_faces, crop_scores = self._detect_faces_with_policy(detector, cropped)
             translated = [
                 replace(
                     face,

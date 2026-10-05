@@ -31,7 +31,7 @@ pub async fn create_character(
 pub async fn list_characters(
     state: State<'_, AppState>,
     project_id: String,
-) -> Result<Vec<Character>, AppError> {
+) -> Result<Vec<crate::models::character::CharacterListEntry>, AppError> {
     character_service::list(&state.pool, &project_id).await
 }
 

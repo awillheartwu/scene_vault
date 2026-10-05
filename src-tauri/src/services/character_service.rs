@@ -5,8 +5,8 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::character::{
-        Character, CharacterSummary, CreateCharacterInput, MergeCharactersInput,
-        RenameCharacterInput, SetCharacterAvatarInput,
+        Character, CharacterListEntry, CharacterSummary, CreateCharacterInput,
+        MergeCharactersInput, RenameCharacterInput, SetCharacterAvatarInput,
     },
 };
 
@@ -53,21 +53,41 @@ pub async fn create(pool: &SqlitePool, input: CreateCharacterInput) -> Result<Ch
     Ok(character)
 }
 
-pub async fn list(pool: &SqlitePool, project_id: &str) -> Result<Vec<Character>, AppError> {
+pub async fn list(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> Result<Vec<CharacterListEntry>, AppError> {
     if project_id.trim().is_empty() {
         return Err(AppError::Validation(
             "character project id cannot be empty".to_owned(),
         ));
     }
 
-    let characters = sqlx::query_as::<_, Character>(
+    let characters = sqlx::query_as::<_, CharacterListEntry>(
         r#"
         SELECT
             id, project_id, name, aliases_json, avatar_asset_id,
-            created_at, updated_at
-        FROM characters
-        WHERE project_id = ?
-        ORDER BY name COLLATE NOCASE ASC
+            created_at, updated_at,
+            (
+                SELECT representative.id
+                FROM capture_items representative
+                WHERE representative.asset_id = character.avatar_asset_id
+                  AND representative.classification = 'person'
+                  AND representative.avatar_path IS NOT NULL
+                ORDER BY representative.captured_at DESC, representative.created_at DESC
+                LIMIT 1
+            ) AS avatar_capture_item_id,
+            (
+                SELECT latest.id
+                FROM capture_items latest
+                WHERE latest.character_id = character.id
+                  AND latest.classification = 'person'
+                ORDER BY latest.captured_at DESC, latest.created_at DESC
+                LIMIT 1
+            ) AS latest_capture_item_id
+        FROM characters character
+        WHERE character.project_id = ?
+        ORDER BY character.name COLLATE NOCASE ASC
         "#,
     )
     .bind(project_id.trim())

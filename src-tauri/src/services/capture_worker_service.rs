@@ -230,10 +230,21 @@ async fn process_awaiting_label_feature(
         return Ok(false);
     };
     let _guard = super::capture_operation_service::lock(pool, &item.id).await;
-    if super::capture_operation_service::ensure_available(pool, &item.id).await.is_err() { return Ok(false); }
+    if super::capture_operation_service::ensure_available(pool, &item.id)
+        .await
+        .is_err()
+    {
+        return Ok(false);
+    }
     let item = capture_service::get_item(pool, &item.id).await?;
-    let deferred: i64 = sqlx::query_scalar("SELECT recognition_deferred FROM capture_items WHERE id=?").bind(&item.id).fetch_one(pool).await?;
-    if item.status != "awaiting_label" || deferred != 0 { return Ok(false); }
+    let deferred: i64 =
+        sqlx::query_scalar("SELECT recognition_deferred FROM capture_items WHERE id=?")
+            .bind(&item.id)
+            .fetch_one(pool)
+            .await?;
+    if item.status != "awaiting_label" || deferred != 0 {
+        return Ok(false);
+    }
     let version = super::capture_operation_service::version(pool, &item.id).await?;
     let roi = super::capture_roi_service::get(pool, &item.id).await?;
     let source = match capture_service::validate_source_identity(pool, &item).await {
@@ -277,6 +288,7 @@ async fn process_awaiting_label_feature(
         processing_settings,
         progress,
         roi.as_ref(),
+        &item.face_detection_mode,
     )
     .await
     {
@@ -445,6 +457,7 @@ async fn process_item(
         processing_settings,
         progress,
         roi.as_ref(),
+        &item.face_detection_mode,
     )
     .await?;
 

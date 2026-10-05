@@ -35,10 +35,26 @@ pub struct ProcessingSettings {
     /// Manual primary-face framing: how far to search around the frame when it
     /// holds no face, and what to do when it holds several.
     pub roi: Option<RoiSettings>,
+    /// Close-up detection: run an extra downscaled pass on large images and
+    /// adopt it only when it clearly holds the more complete face.
+    pub big_face: Option<BigFaceSettings>,
     /// When false, the Python worker skips drawing the character name onto a
     /// labeled copy; recognition, face features and Face Bank suggestions are
     /// unaffected. `None` keeps the historical default (annotate on).
     pub annotate_person: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BigFaceSettings {
+    /// When false the automatic downscaled pass is disabled; an explicit
+    /// per-capture `normalized` override still applies.
+    pub enabled: Option<bool>,
+    /// Images whose long side is below this never run the extra pass.
+    pub min_image_side: Option<i64>,
+    /// The downscaled pass only wins for faces at least this large (pixels,
+    /// measured after mapping back to the original image).
+    pub min_face_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

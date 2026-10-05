@@ -145,6 +145,10 @@ export interface Character {
   name: string;
   aliasesJson: string;
   avatarAssetId: string | null;
+  /** Capture behind the chosen representative avatar, when one exists. */
+  avatarCaptureItemId?: string | null;
+  /** Newest person capture; used as the avatar fallback. */
+  latestCaptureItemId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -236,6 +240,7 @@ export interface ProcessingSettings {
   annotation: AnnotationSettings | null;
   crop: CropSettings | null;
   roi: RoiSettings | null;
+  bigFace: BigFaceSettings | null;
   /** False skips drawing the character name onto a labeled copy. */
   annotatePerson: boolean | null;
 }
@@ -245,6 +250,52 @@ export interface RoiSettings {
   expandRatio: number | null;
   /** "error" | "largest" | "sharpest" */
   multipleFaces: string | null;
+}
+
+export interface BigFaceSettings {
+  /** False disables the automatic downscaled detection pass. */
+  enabled: boolean | null;
+  /** Images with a shorter long side never run the extra pass. */
+  minImageSide: number | null;
+  /** The downscaled pass only wins for faces at least this large in pixels. */
+  minFaceSize: number | null;
+}
+
+/** A suspicious stored face box that the batch repair will probe. */
+export interface FaceRepairCandidate {
+  missingFaceBox: boolean;
+  id: string;
+  sourcePath: string;
+  fileName: string;
+  storedWidth: number;
+  storedHeight: number;
+  storedConfidence: number;
+}
+
+/** A capture whose reprocess could not replace its previous archive. */
+export interface FaceRepairRetry {
+  id: string;
+  fileName: string;
+}
+
+export interface FaceRepairPreview {
+  /** Low-confidence or missing boxes that need an engine probe. */
+  candidates: FaceRepairCandidate[];
+  /** Stuck archive replacements that are re-queued directly. */
+  retries: FaceRepairRetry[];
+}
+
+export interface FaceRepairStatus {
+  state: "idle" | "running" | "done" | "partial" | "failed";
+  projectId: string | null;
+  taskId: string | null;
+  total: number;
+  processed: number;
+  requeued: number;
+  kept: number;
+  failed: number;
+  currentFile: string | null;
+  message: string | null;
 }
 
 export interface CaptureSession {
@@ -295,6 +346,8 @@ export interface CaptureItem {
   processingVersion?: number;
   manualFaceRoiJson?: string | null;
   manualFaceRoiReady?: number;
+  /** `auto` (default) or `normalized` (整脸优化) for this capture. */
+  faceDetectionMode?: string;
   id: string;
   projectId: string;
   sessionId: string;
@@ -669,8 +722,16 @@ export interface OpenProjectNoteResult {
 
 export const captureApi = {
   getCaptureFaceRoi: (captureItemId: string) => invoke<FaceRoi | null>("get_capture_face_roi", { captureItemId }),
-  setCaptureFaceRoi: (captureItemId: string, faceRoi: FaceRoi | null) =>
-    invoke<CaptureItem>("set_capture_face_roi", { input: { captureItemId, faceRoi } }),
+  setCaptureFaceRoi: (
+    captureItemId: string,
+    faceRoi: FaceRoi | null,
+    mode?: "auto" | "normalized",
+  ) => invoke<CaptureItem>("set_capture_face_roi", { input: { captureItemId, faceRoi, mode } }),
+  previewFaceRepair: (projectId: string) =>
+    invoke<FaceRepairPreview>("preview_face_repair", { projectId }),
+  startFaceRepair: (projectId: string) =>
+    invoke<FaceRepairStatus>("start_face_repair", { projectId }),
+  getFaceRepairStatus: () => invoke<FaceRepairStatus>("get_face_repair_status"),
   previewCaptureReset: (input: CaptureResetInput) => invoke<ResetJob>("preview_capture_reset", { input }),
   executeCaptureReset: (input: { jobId: string; deleteDestinationFiles: boolean; allowPermanentNetworkDelete: boolean }) =>
     invoke<ResetJob>("execute_capture_reset", { input }),

@@ -6,6 +6,7 @@ pub mod asset_service;
 pub mod capture_archive_service;
 pub mod capture_deletion_service;
 pub mod capture_discovery_service;
+pub mod capture_face_repair_service;
 pub mod capture_service;
 pub mod capture_worker_service;
 pub mod character_service;
@@ -33,5 +34,5 @@ pub mod vision_worker_service;
 pub mod test_support;
 
 pub mod capture_operation_service;
-pub mod capture_roi_service;
 pub mod capture_reset_service;
+pub mod capture_roi_service;

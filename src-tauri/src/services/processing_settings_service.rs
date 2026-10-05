@@ -76,6 +76,18 @@ fn normalize(settings: &ProcessingSettings) -> Result<(), AppError> {
             }
         }
     }
+    if let Some(big_face) = &settings.big_face {
+        if let Some(value) = big_face.min_image_side {
+            if !(0..=16_384).contains(&value) {
+                return Err(range_error("minImageSide", "0 and 16384"));
+            }
+        }
+        if let Some(value) = big_face.min_face_size {
+            if !(0..=8_192).contains(&value) {
+                return Err(range_error("minFaceSize", "0 and 8192"));
+            }
+        }
+    }
     if let Some(annotation) = &settings.annotation {
         for (label, value) in [
             ("strokeWidth", annotation.stroke_width),
@@ -189,6 +201,51 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::models::vision::{AnnotationSettings, CropSettings, DetectionSettings, RoiSettings};
+
+    use crate::models::vision::BigFaceSettings;
+
+    #[tokio::test]
+    async fn validates_and_round_trips_big_face_settings() {
+        let pool = db::test_pool().await;
+        for invalid in [
+            BigFaceSettings {
+                enabled: None,
+                min_image_side: Some(-1),
+                min_face_size: None,
+            },
+            BigFaceSettings {
+                enabled: None,
+                min_image_side: Some(20_000),
+                min_face_size: None,
+            },
+            BigFaceSettings {
+                enabled: None,
+                min_image_side: None,
+                min_face_size: Some(-1),
+            },
+            BigFaceSettings {
+                enabled: None,
+                min_image_side: None,
+                min_face_size: Some(8_193),
+            },
+        ] {
+            let settings = ProcessingSettings {
+                big_face: Some(invalid),
+                ..Default::default()
+            };
+            assert!(update(&pool, settings).await.is_err());
+        }
+        let settings = ProcessingSettings {
+            big_face: Some(BigFaceSettings {
+                enabled: Some(true),
+                min_image_side: Some(1600),
+                min_face_size: Some(600),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(update(&pool, settings.clone()).await.unwrap(), settings);
+        assert_eq!(get(&pool).await.unwrap(), settings);
+    }
 
     #[tokio::test]
     async fn validates_and_round_trips_roi_settings() {

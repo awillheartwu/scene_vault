@@ -166,6 +166,7 @@ pub async fn process_screenshot_with_roi(
     processing_settings: &ProcessingSettings,
     progress: Option<ProgressCallback>,
     face_roi: Option<&super::capture_roi_service::FaceRoi>,
+    detection_mode: &str,
 ) -> Result<VisionProcessData, AppError> {
     if !vision_settings_service::is_engine_available(settings) {
         return Err(AppError::Vision(
@@ -179,6 +180,7 @@ pub async fn process_screenshot_with_roi(
     let payload = processing_payload(
         settings,
         processing_settings,
+        detection_mode,
         json!({
             "inputPath": input_path.to_string_lossy(),
             "annotatedOutputPath": annotated_output_path.to_string_lossy(),
@@ -209,6 +211,7 @@ pub async fn extract_face_feature_with_roi(
     processing_settings: &ProcessingSettings,
     progress: Option<ProgressCallback>,
     face_roi: Option<&super::capture_roi_service::FaceRoi>,
+    detection_mode: &str,
 ) -> Result<VisionProcessData, AppError> {
     if !vision_settings_service::is_engine_available(settings) {
         return Err(AppError::Vision(
@@ -220,6 +223,7 @@ pub async fn extract_face_feature_with_roi(
     let payload = processing_payload(
         settings,
         processing_settings,
+        detection_mode,
         json!({
             "inputPath": input_path.to_string_lossy(),
             "annotatedOutputPath": Value::Null,
@@ -242,11 +246,52 @@ pub async fn extract_face_feature_with_roi(
     invoke_process(settings, request, progress).await
 }
 
+/// Detection-only probe used by the big-face repair: asks the engine for the
+/// primary face of a screenshot without writing outputs, features or any
+/// database state. Omitting the recognizer models keeps the request cheap.
+pub async fn probe_face_box(
+    settings: &VisionSettings,
+    input_path: &Path,
+    processing_settings: &ProcessingSettings,
+    face_roi: Option<&super::capture_roi_service::FaceRoi>,
+    detection_mode: &str,
+) -> Result<VisionProcessData, AppError> {
+    if !vision_settings_service::is_engine_available(settings) {
+        return Err(AppError::Vision(
+            "vision engine is not configured".to_owned(),
+        ));
+    }
+    validate_python_path(input_path, "Python input")?;
+    validate_image_complete(input_path).await?;
+    let payload = processing_payload(
+        settings,
+        processing_settings,
+        detection_mode,
+        json!({
+            "inputPath": input_path.to_string_lossy(),
+            "annotatedOutputPath": Value::Null,
+            "avatarOutputPath": Value::Null,
+            "detectFace": true,
+            "faceRoi": face_roi,
+            "annotate": false,
+            "cropAvatar": false,
+            "yunetModelPath": settings.yunet_model_path
+        }),
+    );
+    let request = json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "action": "processScreenshot",
+        "payload": payload
+    });
+    invoke_process(settings, request, None).await
+}
+
 /// Merges the optional detection/annotation/crop overrides into the base
 /// payload. Unset fields are omitted so the Python side keeps its defaults.
 fn processing_payload(
     settings: &VisionSettings,
     processing: &ProcessingSettings,
+    detection_mode: &str,
     base: Value,
 ) -> Value {
     let mut payload = base;
@@ -285,6 +330,20 @@ fn processing_payload(
             payload["roi"] = Value::Object(object);
         }
     }
+    let mut big_face = serde_json::Map::new();
+    big_face.insert(
+        "mode".to_owned(),
+        json!(effective_big_face_mode(detection_mode, processing)),
+    );
+    if let Some(big_face_settings) = &processing.big_face {
+        if let Some(side) = big_face_settings.min_image_side {
+            big_face.insert("minImageSide".to_owned(), json!(side));
+        }
+        if let Some(size) = big_face_settings.min_face_size {
+            big_face.insert("minFaceSize".to_owned(), json!(size));
+        }
+    }
+    payload["bigFace"] = Value::Object(big_face);
     if let Some(annotation) = &processing.annotation {
         let mut object = serde_json::Map::new();
         if let Some(color) = annotation.text_color {
@@ -346,6 +405,20 @@ fn insert_number(object: &mut serde_json::Map<String, Value>, key: &str, value: 
     if let Some(value) = value {
         object.insert(key.to_owned(), json!(value));
     }
+}
+
+/// Effective big-face detection mode for one request: the per-capture
+/// override wins, otherwise the global switch decides. `auto` keeps the
+/// engine's historical single-pass behaviour for callers that never send the
+/// `bigFace` group.
+pub fn effective_big_face_mode(item_mode: &str, processing: &ProcessingSettings) -> &'static str {
+    if item_mode == "normalized" {
+        return "normalized";
+    }
+    if processing.big_face.as_ref().and_then(|value| value.enabled) == Some(false) {
+        return "off";
+    }
+    "auto"
 }
 
 pub(super) async fn invoke_process(
@@ -969,14 +1042,65 @@ mod tests {
                 }),
                 ..Default::default()
             },
+            "auto",
             json!({}),
         );
         assert_eq!(payload["roi"]["expandRatio"], 0.25);
         assert_eq!(payload["roi"]["multipleFaces"], "sharpest");
 
         // Unset settings keep the engine defaults instead of sending an empty group.
-        let untouched = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
+        let untouched =
+            processing_payload(&settings, &ProcessingSettings::default(), "auto", json!({}));
         assert!(untouched.get("roi").is_none());
+    }
+
+    #[test]
+    fn processing_payload_merges_big_face_settings_and_the_capture_override() {
+        use crate::models::vision::BigFaceSettings;
+
+        let settings = VisionSettings::default();
+        // The group is always present so the engine never has to guess whether
+        // the caller wanted the historical single-pass behaviour.
+        let defaults =
+            processing_payload(&settings, &ProcessingSettings::default(), "auto", json!({}));
+        assert_eq!(defaults["bigFace"]["mode"], "auto");
+        assert!(defaults["bigFace"].get("minImageSide").is_none());
+
+        let configured = ProcessingSettings {
+            big_face: Some(BigFaceSettings {
+                enabled: Some(true),
+                min_image_side: Some(2000),
+                min_face_size: Some(700),
+            }),
+            ..Default::default()
+        };
+        let payload = processing_payload(&settings, &configured, "normalized", json!({}));
+        assert_eq!(payload["bigFace"]["mode"], "normalized");
+        assert_eq!(payload["bigFace"]["minImageSide"].as_i64(), Some(2000));
+        assert_eq!(payload["bigFace"]["minFaceSize"].as_i64(), Some(700));
+
+        // An explicit per-capture override wins over the global switch.
+        let disabled = ProcessingSettings {
+            big_face: Some(BigFaceSettings {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let off = processing_payload(&settings, &disabled, "auto", json!({}));
+        assert_eq!(off["bigFace"]["mode"], "off");
+        let forced = processing_payload(&settings, &disabled, "normalized", json!({}));
+        assert_eq!(forced["bigFace"]["mode"], "normalized");
+
+        assert_eq!(
+            effective_big_face_mode("auto", &ProcessingSettings::default()),
+            "auto"
+        );
+        assert_eq!(effective_big_face_mode("auto", &disabled), "off");
+        assert_eq!(
+            effective_big_face_mode("normalized", &disabled),
+            "normalized"
+        );
     }
 
     #[test]
@@ -1023,7 +1147,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let payload = processing_payload(&settings, &processing, json!({ "base": true }));
+        let payload = processing_payload(&settings, &processing, "auto", json!({ "base": true }));
         assert_eq!(payload["base"], true);
         assert_eq!(payload["detection"]["scoreThreshold"], 0.7);
         // Integer settings must stay JSON integers: the Python protocol
@@ -1052,6 +1176,7 @@ mod tests {
                 annotate_person: Some(false),
                 ..Default::default()
             },
+            "auto",
             json!({}),
         );
         assert_eq!(off["annotate"], false);
@@ -1062,11 +1187,13 @@ mod tests {
                 annotate_person: Some(true),
                 ..Default::default()
             },
+            "auto",
             json!({}),
         );
         assert_eq!(on["annotate"], true);
 
-        let unset = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
+        let unset =
+            processing_payload(&settings, &ProcessingSettings::default(), "auto", json!({}));
         assert_eq!(unset["annotate"], true);
     }
 
@@ -1211,6 +1338,7 @@ mod tests {
                 annotate_person: Some(true),
                 ..Default::default()
             },
+            "auto",
             json!({
                 "annotatedOutputPath": Value::Null,
                 "annotate": false,
@@ -1229,7 +1357,8 @@ mod tests {
             font_path: Some("C:\\fonts\\test.ttf".to_owned()),
             ..Default::default()
         };
-        let payload = processing_payload(&settings, &ProcessingSettings::default(), json!({}));
+        let payload =
+            processing_payload(&settings, &ProcessingSettings::default(), "auto", json!({}));
         assert_eq!(payload["annotation"]["fontPath"], "C:\\fonts\\test.ttf");
     }
 

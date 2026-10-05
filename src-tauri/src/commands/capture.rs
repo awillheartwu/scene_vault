@@ -21,9 +21,8 @@ use crate::{
     },
     services::{
         archive_manifest_service, capture_archive_service, capture_deletion_service,
-        capture_discovery_service,
-        capture_service, file_recycle_service::SystemRecycleBin, log_service,
-        project_file_reconcile_service, thumbnail_service,
+        capture_discovery_service, capture_service, file_recycle_service::SystemRecycleBin,
+        log_service, project_file_reconcile_service, thumbnail_service,
     },
 };
 
@@ -438,17 +437,34 @@ pub async fn read_capture_thumbnail(
 ) -> Result<tauri::ipc::Response, AppError> {
     use tauri::Manager;
 
-    let _guard = crate::services::capture_operation_service::lock(&state.pool, &input.capture_item_id).await;
-    crate::services::capture_operation_service::ensure_available(&state.pool, &input.capture_item_id).await?;
+    let _guard =
+        crate::services::capture_operation_service::lock(&state.pool, &input.capture_item_id).await;
+    crate::services::capture_operation_service::ensure_available(
+        &state.pool,
+        &input.capture_item_id,
+    )
+    .await?;
     let item = capture_service::get_item(&state.pool, input.capture_item_id.trim()).await?;
     let variant = input.variant.trim();
     let path = readable_capture_path(&state.pool, &item, variant).await?;
     let cache_root = app.path().app_local_data_dir()?;
     let settings = crate::services::app_settings_service::get(&state.pool).await?;
     let limit_bytes = (settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024);
-    let bytes =
-        thumbnail_service::read_thumbnail(&cache_root, &item.id, variant, &path, limit_bytes)
-            .await?;
+    let generation = thumbnail_service::capture_generation(
+        variant,
+        item.processing_version,
+        item.processed_at.as_deref(),
+        item.archived_at.as_deref(),
+    );
+    let bytes = thumbnail_service::read_thumbnail_with_generation(
+        &cache_root,
+        &item.id,
+        variant,
+        &path,
+        limit_bytes,
+        &generation,
+    )
+    .await?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 

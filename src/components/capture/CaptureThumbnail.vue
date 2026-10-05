@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { ImageOff } from "@lucide/vue";
 import { captureApi, pathMimeType, type CaptureItem } from "@/lib/capture-api";
+import { subscribeCaptureImageUpdates } from "@/lib/capture-image-updates";
 import { captureVariantReadReason } from "./capture-file-state";
 
 const props = withDefaults(defineProps<{
@@ -26,6 +27,24 @@ const automaticSize = ref<"thumb" | "full">("thumb");
 let observer: IntersectionObserver | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let requested = false;
+let unsubscribe: (() => void) | undefined;
+const eventItem = shallowRef<CaptureItem | null>(null);
+const imageItem = computed(() => {
+  const incoming = eventItem.value;
+  if (!incoming || incoming.id !== props.item.id) return props.item;
+  // Parent lists can lag behind the completion event; avatar stubs have no date.
+  return Date.parse(props.item.updatedAt) > Date.parse(incoming.updatedAt)
+    ? props.item : incoming;
+});
+watch(() => props.item.id, (id) => {
+  unsubscribe?.();
+  eventItem.value = null;
+  unsubscribe = subscribeCaptureImageUpdates(id, (item) => {
+    const previous = imageItem.value;
+    if (Date.parse(item.updatedAt) < Date.parse(previous.updatedAt)) return;
+    eventItem.value = item;
+  });
+}, { immediate: true });
 let requestVersion = 0;
 
 function resolvedSize(): "thumb" | "full" {
@@ -40,6 +59,7 @@ function updateAutomaticSize(width: number) {
 async function loadImage() {
   const version = ++requestVersion;
   const imageSize = resolvedSize();
+  const item = imageItem.value;
   if (url.value) URL.revokeObjectURL(url.value);
   url.value = null;
   const variants = props.fallbackVariant
@@ -48,22 +68,23 @@ async function loadImage() {
   for (const variant of variants) {
     // Known-missing, replaced or unreachable files must not trigger pointless
     // image reads; the backend state is authoritative when present.
-    if (captureVariantReadReason(props.item, variant)) continue;
+    if (captureVariantReadReason(item, variant)) continue;
     try {
       let bytes: ArrayBuffer;
       try {
         bytes = imageSize === "full"
-          ? await captureApi.readImage(props.item.id, variant)
-          : await captureApi.readThumbnail(props.item.id, variant);
+          ? await captureApi.readImage(item.id, variant)
+          : await captureApi.readThumbnail(item.id, variant);
       } catch (error) {
+        if (version !== requestVersion) return;
         if (imageSize === "full") throw error;
-        bytes = await captureApi.readImage(props.item.id, variant);
+        bytes = await captureApi.readImage(item.id, variant);
       }
       if (version !== requestVersion) return;
       const nextUrl = URL.createObjectURL(
         new Blob([bytes], {
           type: imageSize === "full"
-            ? pathMimeType(props.item.sourcePath)
+            ? pathMimeType(item.sourcePath)
             : "image/jpeg",
         }),
       );
@@ -109,22 +130,33 @@ onMounted(() => {
   );
   observer.observe(root.value);
 });
-watch(
-  () => [
-    props.item.id,
-    props.variant,
-    props.size,
-    props.fullWidthThreshold,
-    props.fallbackVariant,
-    automaticSize.value,
-  ] as const,
-  () => {
-    requestVersion += 1;
-    if (requested) void loadImage();
-  },
-);
+// Business updates and duplicate events do not change the actual picture.
+// Compare only the file identity/readability of the requested variants.
+function variantKey(item: CaptureItem, variant: "source" | "annotated" | "avatar" | "destination") {
+  const readable = captureVariantReadReason(item, variant);
+  if (variant === "source") {
+    return [variant, item.sourcePath, item.fileSize, item.modifiedAtMs, item.contentHash, readable];
+  }
+  if (variant === "destination") {
+    return [variant, item.destinationPath, item.archivedAt, readable];
+  }
+  const local = variant === "avatar" ? item.avatarPath : item.annotatedPath;
+  return [variant, local, variant === "avatar" ? item.destinationAvatarPath : null,
+    item.processedAt, item.processingVersion,
+    variant === "avatar" && !local ? item.archivedAt : null, readable];
+}
+const imageKey = computed(() => {
+  const item = imageItem.value;
+  return JSON.stringify([item.id, resolvedSize(), variantKey(item, props.variant),
+    props.fallbackVariant ? variantKey(item, props.fallbackVariant) : null]);
+});
+watch(imageKey, () => {
+  requestVersion += 1;
+  if (requested) void loadImage();
+});
 onBeforeUnmount(() => {
   requestVersion += 1;
+  unsubscribe?.();
   observer?.disconnect();
   resizeObserver?.disconnect();
   if (url.value) URL.revokeObjectURL(url.value);

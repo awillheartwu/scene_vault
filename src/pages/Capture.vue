@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { isOlderCapture } from "@/lib/capture-api";
 import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
+import CharacterAvatar from '@/components/character/CharacterAvatar.vue';
 import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
 import { parseFaceBox } from '@/lib/face-box';
 import { describeError } from '@/lib/vision-errors';
@@ -1011,7 +1012,7 @@ onBeforeUnmount(() => {
         <CaptureProgress persistent :deferred-count="deferredImportCount" class="stage-progress" />
 
         <div class="preview-shell" :class="{ empty: !selectedItem }">
-          <FaceRoiSelector inline v-if="selectedItem && pendingClassification === 'person' && selectedItem.status === 'awaiting_label' && selectedItem.classification === 'unclassified'" :item-id="selectedItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
+          <FaceRoiSelector inline v-if="selectedItem && pendingClassification === 'person' && selectedItem.status === 'awaiting_label' && selectedItem.classification === 'unclassified'" :item-id="selectedItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :mode="selectedItem.faceDetectionMode === 'normalized' ? 'normalized' : 'auto'" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
           <img v-else-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />
           <div v-else-if="previewUnavailable" class="preview-unavailable">
             <ImageOff :size="44" />
@@ -1174,7 +1175,7 @@ onBeforeUnmount(() => {
             :class="{ selected: selectedCharacterId === character.id }"
             @click="selectedCharacterId = character.id"
           >
-            <span class="avatar"><UserRound :size="18" /></span>
+            <span class="avatar"><CharacterAvatar :character="character" /></span>
             <span><strong>{{ character.name }}</strong><small>项目角色</small></span>
             <Check v-if="selectedCharacterId === character.id" :size="17" />
           </button>

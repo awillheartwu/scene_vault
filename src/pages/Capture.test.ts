@@ -262,6 +262,23 @@ describe("Capture quick-label flow", () => {
     wrapper.unmount();
   });
 
+  it("shows a small avatar in the character list when the character has a capture", async () => {
+    api.listCharacters.mockResolvedValue([
+      { ...characters[0], avatarCaptureItemId: "avatar-item" },
+      characters[1],
+    ]);
+    const wrapper = mount(Capture);
+    await flushPromises();
+
+    await wrapper.findAll("button").find((button) => button.text().includes("人物"))!.trigger("click");
+    await flushPromises();
+
+    expect(api.readThumbnail).toHaveBeenCalledWith("avatar-item", "avatar");
+    const row = wrapper.findAll(".character-row").find((entry) => entry.text().includes("Mira"))!;
+    expect(row.find(".avatar img").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("starts framing on the face the last scan picked", async () => {
     const detected = { ...item(), faceBoxJson: '{"x":300,"y":150,"width":300,"height":300}' };
     api.listProjectRecentCaptures.mockResolvedValue([detected]);

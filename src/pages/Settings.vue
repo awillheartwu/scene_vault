@@ -34,6 +34,7 @@ import {
   type AnnotationSettings,
   type CropSettings,
   type RoiSettings,
+  type BigFaceSettings,
   type DetectionSettings,
   type ModelRecognitionProfile,
   type ProcessingSettings,
@@ -175,11 +176,13 @@ const processingUi = ref<{
   annotation: AnnotationSettings;
   crop: CropSettings;
   roi: RoiSettings;
+  bigFace: BigFaceSettings;
 }>({
   detection: emptyDetection(),
   annotation: emptyAnnotation(),
   crop: emptyCrop(),
   roi: emptyRoi(),
+  bigFace: emptyBigFace(),
 });
 const textColorHex = ref("#50dcff");
 const strokeColorHex = ref("#000000");
@@ -199,6 +202,7 @@ interface SettingsBaseline {
     annotation: AnnotationSettings;
     crop: CropSettings;
     roi: RoiSettings;
+    bigFace: BigFaceSettings;
     textColorHex: string;
     strokeColorHex: string;
   };
@@ -289,6 +293,7 @@ async function initialize() {
       annotation: processing.annotation ?? emptyAnnotation(),
       crop: processing.crop ?? emptyCrop(),
       roi: processing.roi ?? emptyRoi(),
+      bigFace: processing.bigFace ?? emptyBigFace(),
     };
     annotatePerson.value = processing.annotatePerson ?? true;
     textColorHex.value = rgbToHex(processingUi.value.annotation.textColor);
@@ -304,6 +309,7 @@ async function initialize() {
         annotation: clone(processingUi.value.annotation),
         crop: clone(processingUi.value.crop),
         roi: clone(processingUi.value.roi),
+        bigFace: clone(processingUi.value.bigFace),
         textColorHex: textColorHex.value,
         strokeColorHex: strokeColorHex.value,
       },
@@ -553,6 +559,10 @@ function emptyRoi(): RoiSettings {
   return { expandRatio: null, multipleFaces: null };
 }
 
+function emptyBigFace(): BigFaceSettings {
+  return { enabled: null, minImageSide: null, minFaceSize: null };
+}
+
 function rgbToHex(color: [number, number, number] | null): string {
   if (!color) return "#50dcff";
   return (
@@ -623,12 +633,13 @@ function buildProcessingPayload(): ProcessingSettings {
     annotation: hasValue(annotation) ? annotation : null,
     crop: hasValue(processingUi.value.crop) ? processingUi.value.crop : null,
     roi: hasValue(processingUi.value.roi) ? processingUi.value.roi : null,
+    bigFace: hasValue(processingUi.value.bigFace) ? processingUi.value.bigFace : null,
     annotatePerson: annotatePerson.value,
   };
 }
 
 function resetProcessingGroup(
-  group: "detection" | "annotation" | "crop" | "roi",
+  group: "detection" | "annotation" | "crop" | "roi" | "bigFace",
 ) {
   if (group === "detection") processingUi.value.detection = emptyDetection();
   if (group === "annotation") {
@@ -638,6 +649,7 @@ function resetProcessingGroup(
   }
   if (group === "crop") processingUi.value.crop = emptyCrop();
   if (group === "roi") processingUi.value.roi = emptyRoi();
+  if (group === "bigFace") processingUi.value.bigFace = emptyBigFace();
 }
 
 async function saveProcessing() {
@@ -651,6 +663,7 @@ async function saveProcessing() {
         annotation: clone(processingUi.value.annotation),
         crop: clone(processingUi.value.crop),
         roi: clone(processingUi.value.roi),
+        bigFace: clone(processingUi.value.bigFace),
         textColorHex: textColorHex.value,
         strokeColorHex: strokeColorHex.value,
       };
@@ -1293,6 +1306,50 @@ onBeforeUnmount(() => {
               <option value="sharpest">自动选最清晰的一张</option>
             </select>
             <small>框住多张脸时的处理方式：报错最稳妥，自动挑选更省事，但可能不是你想要的那张。</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="processing-group" aria-labelledby="processing-big-face-title">
+        <div class="processing-group-title">
+          <h3 id="processing-big-face-title"><span aria-hidden="true">05</span>特写整脸优化</h3>
+          <button type="button" class="clear-field" @click="resetProcessingGroup('bigFace')">恢复默认</button>
+        </div>
+        <div class="processing-grid">
+          <label class="processing-field">
+            <span>大脸检测</span>
+            <select id="big-face-enabled" v-model="processingUi.bigFace.enabled">
+              <option :value="null">默认（开启）</option>
+              <option :value="true">开启</option>
+              <option :value="false">关闭</option>
+            </select>
+            <small>大特写截图里脸太大时，额外用缩小副本检测一次，避免同一张脸被拆成两个框。关闭后不再自动启用；手动“整脸优化”仍然可用。</small>
+          </label>
+          <label class="processing-field">
+            <span>图片长边阈值</span>
+            <input
+              id="big-face-min-image-side"
+              v-model.number="processingUi.bigFace.minImageSide"
+              type="number"
+              min="0"
+              max="16384"
+              step="1"
+              placeholder="1600"
+            />
+            <small>图片长边小于该值时不跑第二次检测。默认 1600。</small>
+          </label>
+          <label class="processing-field">
+            <span>大脸判定尺寸</span>
+            <input
+              id="big-face-min-face-size"
+              v-model.number="processingUi.bigFace.minFaceSize"
+              type="number"
+              min="0"
+              max="8192"
+              step="1"
+              placeholder="600"
+            />
+            <small>缩小检测找到的脸最小边达到该像素且明显更完整时才采用。默认 600。</small>
           </label>
         </div>
       </section>

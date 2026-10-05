@@ -87,12 +87,15 @@ async fn archive_pending_item(
     let mut naming = archive_naming_settings_service::get(pool).await?;
     // Retained archives belong to the previous classification. Give each reset
     // generation a deterministic new name even for templates without {seq}.
-    let reset_generation: i64 = sqlx::query_scalar("SELECT reset_generation FROM capture_items WHERE id = ?")
-        .bind(&item.id)
-        .fetch_one(pool)
-        .await?;
+    let reset_generation: i64 =
+        sqlx::query_scalar("SELECT reset_generation FROM capture_items WHERE id = ?")
+            .bind(&item.id)
+            .fetch_one(pool)
+            .await?;
     if reset_generation > 0 {
-        naming.template.push_str(&format!(" - reset-{reset_generation}"));
+        naming
+            .template
+            .push_str(&format!(" - reset-{reset_generation}"));
     }
     let character_name: Option<String> =
         sqlx::query_scalar("SELECT name FROM characters WHERE id = ?")
@@ -197,16 +200,18 @@ async fn archive_person_item(
         captured_at: Some(&item.captured_at),
         avatar: false,
     };
-    let annotated_size = tokio::fs::metadata(&annotated_path).await?.len();
     let final_annotated = resolve_archive_destination(
         naming,
         &annotated_context,
         &annotated_directory,
         annotated_extension,
-        annotated_size,
+        &annotated_path,
     )
     .await?;
-    let annotated_size = copy_verified_atomic(&annotated_path, &final_annotated, &item.id).await?;
+    let final_annotated =
+        resolve_legacy_repair_destination(pool, item, &annotated_path, final_annotated).await?;
+    let annotated_size =
+        copy_tracked_archive(pool, item, &annotated_path, &final_annotated).await?;
 
     let final_avatar = if let Some(avatar_path) = avatar_path {
         let avatar_extension = avatar_path
@@ -218,16 +223,17 @@ async fn archive_person_item(
             avatar: true,
             ..annotated_context
         };
-        let avatar_size = tokio::fs::metadata(&avatar_path).await?.len();
         let destination = resolve_archive_destination(
             naming,
             &avatar_context,
             &avatar_directory,
             avatar_extension,
-            avatar_size,
+            &avatar_path,
         )
         .await?;
-        copy_verified_atomic(&avatar_path, &destination, &item.id).await?;
+        let destination =
+            resolve_legacy_repair_destination(pool, item, &avatar_path, destination).await?;
+        copy_tracked_archive(pool, item, &avatar_path, &destination).await?;
         Some(destination)
     } else {
         None
@@ -270,24 +276,171 @@ async fn archive_source_direct(
         captured_at: Some(&item.captured_at),
         avatar: false,
     };
-    let expected_size = tokio::fs::metadata(&source).await?.len();
     let final_path =
-        resolve_archive_destination(naming, &context, &directory, extension, expected_size).await?;
-    let archived_size = copy_verified_atomic(&source, &final_path, &item.id).await?;
+        resolve_archive_destination(naming, &context, &directory, extension, &source).await?;
+    let final_path = resolve_legacy_repair_destination(pool, item, &source, final_path).await?;
+    let archived_size = copy_tracked_archive(pool, item, &source, &final_path).await?;
     persist_completed_archive(pool, item, &final_path, None, archived_size).await
 }
 
-/// Resolves the final archive destination. Without `{seq}` the name is
-/// deterministic and `copy_verified_atomic` keeps the archive idempotent;
-/// with `{seq}` the sequence is bumped until the destination is free (or
-/// already holds an identical-length retry of the same capture).
+/// Called while the completed capture is locked, BEFORE its old local outputs
+/// are cleared or rewritten. Never infer identity from size, filename or current
+/// target bytes alone, and never replace an existing authoritative fingerprint.
+pub(crate) async fn verify_legacy_outputs_before_reprocessing(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+) -> Result<(), AppError> {
+    for (local, destination) in [
+        (
+            item.annotated_path.as_deref(),
+            item.destination_path.as_deref(),
+        ),
+        (
+            item.avatar_path.as_deref(),
+            item.destination_avatar_path.as_deref(),
+        ),
+    ] {
+        let (Some(local), Some(destination)) = (local, destination) else {
+            continue;
+        };
+        let recorded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?)")
+            .bind(&item.id).bind(destination).fetch_one(pool).await?;
+        if recorded || local == destination || local == item.source_path {
+            continue;
+        }
+        let Ok(local) = validate_local_archive_source(Path::new(local)).await else {
+            continue;
+        };
+        let Ok(local_hash) = capture_service::sha256_file(&local).await else {
+            continue;
+        };
+        let Ok(Some(target_hash)) = destination_hash(Path::new(destination)).await else {
+            continue;
+        };
+        if local_hash != target_hash {
+            continue;
+        }
+        sqlx::query("INSERT INTO capture_archive_fingerprints(capture_item_id, path, content_hash) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
+            .bind(&item.id).bind(destination).bind(local_hash).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// Old captures may have no surviving local output to prove ownership. Save
+/// the repaired output at a deterministic, capture-specific new name instead
+/// of blocking all historical repair or trusting an unknown old file. Keeping
+/// the name stable allows retries and later reprocessing to reuse it safely.
+async fn resolve_legacy_repair_destination(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+    source: &Path,
+    proposed: PathBuf,
+) -> Result<PathBuf, AppError> {
+    let stem = proposed
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("capture");
+    let extension = proposed
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png");
+    // IDs are application-generated UUIDs; sanitize nonetheless at the path boundary.
+    let suffix = archive_naming::sanitize_windows_component(&item.id);
+    let alternative = proposed.with_file_name(format!("{stem} - repaired-{suffix}.{extension}"));
+    let proposed_text = capture_service::path_to_string(&proposed);
+    let alternative_text = capture_service::path_to_string(&alternative);
+    let is_previous = [
+        item.destination_path.as_deref(),
+        item.destination_avatar_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|path| path == proposed_text || path == alternative_text);
+    if !is_previous {
+        return Ok(proposed);
+    }
+    // Known identities (including a known mismatch) retain strict overwrite
+    // checks. Only genuinely unrecorded historical destinations take this path.
+    let recorded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?)")
+        .bind(&item.id).bind(&proposed_text).fetch_one(pool).await?;
+    if recorded {
+        return Ok(proposed);
+    }
+    let Some(existing) = destination_hash(&proposed).await? else {
+        return Ok(proposed);
+    };
+    if existing == capture_service::sha256_file(source).await? {
+        return Ok(proposed);
+    }
+    log_service::record_event(LogRecord {
+        level: LogLevel::Info,
+        module: "capture.archive".to_owned(),
+        message: "历史归档缺少可信指纹：保留旧文件，修复结果使用独立文件名".to_owned(),
+        event: Some("legacy_archive_preserved".to_owned()),
+        capture_item_id: Some(item.id.clone()),
+        project_id: Some(item.project_id.clone()),
+        outcome: Some("preserved".to_owned()),
+        ..Default::default()
+    });
+    Ok(alternative)
+}
+
+/// Only a previously recorded content identity authorizes replacement. Path
+/// equality alone cannot distinguish our output from a user's replacement.
+async fn previous_archive_hash(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+    destination: &Path,
+) -> Result<Option<String>, AppError> {
+    let path = capture_service::path_to_string(destination);
+    if item.destination_path.as_deref() != Some(&path)
+        && item.destination_avatar_path.as_deref() != Some(&path)
+    {
+        return Ok(None);
+    }
+    // A shared target cannot be replaced on behalf of just one capture/project.
+    let shared: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM capture_items WHERE id != ? AND (destination_path = ? OR destination_avatar_path = ?)) OR EXISTS(SELECT 1 FROM assets a JOIN project_assets pa ON pa.asset_id = a.id WHERE a.path = ? AND pa.project_id != ?)",
+    )
+    .bind(&item.id).bind(&path).bind(&path).bind(&path).bind(&item.project_id)
+    .fetch_one(pool).await?;
+    if shared {
+        return Ok(None);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT content_hash FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?",
+    ).bind(&item.id).bind(path).fetch_optional(pool).await?)
+}
+
+async fn copy_tracked_archive(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+    source: &Path,
+    destination: &Path,
+) -> Result<u64, AppError> {
+    let previous_hash = previous_archive_hash(pool, item, destination).await?;
+    let (size, hash) =
+        copy_verified_atomic(source, destination, &item.id, previous_hash.as_deref()).await?;
+    // Persist after each individual verified output, not just after both files
+    // complete. A failed avatar/DB write or restart can safely retry the image.
+    sqlx::query(
+        "INSERT INTO capture_archive_fingerprints(capture_item_id, path, content_hash) VALUES (?, ?, ?) ON CONFLICT(capture_item_id, path) DO UPDATE SET content_hash = excluded.content_hash",
+    ).bind(&item.id).bind(capture_service::path_to_string(destination)).bind(hash)
+        .execute(pool).await?;
+    Ok(size)
+}
+
+/// With {seq}, skip occupied files unless their actual content equals the new
+/// output. Equal lengths are not evidence of an idempotent retry.
 async fn resolve_archive_destination(
     naming: &ArchiveNamingSettings,
     context: &ArchiveNameContext<'_>,
     directory: &Path,
     extension: &str,
-    expected_size: u64,
+    source: &Path,
 ) -> Result<PathBuf, AppError> {
+    let expected_size = tokio::fs::metadata(source).await?.len();
+    let expected_hash = capture_service::sha256_file(source).await?;
     let uses_seq = archive_naming::uses_seq(naming);
     let mut seq: u32 = 1;
     loop {
@@ -303,7 +456,9 @@ async fn resolve_archive_destination(
         match tokio::fs::metadata(&candidate).await {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
             Ok(metadata) if metadata.is_file() && metadata.len() == expected_size => {
-                return Ok(candidate);
+                if capture_service::sha256_file(&candidate).await? == expected_hash {
+                    return Ok(candidate);
+                }
             }
             Ok(_) => {}
             Err(error) => return Err(AppError::Io(error)),
@@ -429,7 +584,7 @@ async fn persist_completed_archive(
             suggested_character_id, recognition_confidence, recognition_source,
             review_status, error_message,
             failure_stage, attempt_count, next_retry_at, processing_warnings_json,
-            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready
+            captured_at, processed_at, archived_at, created_at, updated_at, source_file_state, destination_file_state, destination_avatar_file_state, processing_version, manual_face_roi_json, manual_face_roi_ready, face_detection_mode
         "#,
     )
     .bind(&asset_id)
@@ -452,7 +607,9 @@ async fn persist_completed_archive(
     // files to the Windows recycle bin. There is deliberately no permanent
     // deletion fallback; unsupported targets remain on disk for safety.
     if let Some(previous) = item.destination_path.as_deref() {
-        if previous != asset_path {
+        if previous != asset_path
+            && can_retire_previous_archive(pool, item, Path::new(previous)).await
+        {
             let _ = super::file_recycle_service::recycle(Path::new(previous)).await;
             if let Some(previous_asset_id) = item.asset_id.as_deref() {
                 let _ = sqlx::query("DELETE FROM assets WHERE id = ?")
@@ -463,7 +620,9 @@ async fn persist_completed_archive(
         }
     }
     if let Some(previous_avatar) = item.destination_avatar_path.as_deref() {
-        if final_avatar.map(capture_service::path_to_string).as_deref() != Some(previous_avatar) {
+        if final_avatar.map(capture_service::path_to_string).as_deref() != Some(previous_avatar)
+            && can_retire_previous_archive(pool, item, Path::new(previous_avatar)).await
+        {
             let _ = super::file_recycle_service::recycle(Path::new(previous_avatar)).await;
         }
     }
@@ -471,11 +630,52 @@ async fn persist_completed_archive(
     Ok(completed)
 }
 
+async fn can_retire_previous_archive(pool: &SqlitePool, item: &CaptureItem, path: &Path) -> bool {
+    // Switching to a new name must not turn a refused overwrite into deletion
+    // of the same unknown, modified or shared old target.
+    let Ok(Some(expected)) = previous_archive_hash(pool, item, path).await else {
+        return false;
+    };
+    matches!(destination_hash(path).await, Ok(Some(actual)) if actual == expected)
+}
+
+/// Return the actual hash if the destination exists. Do not treat permission
+/// errors or disconnected shares as an absent file.
+async fn destination_hash(path: &Path) -> Result<Option<String>, AppError> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => Ok(Some(capture_service::sha256_file(path).await?)),
+        Ok(_) => Err(AppError::Archive(format!(
+            "归档目标不是文件：{}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn check_destination_identity(
+    actual: Option<&str>,
+    expected_new: &str,
+    expected_previous: Option<&str>,
+    path: &Path,
+) -> Result<bool, AppError> {
+    match actual {
+        Some(hash) if hash == expected_new => Ok(true),
+        None => Ok(false),
+        Some(hash) if Some(hash) == expected_previous => Ok(false),
+        Some(_) => Err(AppError::Archive(format!(
+            "归档目标已被外部修改，或缺少可信的历史内容指纹，已保留原文件：{}。请核对文件后使用新的归档目录或命名重试。",
+            path.display()
+        ))),
+    }
+}
+
 async fn copy_verified_atomic(
     source: &Path,
     destination: &Path,
     capture_item_id: &str,
-) -> Result<u64, AppError> {
+    expected_previous_hash: Option<&str>,
+) -> Result<(u64, String), AppError> {
     let source_metadata = tokio::fs::metadata(source).await?;
     if !source_metadata.is_file() || source_metadata.len() == 0 {
         return Err(AppError::Validation(
@@ -483,26 +683,15 @@ async fn copy_verified_atomic(
         ));
     }
     let expected_length = source_metadata.len();
-
-    if let Ok(existing) = tokio::fs::metadata(destination).await {
-        if existing.is_file() && existing.len() == expected_length {
-            log_service::record_event(LogRecord {
-                level: LogLevel::Debug,
-                module: "capture.archive".to_owned(),
-                message: "verified and reused existing archive file".to_owned(),
-                event: Some("existing_file_reused".to_owned()),
-                capture_item_id: Some(capture_item_id.to_owned()),
-                outcome: Some("succeeded".to_owned()),
-                ..Default::default()
-            });
-            return Ok(expected_length);
-        }
-        return Err(AppError::Archive(format!(
-            "archive destination already exists with unexpected content: {}",
-            destination.display()
-        )));
+    let expected_hash = capture_service::sha256_file(source).await?;
+    if check_destination_identity(
+        destination_hash(destination).await?.as_deref(),
+        &expected_hash,
+        expected_previous_hash,
+        destination,
+    )? {
+        return Ok((expected_length, expected_hash));
     }
-
     let parent = destination.parent().ok_or_else(|| {
         AppError::Validation("archive destination has no parent directory".to_owned())
     })?;
@@ -512,57 +701,73 @@ async fn copy_verified_atomic(
         archive_naming::short_identifier(capture_item_id),
         Uuid::new_v4()
     ));
-
     let result = async {
         let copied = tokio::fs::copy(source, &temporary).await?;
-        let temporary_metadata = tokio::fs::metadata(&temporary).await?;
         if copied != expected_length
-            || !temporary_metadata.is_file()
-            || temporary_metadata.len() != expected_length
+            || capture_service::sha256_file(&temporary).await? != expected_hash
         {
             return Err(AppError::Archive(format!(
-                "archive length verification failed for {}",
+                "archive content verification failed for {}",
                 destination.display()
             )));
         }
         log_service::record_event(LogRecord {
             level: LogLevel::Debug,
             module: "capture.archive".to_owned(),
-            message: "temporary archive copy passed length verification".to_owned(),
+            message: "temporary archive copy passed SHA-256 verification".to_owned(),
             event: Some("copy_verified".to_owned()),
             capture_item_id: Some(capture_item_id.to_owned()),
             outcome: Some("succeeded".to_owned()),
             ..Default::default()
         });
-
-        if let Err(rename_error) = tokio::fs::rename(&temporary, destination).await {
-            // A concurrent retry or a restart after the rename can leave the
-            // deterministic final name in place. Length verification makes the
-            // operation idempotent without overwriting it.
-            if let Ok(existing) = tokio::fs::metadata(destination).await {
-                if existing.is_file() && existing.len() == expected_length {
-                    return Ok(expected_length);
-                }
-            }
-            return Err(AppError::Io(rename_error));
+        // Copying to NAS can take time. Recheck immediately before promotion.
+        if check_destination_identity(
+            destination_hash(destination).await?.as_deref(),
+            &expected_hash,
+            expected_previous_hash,
+            destination,
+        )? {
+            return Ok((expected_length, expected_hash.clone()));
         }
+        verify_archive_promotion(
+            destination,
+            &expected_hash,
+            tokio::fs::rename(&temporary, destination).await,
+        )
+        .await?;
         log_service::record_event(LogRecord {
             level: LogLevel::Debug,
             module: "capture.archive".to_owned(),
-            message: "archive file promoted by atomic rename".to_owned(),
+            message: "archive file promoted by atomic rename and verified".to_owned(),
             event: Some("atomic_rename_completed".to_owned()),
             capture_item_id: Some(capture_item_id.to_owned()),
             outcome: Some("succeeded".to_owned()),
             ..Default::default()
         });
-        Ok(expected_length)
+        Ok((expected_length, expected_hash.clone()))
     }
     .await;
-
     if result.is_err() || tokio::fs::try_exists(&temporary).await.unwrap_or(false) {
         let _ = tokio::fs::remove_file(&temporary).await;
     }
     result
+}
+
+/// A rename error can be an idempotent retry only when the destination is
+/// byte-identical to the new output. Also verify every successful promotion.
+async fn verify_archive_promotion(
+    destination: &Path,
+    expected_hash: &str,
+    rename_result: std::io::Result<()>,
+) -> Result<(), AppError> {
+    if destination_hash(destination).await?.as_deref() == Some(expected_hash) {
+        return Ok(());
+    }
+    rename_result?;
+    Err(AppError::Archive(format!(
+        "archive final content verification failed for {}",
+        destination.display()
+    )))
 }
 
 fn archive_event(
@@ -737,6 +942,334 @@ mod tests {
             avatar,
             destination,
         }
+    }
+
+    #[tokio::test]
+    async fn copy_verified_atomic_replaces_only_the_items_own_archive() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = workspace.path().join("new.png");
+        let destination = workspace.path().join("archived.png");
+        tokio::fs::write(&source, b"fresh-annotated-content")
+            .await
+            .expect("source");
+        tokio::fs::write(&destination, b"old")
+            .await
+            .expect("destination");
+
+        // A foreign file at the destination stays protected.
+        let error = copy_verified_atomic(&source, &destination, "item-1", None)
+            .await
+            .expect_err("foreign destination must be refused");
+        assert!(matches!(error, AppError::Archive(_)));
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"old");
+
+        // Re-processing the item itself replaces its own previous archive.
+        let expected = tokio::fs::metadata(&source).await.unwrap().len();
+        let size = copy_verified_atomic(
+            &source,
+            &destination,
+            "item-1",
+            Some(&capture_service::sha256_file(&destination).await.unwrap()),
+        )
+        .await
+        .expect("replace own archive");
+        assert_eq!(size.0, expected);
+        assert_eq!(
+            tokio::fs::read(&destination).await.unwrap(),
+            b"fresh-annotated-content"
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_length_replacement_requires_old_hash_and_writes_new_bytes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("new.png");
+        let destination = workspace.path().join("old.png");
+        tokio::fs::write(&source, b"new!").await.unwrap();
+        tokio::fs::write(&destination, b"old!").await.unwrap();
+        let old_hash = capture_service::sha256_file(&destination).await.unwrap();
+        assert!(copy_verified_atomic(&source, &destination, "id", None)
+            .await
+            .is_err());
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"old!");
+        let (size, hash) = copy_verified_atomic(&source, &destination, "id", Some(&old_hash))
+            .await
+            .unwrap();
+        assert_eq!(size, 4);
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"new!");
+        assert_eq!(hash, capture_service::sha256_file(&source).await.unwrap());
+        // A retry after promotion, before persisting its new fingerprint, can
+        // reuse exactly the new output even though the old hash is obsolete.
+        assert!(
+            copy_verified_atomic(&source, &destination, "id", Some(&old_hash))
+                .await
+                .is_ok()
+        );
+        // An external edit with the same byte length must not be overwritten.
+        tokio::fs::write(&destination, b"edit").await.unwrap();
+        assert!(
+            copy_verified_atomic(&source, &destination, "id", Some(&hash))
+                .await
+                .is_err()
+        );
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"edit");
+    }
+
+    #[tokio::test]
+    async fn legacy_local_output_adopts_only_a_byte_identical_destination() {
+        let pool = db::test_pool().await;
+        let fixture = ready_to_archive(&pool).await;
+        let completed = archive(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: fixture.item.id.clone(),
+            },
+        )
+        .await
+        .expect("archive");
+        let destination = PathBuf::from(completed.destination_path.clone().unwrap());
+        let clear = |pool: sqlx::SqlitePool, id: String| async move {
+            sqlx::query("DELETE FROM capture_archive_fingerprints WHERE capture_item_id = ?")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("clear fingerprints");
+        };
+        let fingerprint = |pool: sqlx::SqlitePool, id: String, path: String| async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT content_hash FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?",
+            )
+            .bind(id)
+            .bind(path)
+            .fetch_optional(&pool)
+            .await
+            .expect("fingerprint")
+        };
+
+        // A pre-fingerprint archive whose old local output still matches the
+        // destination can be adopted: the local file is our own product.
+        clear(pool.clone(), completed.id.clone()).await;
+        verify_legacy_outputs_before_reprocessing(&pool, &completed)
+            .await
+            .expect("verify legacy outputs");
+        let adopted = fingerprint(
+            pool.clone(),
+            completed.id.clone(),
+            capture_service::path_to_string(&destination),
+        )
+        .await;
+        assert_eq!(
+            adopted,
+            Some(capture_service::sha256_file(&destination).await.unwrap())
+        );
+
+        // An externally edited destination differs from the local output and
+        // must never be adopted as ours.
+        clear(pool.clone(), completed.id.clone()).await;
+        tokio::fs::write(&destination, b"edited by hand")
+            .await
+            .expect("edit destination");
+        verify_legacy_outputs_before_reprocessing(&pool, &completed)
+            .await
+            .expect("verify legacy outputs");
+        assert!(
+            fingerprint(
+                pool.clone(),
+                completed.id.clone(),
+                capture_service::path_to_string(&destination),
+            )
+            .await
+            .is_none(),
+            "an unverifiable destination must not be adopted"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_destination_without_proof_gets_a_stable_repair_name() {
+        let pool = db::test_pool().await;
+        let fixture = ready_to_archive(&pool).await;
+        let completed = archive(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: fixture.item.id.clone(),
+            },
+        )
+        .await
+        .expect("archive");
+        let destination = PathBuf::from(completed.destination_path.clone().unwrap());
+        sqlx::query("DELETE FROM capture_archive_fingerprints WHERE capture_item_id = ?")
+            .bind(&completed.id)
+            .execute(&pool)
+            .await
+            .expect("clear fingerprints");
+        // The repaired output differs from the unknown old file.
+        tokio::fs::write(&fixture.annotated, b"repaired annotated bytes")
+            .await
+            .expect("repaired output");
+
+        let resolved = resolve_legacy_repair_destination(
+            &pool,
+            &completed,
+            &fixture.annotated,
+            destination.clone(),
+        )
+        .await
+        .expect("resolve repaired destination");
+        assert_ne!(resolved, destination);
+        assert!(
+            resolved
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(" - repaired-")),
+            "expected the preserved-name fallback, got {}",
+            resolved.display()
+        );
+        // Retries resolve to the same deterministic name...
+        let again = resolve_legacy_repair_destination(
+            &pool,
+            &completed,
+            &fixture.annotated,
+            destination.clone(),
+        )
+        .await
+        .expect("resolve again");
+        assert_eq!(again, resolved);
+        // ...and the unknown old file is left untouched.
+        assert_eq!(
+            tokio::fs::read(&destination).await.unwrap(),
+            b"annotated result"
+        );
+        // A recorded identity keeps the strict in-place path.
+        sqlx::query(
+            "INSERT INTO capture_archive_fingerprints(capture_item_id, path, content_hash) VALUES (?, ?, ?)",
+        )
+        .bind(&completed.id)
+        .bind(capture_service::path_to_string(&destination))
+        .bind("recorded")
+        .execute(&pool)
+        .await
+        .expect("record fingerprint");
+        let strict = resolve_legacy_repair_destination(
+            &pool,
+            &completed,
+            &fixture.annotated,
+            destination.clone(),
+        )
+        .await
+        .expect("resolve strict");
+        assert_eq!(strict, destination);
+    }
+
+    #[tokio::test]
+    async fn tracked_outputs_have_independent_hashes_and_legacy_targets_fail_closed() {
+        let pool = db::test_pool().await;
+        let fixture = ready_to_archive(&pool).await;
+        let completed = archive(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: fixture.item.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let image = Path::new(completed.destination_path.as_deref().unwrap());
+        let avatar = Path::new(completed.destination_avatar_path.as_deref().unwrap());
+        let image_hash = previous_archive_hash(&pool, &completed, image)
+            .await
+            .unwrap()
+            .unwrap();
+        let avatar_hash = previous_archive_hash(&pool, &completed, avatar)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(image_hash, avatar_hash);
+        assert_eq!(
+            avatar_hash,
+            capture_service::sha256_file(avatar).await.unwrap()
+        );
+        // A partial write records its new identity independently, so a later
+        // avatar failure/retry does not invalidate the already completed image.
+        tokio::fs::write(&fixture.annotated, b"new image")
+            .await
+            .unwrap();
+        copy_tracked_archive(&pool, &completed, &fixture.annotated, image)
+            .await
+            .unwrap();
+        assert_ne!(
+            previous_archive_hash(&pool, &completed, image)
+                .await
+                .unwrap()
+                .unwrap(),
+            image_hash
+        );
+        assert_eq!(
+            previous_archive_hash(&pool, &completed, avatar)
+                .await
+                .unwrap()
+                .unwrap(),
+            avatar_hash
+        );
+        // Legacy archives cannot be blessed by hashing their current bytes.
+        sqlx::query("DELETE FROM capture_archive_fingerprints WHERE capture_item_id = ?")
+            .bind(&completed.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::fs::write(&fixture.avatar, b"new avatar")
+            .await
+            .unwrap();
+        assert!(
+            copy_tracked_archive(&pool, &completed, &fixture.avatar, avatar)
+                .await
+                .is_err()
+        );
+        assert_eq!(tokio::fs::read(avatar).await.unwrap(), b"avatar result");
+        assert!(!can_retire_previous_archive(&pool, &completed, avatar).await);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capture_archive_fingerprints")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn rename_failure_fallback_requires_exact_new_content() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("new.png");
+        let destination = workspace.path().join("old.png");
+        tokio::fs::write(&source, b"new!").await.unwrap();
+        tokio::fs::write(&destination, b"old!").await.unwrap();
+        let expected = capture_service::sha256_file(&source).await.unwrap();
+        let failed = || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated rename failure",
+            ))
+        };
+        assert!(verify_archive_promotion(&destination, &expected, failed())
+            .await
+            .is_err());
+        assert!(verify_archive_promotion(&destination, &expected, Ok(()))
+            .await
+            .is_err());
+        tokio::fs::write(&destination, b"new!").await.unwrap();
+        assert!(verify_archive_promotion(&destination, &expected, failed())
+            .await
+            .is_ok());
+        assert!(verify_archive_promotion(&destination, &expected, Ok(()))
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn promotion_checks_and_retry_checks_do_not_accept_equal_length_foreign_content() {
+        let path = Path::new("archive.png");
+        assert!(
+            check_destination_identity(Some("externally-edited"), "new", Some("old"), path)
+                .is_err()
+        );
+        assert!(check_destination_identity(Some("new"), "new", Some("old"), path).unwrap());
+        assert!(!check_destination_identity(Some("old"), "new", Some("old"), path).unwrap());
     }
 
     #[tokio::test]
@@ -933,7 +1466,7 @@ mod tests {
         tokio::fs::create_dir_all(taken.parent().expect("parent"))
             .await
             .expect("directory");
-        tokio::fs::write(&taken, b"blocker")
+        tokio::fs::write(&taken, b"different bytes")
             .await
             .expect("blocking file");
 

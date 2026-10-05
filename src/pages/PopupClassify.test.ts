@@ -11,6 +11,7 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     getAppSettings: vi.fn(),
     runtimeStatus: vi.fn(),
     readImage: vi.fn(),
+    readThumbnail: vi.fn(),
     suggestForCapture: vi.fn(),
     label: vi.fn(),
     verifyCaptureIdentity: vi.fn(),
@@ -111,6 +112,7 @@ beforeEach(() => {
     lastError: null,
   });
   api.readImage.mockResolvedValue(new ArrayBuffer(4));
+  api.readThumbnail.mockResolvedValue(new ArrayBuffer(4));
   api.suggestForCapture.mockResolvedValue(item);
 });
 
@@ -132,6 +134,30 @@ describe("PopupClassify", () => {
 
     expect(wrapper.text()).toContain("推荐：Mira");
     expect(wrapper.text()).toContain("1/1");
+    wrapper.unmount();
+  });
+
+  it("shows a small avatar for characters that have a capture", async () => {
+    api.classifyPopupContext.mockResolvedValue({
+      items: [item],
+      projectId: "project-1",
+      projectName: null,
+      characters: [{ ...character, avatarCaptureItemId: "avatar-item" }],
+    });
+    api.suggestForCapture.mockResolvedValue({
+      ...item,
+      suggestedCharacterId: "char-1",
+      recognitionConfidence: 0.81,
+      reviewStatus: "pending",
+    });
+    const wrapper = mount(PopupClassify);
+    await flushPromises();
+
+    await wrapper.findAll("button").find((button) => button.text().includes("人物"))!.trigger("click");
+    await flushPromises();
+
+    expect(api.readThumbnail).toHaveBeenCalledWith("avatar-item", "avatar");
+    expect(wrapper.find(".popup-character .popup-avatar img").exists()).toBe(true);
     wrapper.unmount();
   });
 

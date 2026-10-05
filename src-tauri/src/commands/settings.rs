@@ -31,6 +31,9 @@ pub async fn update_app_settings(
     let previous = app_settings_service::get(&state.pool).await?;
     let saved = app_settings_service::update(&state.pool, input).await?;
     vision_worker_service::set_image_processing_core_limit(saved.image_processing_core_limit);
+    crate::services::thumbnail_service::set_processing_parallelism(
+        saved.image_processing_core_limit,
+    );
     shortcuts::reconfigure(&app, &previous, &saved)?;
     settings_event("app_settings_updated");
     Ok(saved)

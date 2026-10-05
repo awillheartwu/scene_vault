@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { ScanFace, Check, X, RotateCcw, LoaderCircle } from '@lucide/vue';
+import { ScanFace, Check, X, RotateCcw, LoaderCircle, Sparkles } from '@lucide/vue';
 import type { FaceRoi } from '@/lib/capture-api';
 import { normalizeFaceBox, type FaceBox } from '@/lib/face-box';
-const props = defineProps<{ imageUrl: string | null; itemId: string; modelValue: FaceRoi | null; faceBox?: FaceBox | null; busy?: boolean; loading?: boolean; disabled?: boolean; error?: string; inline?: boolean }>();
-const emit = defineEmits<{ confirm: [roi: FaceRoi | null] }>();
+const props = defineProps<{ imageUrl: string | null; itemId: string; modelValue: FaceRoi | null; faceBox?: FaceBox | null; busy?: boolean; loading?: boolean; disabled?: boolean; error?: string; inline?: boolean; mode?: 'auto' | 'normalized' }>();
+const emit = defineEmits<{ confirm: [roi: FaceRoi | null, mode: 'auto' | 'normalized'] }>();
+const effectiveMode = computed<'auto' | 'normalized'>(() => props.mode === 'normalized' ? 'normalized' : 'auto');
 const editing = defineModel<boolean>('editing', { default: false });
 const trigger = ref<HTMLButtonElement | null>(null);
 const keyboardBox = ref<HTMLElement | null>(null);
@@ -73,7 +74,7 @@ function move(event: PointerEvent) {
   if (!start || !end) return;
   draft.value = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) };
 }
-function confirm(value: FaceRoi | null) { emit('confirm', value); cancel(); }
+function submit(value: FaceRoi | null, mode: 'auto' | 'normalized') { emit('confirm', value, mode); cancel(); }
 onBeforeUnmount(()=>observer?.disconnect());
 </script>
 <template>
@@ -85,11 +86,20 @@ onBeforeUnmount(()=>observer?.disconnect());
     <div class="roi-toolbar">
       <span v-if="busy || loading" class="roi-status" role="status"><LoaderCircle :size="14" class="animate-spin" />{{ busy ? '识别中…' : '读取选区…' }}</span>
       <template v-if="editing">
-        <button type="button" class="roi-confirm" :disabled="busy || loading || disabled || !draft || draft.width <= 0 || draft.height <= 0" @click="confirm(draft)"><Check :size="14" />确认主脸</button>
+        <button type="button" class="roi-confirm" :disabled="busy || loading || disabled || !draft || draft.width <= 0 || draft.height <= 0" @click="submit(draft, effectiveMode)"><Check :size="14" />确认主脸</button>
+        <button
+          type="button"
+          class="roi-big-face"
+          :class="{ active: effectiveMode === 'normalized' }"
+          :aria-pressed="effectiveMode === 'normalized'"
+          :disabled="busy || loading || disabled || !draft || draft.width <= 0 || draft.height <= 0"
+          title="按整张脸重新检测，适合大特写截图；再次点击关闭"
+          @click="submit(draft, effectiveMode === 'normalized' ? 'auto' : 'normalized')"
+        ><Sparkles :size="14" />整脸优化</button>
         <button type="button" @click="cancel"><X :size="14" />取消</button>
       </template>
       <button v-else ref="trigger" type="button" :disabled="busy || loading || disabled || !imageUrl" :aria-expanded="editing" @click="toggle"><ScanFace :size="15" />{{ modelValue ? '重新框选' : '框选主脸' }}</button>
-      <button v-if="modelValue || error" type="button" :disabled="busy || loading || disabled" title="放弃框选，恢复自动选脸" aria-label="放弃框选，恢复自动选脸" @click="confirm(null)"><RotateCcw :size="14" /></button>
+      <button v-if="modelValue || error" type="button" :disabled="busy || loading || disabled" title="放弃框选，恢复自动选脸" aria-label="放弃框选，恢复自动选脸" @click="submit(null, 'auto')"><RotateCcw :size="14" /></button>
     </div>
     <p v-if="editing" class="roi-hint">拖动框选一张脸 · 方向键微调 · Shift 调整大小</p>
     <p v-if="error" role="alert" class="roi-message error">{{ error }}</p>
@@ -108,6 +118,7 @@ onBeforeUnmount(()=>observer?.disconnect());
 .roi-toolbar button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--foreground); font-size: 12px; cursor: pointer; }
 .roi-toolbar button:hover { background: var(--secondary); }
 .roi-toolbar .roi-confirm { background: var(--accent); color: var(--accent-foreground); }
+.roi-toolbar .roi-big-face.active { background: var(--accent); color: var(--accent-foreground); }
 .roi-toolbar button:disabled { opacity: .45; cursor: not-allowed; }
 .roi-toolbar button:focus-visible, .roi-image:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .roi-status { display: flex; align-items: center; gap: 5px; padding: 0 5px; color: var(--muted-foreground); font-size: 11px; }
