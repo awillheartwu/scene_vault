@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "scene_vault"
-version = "1.0.15"
+version = "1.0.16"
 dependencies = [
  "chrono",
  "image",

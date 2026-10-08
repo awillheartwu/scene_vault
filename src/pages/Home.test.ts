@@ -179,8 +179,24 @@ describe("Home project library", () => {
     await wrapper.get('[aria-label="列表视图"]').trigger("click");
 
     expect(wrapper.find(".project-list").exists()).toBe(true);
+    expect(wrapper.text()).toContain("图片 12 张 · 共 117.7 MB");
     expect(wrapper.get('[aria-label="列表视图"]').attributes("aria-pressed")).toBe("true");
     expect(localStorage.getItem("scene-vault.home.project-view")).toBe("list");
+
+    wrapper.unmount();
+  });
+
+  it("sorts projects by total image size", async () => {
+    const wrapper = mount(Home);
+    await flushPromises();
+
+    expect(wrapper.get("select").text()).toContain("图片总大小");
+
+    await wrapper.get("select").setValue("size");
+    await flushPromises();
+
+    const names = wrapper.findAll(".project-card h2").map((node) => node.text());
+    expect(names).toEqual(["Summer Heat", "BAD", "Eternum"]);
 
     wrapper.unmount();
   });
