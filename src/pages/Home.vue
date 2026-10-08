@@ -42,7 +42,7 @@ import {
 } from "@/lib/capture-api";
 
 type ViewMode = "grid" | "list";
-type SortMode = "recent" | "attention" | "name" | "captures" | "created";
+type SortMode = "recent" | "attention" | "name" | "captures" | "created" | "size";
 type SortDirection = "asc" | "desc";
 
 const VIEW_STORAGE_KEY = "scene-vault.home.project-view";
@@ -60,6 +60,7 @@ const SORT_MODES: { value: SortMode; label: string }[] = [
   { value: "attention", label: "待处理" },
   { value: "name", label: "名称" },
   { value: "captures", label: "图片数" },
+  { value: "size", label: "图片总大小" },
   { value: "created", label: "创建时间" },
 ];
 const SORT_DIRECTION_DEFAULTS: Record<SortMode, SortDirection> = {
@@ -67,6 +68,7 @@ const SORT_DIRECTION_DEFAULTS: Record<SortMode, SortDirection> = {
   attention: "desc",
   name: "asc",
   captures: "desc",
+  size: "desc",
   created: "desc",
 };
 const savedSort = localStorage.getItem(SORT_STORAGE_KEY);
@@ -139,6 +141,8 @@ const visibleProjects = computed(() => {
       primary = left.name.localeCompare(right.name, "zh-CN", { sensitivity: "base" });
     } else if (sortMode.value === "captures") {
       primary = left.captureCount - right.captureCount;
+    } else if (sortMode.value === "size") {
+      primary = left.totalBytes - right.totalBytes;
     } else if (sortMode.value === "created") {
       primary =
         new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
@@ -517,6 +521,9 @@ function setupLabel(project: ProjectOverviewSummary): string {
               <span class="pending"><i />{{ project.awaitingCount }} 待分类</span>
               <span class="processing"><i />{{ project.processingCount }} 处理中</span>
               <span v-if="project.failedCount" class="failed"><i />{{ project.failedCount }} 失败</span>
+              <span v-if="project.captureCount" class="row-media">
+                图片 {{ project.captureCount }} 张 · 共 {{ formatBytes(project.totalBytes) }}
+              </span>
               <span class="row-session" :class="{ active: project.activeSessionCount }">
                 {{ project.activeSessionCount ? "捕获中" : `${project.sessionCount} 个会话` }}
               </span>
