@@ -9,7 +9,7 @@ Scene Vault 的人脸识别评测工具，已从"临时脚本"升级为 recognit
   必须重跑，防止静默退化；
 - 为每个识别器确定建议阈值 / margin / 校验带宽（benchmark 校准）；
 - 用 leave-one-game-out 验证"全局 profile 到新游戏上是否还成立"；
-- 历史上已经抓出两个重大问题：cv2 5.0.0 特征污染、alignCrop 跨进程漂移。
+- 已经踩过两个坑：cv2 5.x 特征污染、alignCrop 跨进程漂移（见文末「已知坑」）。
 
 数据来自用户自建的游戏截图集（按角色名组织），不是公开数据集——评测结论只对当前
 数据集覆盖的画面风格负责，不能直接外推到所有游戏。
@@ -182,10 +182,10 @@ Python AI sidecar/运行时与模型资源，不因本次结果迁移到 Rust �
 521 MiB。完整的 Rust/WebView2/Python、CPU、Private Bytes 和磁盘体积调研见
 [RESOURCE_USAGE.md](RESOURCE_USAGE.md)。
 
-## 历史教训（不要重蹈）
+## 已知坑
 
-- 2026-08-06：cv2 5.0.0 的 `FaceRecognizerSF.feature()` 产生"黑图特征"，
-  统计全部作废；依赖已固定 <5。
-- 2026-08-08：`alignCrop` 只传 1x4 边界框时跨进程漂移（同图特征余弦可低到
-  0.3），单进程内自检通过但整跑两次对不上；修复为传 YuNet 5 关键点（1x14），
-  并固化跨进程回归测试。**换 alignment 后第一件事是跑确定性回归测试。**
+- cv2 5.x 的 `FaceRecognizerSF.feature()` 产生"黑图特征"，统计全部作废；依赖固定
+  为 <5，升级 OpenCV 前先重跑 benchmark。
+- `alignCrop` 只传 1x4 边界框会跨进程漂移（同图特征余弦可低到 0.3），单进程自检
+  查不出来；必须传 YuNet 5 关键点（1x14）。改 alignment 后第一件事是跑跨进程确定性
+  回归测试。

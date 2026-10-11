@@ -27,6 +27,34 @@ async function invoke<T>(
   }
 }
 
+/**
+ * Image reads dominate capture-grid browsing. One debug record per successful
+ * read lets scripts/analyze-image-timing.ps1 compare the frontend-observed
+ * latency (invoke round trip, including IPC transfer) with the backend
+ * segments. Best effort only.
+ */
+function reportImageReadTiming(
+  command: string,
+  captureItemId: string,
+  variant: string,
+  bytes: number,
+  durationMs: number,
+): void {
+  void tauriInvoke("record_client_event", {
+    input: {
+      level: "debug",
+      module: "capture.image",
+      event: "read_timing",
+      message: `${command} variant=${variant} bytes=${bytes}`,
+      operationId: command,
+      captureItemId,
+      durationMs,
+      outcome: "ok",
+      channel: "perf",
+    },
+  }).catch(() => undefined);
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -55,6 +83,8 @@ export interface ProjectOverviewSummary {
   completedCount: number;
   failedCount: number;
   totalBytes: number;
+  engine: string | null;
+  archiveOutputSize: string;
   lastActivityAt: string;
   latestCaptureItemId: string | null;
   coverCaptureItemId: string | null;
@@ -466,6 +496,8 @@ export interface LogPolicySettings {
   maxFileSizeMb: number;
   maxArchivedFiles: number;
   automaticCleanup: boolean;
+  /** Performance instrumentation goes to its own file; off keeps the code. */
+  performanceLogging: boolean;
 }
 
 export interface LogStatus {
@@ -680,6 +712,9 @@ export interface AppSettings {
   archiveManifestAutoWrite: boolean;
   thumbnailCacheSizeMb: number;
   imageProcessingCoreLimit: number;
+  captureOutputAutoCleanupEnabled: boolean;
+  captureOutputAutoCleanupThresholdMb: number;
+  captureOutputAutoCleanupRetentionDays: number;
 }
 
 export interface ThumbnailCacheStatus {
@@ -947,6 +982,8 @@ export const captureApi = {
     durationMs?: number | null;
     outcome?: string | null;
     errorCode?: string | null;
+    /** "perf" routes into the performance log; omitted keeps the main log. */
+    channel?: "log" | "perf";
   }) => invoke<void>("record_client_event", { input }),
   getLogStatus: () => invoke<LogStatus>("get_log_status"),
   getLogSettings: () => invoke<LogPolicySettings>("get_log_settings"),
@@ -982,6 +1019,12 @@ export const captureApi = {
     invoke<ArchiveNamingSettings>("get_archive_naming_settings"),
   updateArchiveNamingSettings: (settings: ArchiveNamingSettings) =>
     invoke<ArchiveNamingSettings>("update_archive_naming_settings", {
+      input: { settings },
+    }),
+  getArchiveOutputSettings: () =>
+    invoke<ArchiveOutputSettings>("get_archive_output_settings"),
+  updateArchiveOutputSettings: (settings: ArchiveOutputSettings) =>
+    invoke<ArchiveOutputSettings>("update_archive_output_settings", {
       input: { settings },
     }),
   getRecognitionSettings: () =>
@@ -1060,8 +1103,12 @@ export const captureApi = {
     invoke<VisionSettings>("update_vision_settings", { input: { settings } }),
   listBundledFonts: () => invoke<BundledFont[]>("list_bundled_fonts"),
   checkVision: () => invoke<VisionHealth>("check_vision_engine"),
-  readImage: (captureItemId: string, variant: "source" | "annotated" | "avatar" | "destination") =>
-    invoke<ArrayBuffer>(
+  readImage: async (
+    captureItemId: string,
+    variant: "source" | "annotated" | "avatar" | "destination",
+  ) => {
+    const started = performance.now();
+    const bytes = await invoke<ArrayBuffer>(
       "read_capture_image",
       { input: { captureItemId, variant } },
       // Media reads are speculative: cards deliberately fall back to another
@@ -1069,14 +1116,147 @@ export const captureApi = {
       // Scene Vault. The backend still updates file state, while the caller
       // decides whether an explicit preview should surface the error.
       { recordFailure: false },
-    ),
-  readThumbnail: (captureItemId: string, variant: "source" | "annotated" | "avatar" | "destination") =>
-    invoke<ArrayBuffer>(
+    );
+    reportImageReadTiming(
+      "read_capture_image",
+      captureItemId,
+      variant,
+      bytes.byteLength,
+      performance.now() - started,
+    );
+    return bytes;
+  },
+  readThumbnail: async (
+    captureItemId: string,
+    variant: "source" | "annotated" | "avatar" | "destination",
+  ) => {
+    const started = performance.now();
+    const bytes = await invoke<ArrayBuffer>(
       "read_capture_thumbnail",
       { input: { captureItemId, variant } },
       { recordFailure: false },
-    ),
+    );
+    reportImageReadTiming(
+      "read_capture_thumbnail",
+      captureItemId,
+      variant,
+      bytes.byteLength,
+      performance.now() - started,
+    );
+    return bytes;
+  },
   getThumbnailCacheStatus: () => invoke<ThumbnailCacheStatus>("thumbnail_cache_status"),
+};
+
+export interface EngineDetection {
+  engine: string;
+  engineRoot: string;
+  gameDirectory: string;
+  pythonMajor: number | null;
+  bridgeInstalled: boolean;
+}
+
+export interface ProjectEngineIntegration {
+  id: string;
+  projectId: string;
+  engine: string;
+  engineRoot: string;
+  gameDirectory: string;
+  pythonMajor: number | null;
+  bridgeVersion: string;
+  manifestJson: string;
+  installedAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectEngineIntegrationView {
+  integration: ProjectEngineIntegration;
+  bridgeFilePresent: boolean;
+  compiledFilePresent: boolean;
+  bundledBridgeVersion: string;
+  /** Install-time advisory, e.g. a kept compiled artifact we cannot verify. */
+  warning: string | null;
+}
+
+export interface ProjectGameLaunchOption {
+  integrationId: string;
+  engineRoot: string;
+  executable: string;
+  gameName: string;
+  /** Best guess for the main executable; the menu keeps the alternatives. */
+  recommended: boolean;
+}
+
+export interface BridgeUninstallResult {
+  removedFiles: string[];
+  keptFiles: string[];
+}
+
+export interface CaptureEngineMetadata {
+  captureItemId: string;
+  projectId: string;
+  engine: string;
+  schemaVersion: number;
+  bridgeVersion: string;
+  speakerRaw: string | null;
+  speakerSource: string | null;
+  dialogue: string | null;
+  suggestedCharacterId: string | null;
+  virtualWidth: number | null;
+  virtualHeight: number | null;
+  physicalWidth: number | null;
+  physicalHeight: number | null;
+  payloadJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CapturePolicyView {
+  projectSize: string;
+  resolvedSize: string;
+  /** Global default, so the inherit label never shows a project override. */
+  globalSize: string;
+}
+
+export interface ArchiveOutputSettings {
+  size: string;
+}
+
+export const engineApi = {
+  detectEngine: (path: string) =>
+    invoke<EngineDetection>("detect_engine", { input: { path } }),
+  getProjectIntegration: (projectId: string) =>
+    invoke<ProjectEngineIntegrationView[]>("get_project_engine_integration", {
+      input: { projectId },
+    }),
+  installBridge: (projectId: string, path: string) =>
+    invoke<ProjectEngineIntegrationView>("install_project_engine_bridge", {
+      input: { projectId, path },
+    }),
+  uninstallBridge: (projectId: string, integrationId?: string) =>
+    invoke<BridgeUninstallResult>("uninstall_project_engine_bridge", {
+      input: integrationId ? { projectId, integrationId } : { projectId },
+    }),
+  getCaptureMetadata: (captureItemId: string) =>
+    invoke<CaptureEngineMetadata | null>("get_capture_engine_metadata", {
+      input: { captureItemId },
+    }),
+  getCapturePolicy: (projectId: string) =>
+    invoke<CapturePolicyView>("get_project_capture_policy", { input: { projectId } }),
+  setArchiveOutputSize: (projectId: string, archiveOutputSize: string) =>
+    invoke<CapturePolicyView>("set_project_archive_output_size", {
+      input: { projectId, archiveOutputSize },
+    }),
+  listProjectGames: (projectId: string) =>
+    invoke<ProjectGameLaunchOption[]>("list_project_games", { input: { projectId } }),
+  launchGame: (projectId: string, integrationId?: string, executable?: string) =>
+    invoke<ProjectGameLaunchOption>("launch_project_game", {
+      input: {
+        projectId,
+        ...(integrationId ? { integrationId } : {}),
+        ...(executable ? { executable } : {}),
+      },
+    }),
 };
 
 export async function pickDirectory(): Promise<string | null> {

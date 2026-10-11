@@ -4,8 +4,13 @@ import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
 import CharacterAvatar from '@/components/character/CharacterAvatar.vue';
 import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
 import { parseFaceBox } from '@/lib/face-box';
+import {
+  characterMatchesSpeaker,
+  findCharacterBySpeaker,
+  isLikelySpeakerName,
+} from "@/lib/speaker-suggestion";
 import { describeError } from '@/lib/vision-errors';
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   AlertCircle,
@@ -25,11 +30,14 @@ import {
   LoaderCircle,
   Pencil,
   Play,
+  Plug,
   Plus,
   RefreshCw,
   Search,
   Sparkles,
   Trash2,
+  Unplug,
+  UserPlus,
   UserRound,
   Wifi,
 } from "@lucide/vue";
@@ -53,6 +61,7 @@ import {
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
 import {
   captureApi,
+  engineApi,
   captureClassificationLabel,
   captureStatusLabel,
   pathFileName,
@@ -61,11 +70,15 @@ import {
   revealPath,
   type CaptureItem,
   type CaptureClassification,
+  type CaptureEngineMetadata,
   type CaptureRuntimeStatus,
   type CaptureSession,
   type Character,
   type Project,
   type ProjectSourceDirectory,
+  type ProjectEngineIntegrationView,
+  type ProjectGameLaunchOption,
+  type CapturePolicyView,
   type UnimportedCapture,
   type VerificationResult,
 } from "@/lib/capture-api";
@@ -254,6 +267,389 @@ const suggestedCharacter = computed(() => {
   return characters.value.find((character) => character.id === item.suggestedCharacterId) ?? null;
 });
 
+// Ren'Py bridge metadata for the selected capture: speaker, dialogue,
+// resolutions and extracted originals. Absent for every non-bridged capture.
+const engineMetadata = ref<CaptureEngineMetadata | null>(null);
+let engineMetadataRequest = 0;
+const engineSuggestedCharacter = computed(() => {
+  // Live match first: a character created or renamed after the capture still
+  // matches the speaker name. The stored suggestion is only reused while that
+  // character still answers to the speaker; a renamed-away character must not
+  // be recommended for its old speaker.
+  const live = findCharacterBySpeaker(characters.value, engineMetadata.value?.speakerRaw);
+  if (live) return live;
+  const suggestedId = engineMetadata.value?.suggestedCharacterId;
+  if (suggestedId) {
+    const stored = characters.value.find((character) => character.id === suggestedId);
+    if (stored && characterMatchesSpeaker(stored, engineMetadata.value?.speakerRaw)) {
+      return stored;
+    }
+  }
+  return null;
+});
+const speakerName = computed(() => engineMetadata.value?.speakerRaw?.trim() ?? "");
+const canCreateCharacterFromSpeaker = computed(
+  () =>
+    pendingClassification.value === "person" &&
+    isLikelySpeakerName(speakerName.value) &&
+    !engineSuggestedCharacter.value,
+);
+
+// A manual pick (or an explicit clear) always wins over the auto-preselect:
+// the engine suggestion only fills an empty selection when the vision
+// suggestion is absent, and never steals a choice back.
+const characterTouchedFor = ref<string | null>(null);
+
+function pickCharacter(characterId: string | null) {
+  if (selectedItem.value) characterTouchedFor.value = selectedItem.value.id;
+  // A manual pick (even the same character the auto-pick chose) is no longer
+  // automatic: it must survive switching images.
+  autoPickedCharacter.value = null;
+  selectedCharacterId.value = characterId;
+}
+
+// The automatically picked suggestion of one capture, so a later, stronger
+// result (vision over dialogue) can revise it — as long as the user has not
+// picked anything themselves.
+const autoPickedCharacter = ref<{ itemId: string; characterId: string } | null>(null);
+
+watchEffect(() => {
+  const item = selectedItem.value;
+  if (!item || pendingClassification.value !== "person") return;
+  if (characterTouchedFor.value === item.id) return;
+  const preferred = suggestedCharacter.value?.id ?? engineSuggestedCharacter.value?.id ?? null;
+  const auto =
+    autoPickedCharacter.value && autoPickedCharacter.value.itemId === item.id
+      ? autoPickedCharacter.value.characterId
+      : null;
+  if (auto) {
+    if (selectedCharacterId.value === auto && preferred !== auto) {
+      selectedCharacterId.value = preferred;
+      autoPickedCharacter.value = preferred ? { itemId: item.id, characterId: preferred } : null;
+    }
+    return;
+  }
+  if (selectedCharacterId.value) return;
+  // The dialogue match fills an empty selection automatically when the vision
+  // suggestion is absent — or when both point at the same character (a double
+  // match is the strongest signal and may pre-select). The vision suggestion
+  // alone stays a human choice.
+  const engine = engineSuggestedCharacter.value;
+  const agrees =
+    suggestedCharacter.value !== null &&
+    engine !== null &&
+    suggestedCharacter.value.id === engine.id;
+  if (engine && (!suggestedCharacter.value || agrees)) {
+    selectedCharacterId.value = engine.id;
+    autoPickedCharacter.value = { itemId: item.id, characterId: engine.id };
+  }
+});
+
+async function loadEngineMetadata() {
+  const item = selectedItem.value;
+  // Selection changes — including clearing the selection — invalidate older
+  // responses, and the previous capture’s context is dropped immediately so
+  // its speaker suggestion can never be clicked for the new image.
+  const token = ++engineMetadataRequest;
+  engineMetadata.value = null;
+  if (!item) return;
+  try {
+    const view = await engineApi.getCaptureMetadata(item.id);
+    if (token === engineMetadataRequest) engineMetadata.value = view;
+  } catch {
+    if (token === engineMetadataRequest) engineMetadata.value = null;
+  }
+}
+
+// Ren'Py plugin state for the session toolbar: detection runs whenever a
+// source directory is added, and a clean Ren'Py game is installed silently.
+const engineIntegrations = ref<ProjectEngineIntegrationView[]>([]);
+const engineDetectedRoot = ref<string | null>(null);
+const engineWorking = ref(false);
+const engineError = ref<string | null>(null);
+const engineConfirmUninstall = ref(false);
+const engineConfirmUninstallId = ref<string | null>(null);
+const engineUninstallOpen = ref(false);
+const gameLaunchOptions = ref<ProjectGameLaunchOption[]>([]);
+const gameLaunchOpen = ref(false);
+const engineInstalled = computed(() => engineIntegrations.value.length > 0);
+const engineStaleInstalls = computed(() =>
+  engineIntegrations.value.filter(
+    (view) => view.integration.bridgeVersion !== view.bundledBridgeVersion,
+  ),
+);
+const archivePolicy = ref<CapturePolicyView | null>(null);
+const archiveSizeChoice = ref("inherit");
+
+function archiveSizeLabel(size: string | null | undefined): string {
+  switch (size) {
+    case "1080p":
+      return "1080p";
+    case "1440p":
+      return "1440p";
+    case "2160p":
+      return "2160p";
+    default:
+      return "保持原样";
+  }
+}
+
+const engineButtonTitle = computed(() => {
+  if (engineError.value) return engineError.value;
+  const stale = engineStaleInstalls.value[0];
+  if (stale) {
+    return `插件版本过旧（${stale.integration.bridgeVersion} → ${stale.bundledBridgeVersion}），点击重新安装`;
+  }
+  const missing = engineIntegrations.value.find(
+    (view) => !view.bridgeFilePresent || !view.compiledFilePresent,
+  );
+  if (missing) {
+    return `插件文件缺失（可能被游戏更新或校验移除）：${missing.integration.engineRoot}。点击重新安装`;
+  }
+  const warned = engineIntegrations.value.find((view) => view.warning);
+  if (warned?.warning) return warned.warning;
+  if (engineIntegrations.value.length) {
+    const roots = engineIntegrations.value
+      .map((view) => view.integration.engineRoot)
+      .join("、");
+    return `${engineIntegrations.value.length} 个 Ren'Py 插件已安装：${roots}。点击可安装检测到的其他游戏或重装`;
+  }
+  if (engineDetectedRoot.value) return "检测到 Ren'Py 游戏，可安装插件";
+  return "未检测到 Ren'Py 游戏；点击可手动选择游戏目录";
+});
+
+let engineStateRequest = 0;
+
+async function loadEngineState() {
+  const current = projectId.value;
+  // Responses carry a request generation and are only applied while the same
+  // project is still selected: a late answer for project A must never
+  // overwrite what project B is showing.
+  const token = ++engineStateRequest;
+  if (!current) {
+    engineIntegrations.value = [];
+    archivePolicy.value = null;
+    engineDetectedRoot.value = null;
+    engineError.value = null;
+    return;
+  }
+  try {
+    const [integrations, policy] = await Promise.all([
+      engineApi.getProjectIntegration(current),
+      engineApi.getCapturePolicy(current).catch(() => null),
+    ]);
+    if (token !== engineStateRequest || projectId.value !== current) return;
+    engineIntegrations.value = integrations;
+    engineConfirmUninstall.value = false;
+    engineConfirmUninstallId.value = null;
+    engineUninstallOpen.value = false;
+    archivePolicy.value = policy;
+    if (policy) archiveSizeChoice.value = policy.projectSize;
+  } catch (error) {
+    if (token === engineStateRequest && projectId.value === current) {
+      engineError.value = normalizeError(error);
+    }
+  }
+}
+
+let archiveSaveRequest = 0;
+
+async function saveArchiveSize() {
+  const current = projectId.value;
+  if (!current) return;
+  const token = ++archiveSaveRequest;
+  try {
+    const policy = await engineApi.setArchiveOutputSize(current, archiveSizeChoice.value);
+    if (token !== archiveSaveRequest || projectId.value !== current) return;
+    // Invalidate any specification read that started before this save; its
+    // stale value must not overwrite what was just persisted.
+    engineStateRequest += 1;
+    archivePolicy.value = policy;
+    archiveSizeChoice.value = policy.projectSize;
+    toast.success("归档图规格已保存。");
+  } catch (error) {
+    if (token === archiveSaveRequest && projectId.value === current) {
+      toast.error(normalizeError(error));
+      if (archivePolicy.value) archiveSizeChoice.value = archivePolicy.value.projectSize;
+    }
+  }
+}
+
+// The project is pinned by the caller for the whole operation: detecting and
+// installing must never slide into whatever project happens to be selected
+// when an awaited step finishes. Returns the install result (null on failure)
+// so callers can surface its warning instead of dropping it.
+async function installEnginePluginAt(
+  project: string,
+  root: string,
+): Promise<ProjectEngineIntegrationView | null> {
+  try {
+    return await engineApi.installBridge(project, root);
+  } catch (error) {
+    if (projectId.value === project) engineError.value = normalizeError(error);
+    return null;
+  }
+}
+
+// Batch install/reinstall from the toolbar: every game already bridged (for
+// version upgrades) plus every source directory that still detects as Ren'Py.
+async function installEnginePlugins(interactive = true): Promise<boolean> {
+  const current = projectId.value;
+  if (!current || engineWorking.value) return false;
+  engineError.value = null;
+  const roots = new Set<string>();
+  for (const view of engineIntegrations.value) roots.add(view.integration.engineRoot);
+  for (const dir of sourceDirs.value) {
+    try {
+      const detection = await engineApi.detectEngine(dir.directory);
+      roots.add(detection.engineRoot);
+      if (projectId.value === current) engineDetectedRoot.value = detection.engineRoot;
+    } catch {
+      // Not a Ren'Py game directory.
+    }
+  }
+  if (!roots.size) {
+    if (!interactive) return false;
+    const path = await pickDirectory();
+    if (!path) return false;
+    try {
+      const detection = await engineApi.detectEngine(path);
+      roots.add(detection.engineRoot);
+      engineDetectedRoot.value = detection.engineRoot;
+    } catch (error) {
+      engineError.value = normalizeError(error);
+      toast.error(engineError.value);
+      return false;
+    }
+  }
+  engineWorking.value = true;
+  let installed = 0;
+  let failed = 0;
+  const warnings: string[] = [];
+  try {
+    for (const root of roots) {
+      const view = await installEnginePluginAt(current, root);
+      if (view) {
+        installed += 1;
+        if (view.warning) warnings.push(view.warning);
+      } else {
+        failed += 1;
+      }
+    }
+    if (projectId.value === current) {
+      await loadEngineState();
+    }
+    if (warnings.length) {
+      toast.info(warnings.join("；"));
+    }
+    if (interactive) {
+      if (failed) {
+        toast.error(`已安装 ${installed} 个插件，${failed} 个失败：${engineError.value ?? ""}`);
+      } else {
+        toast.success(`已安装/重装 ${installed} 个 Ren'Py 插件。`);
+      }
+    }
+    return installed > 0;
+  } finally {
+    engineWorking.value = false;
+  }
+}
+
+async function uninstallEnginePlugin(integrationId: string | null = null) {
+  const current = projectId.value;
+  if (!current || engineWorking.value) return;
+  const targetId = integrationId ?? engineIntegrations.value[0]?.integration.id ?? null;
+  if (!targetId) return;
+  if (integrationId) {
+    if (engineConfirmUninstallId.value !== targetId) {
+      engineConfirmUninstallId.value = targetId;
+      return;
+    }
+  } else if (!engineConfirmUninstall.value) {
+    engineConfirmUninstall.value = true;
+    return;
+  }
+  engineConfirmUninstall.value = false;
+  engineConfirmUninstallId.value = null;
+  engineWorking.value = true;
+  try {
+    const result = await engineApi.uninstallBridge(current, targetId);
+    if (result.keptFiles.length) {
+      toast.error(`部分文件无法证明归属，已保留未删除：${result.keptFiles.join("；")}`);
+    } else {
+      toast.success("插件已卸载。");
+    }
+    if (projectId.value === current) await loadEngineState();
+  } catch (error) {
+    toast.error(normalizeError(error));
+  } finally {
+    engineWorking.value = false;
+  }
+}
+
+// A new source directory that turns out to be a Ren'Py game is bridged
+// silently; installing one game never disturbs the other installs.
+async function detectAndMaybeInstallEngine(path: string) {
+  const current = projectId.value;
+  if (!current) return;
+  try {
+    const detection = await engineApi.detectEngine(path);
+    if (projectId.value !== current) return;
+    engineDetectedRoot.value = detection.engineRoot;
+    const known = engineIntegrations.value.some(
+      (view) => view.integration.gameDirectory === detection.gameDirectory,
+    );
+    if (known) return;
+    engineWorking.value = true;
+    let warning: string | null = null;
+    try {
+      const view = await installEnginePluginAt(current, detection.engineRoot);
+      warning = view?.warning ?? null;
+    } finally {
+      engineWorking.value = false;
+    }
+    if (warning) toast.info(warning);
+    if (projectId.value === current) await loadEngineState();
+  } catch {
+    if (projectId.value === current) engineDetectedRoot.value = null;
+  }
+}
+
+async function launchProjectGame() {
+  const current = projectId.value;
+  if (!current || busy.value) return;
+  try {
+    const options = await engineApi.listProjectGames(current);
+    if (projectId.value !== current) return;
+    if (!options.length) {
+      toast.error("没有找到可启动的游戏：请先安装插件，或确认游戏目录里有可执行文件。");
+      return;
+    }
+    if (options.length === 1) {
+      await startProjectGame(current, options[0]);
+      return;
+    }
+    gameLaunchOptions.value = options;
+    gameLaunchOpen.value = !gameLaunchOpen.value;
+  } catch (error) {
+    toast.error(normalizeError(error));
+  }
+}
+
+async function startProjectGame(project: string, option: ProjectGameLaunchOption) {
+  try {
+    const launched = await engineApi.launchGame(
+      project,
+      option.integrationId,
+      option.executable,
+    );
+    toast.success(`已启动游戏：${launched.gameName}`);
+    gameLaunchOpen.value = false;
+  } catch (error) {
+    toast.error(normalizeError(error));
+  }
+}
+
 function characterName(id: string | null): string {
   if (!id) return "其他角色";
   return characters.value.find((character) => character.id === id)?.name ?? "其他角色";
@@ -355,13 +751,38 @@ async function createProject() {
 
 async function createCharacter() {
   const name = newCharacterName.value.trim();
-  if (!name || !projectId.value) return;
+  const current = projectId.value;
+  const itemId = selectedItem.value?.id ?? null;
+  if (!name || !current) return;
   await runBusy(async () => {
-    const character = await captureApi.createCharacter(projectId.value, name);
+    const character = await captureApi.createCharacter(current, name);
+    if (projectId.value !== current) return;
     characters.value.push(character);
-    selectedCharacterId.value = character.id;
+    // Only select on the capture the form belonged to; switching images mid-
+    // create must not mark a fresh item as manually chosen.
+    if (itemId && selectedItem.value?.id === itemId) pickCharacter(character.id);
     newCharacterName.value = "";
     showCharacterForm.value = false;
+  });
+}
+
+// One-click "create the character the dialogue is talking about": the name
+// comes from the engine speaker, so a game whose cast was never entered into
+// Scene Vault still gets a suggestion. After creation the live re-match makes
+// the engine suggestion row appear as usual.
+async function createCharacterFromSpeaker() {
+  const name = engineMetadata.value?.speakerRaw?.trim();
+  const current = projectId.value;
+  const itemId = selectedItem.value?.id ?? null;
+  if (!name || !current) return;
+  await runBusy(async () => {
+    const character = await captureApi.createCharacter(current, name);
+    // The create is a server round-trip; the user may have switched projects
+    // or images meanwhile. Never merge or select into a different context.
+    if (projectId.value !== current) return;
+    characters.value.push(character);
+    if (itemId && selectedItem.value?.id === itemId) pickCharacter(character.id);
+    toast.success(`已创建角色「${name}」。`);
   });
 }
 
@@ -378,16 +799,18 @@ async function addSourceDir() {
     return;
   }
   if (!path) return;
+  const directory = path;
   await runBusy(async () => {
     sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
     try {
-      await captureApi.addSourceDirectory(projectId.value, path);
+      await captureApi.addSourceDirectory(projectId.value, directory);
     } catch (error) {
       sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
       throw error;
     }
     sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
     toast.success("已添加截图目录，下次开始会话时生效。");
+    void detectAndMaybeInstallEngine(directory);
   });
 }
 
@@ -747,10 +1170,10 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault();
     moveSelection(1);
   } else if (event.key === "Escape") {
-    selectedCharacterId.value = null;
+    pickCharacter(null);
   } else if (/^[1-5]$/.test(event.key)) {
     const character = recentCharacters.value[Number(event.key) - 1];
-    if (character) selectedCharacterId.value = character.id;
+    if (character) pickCharacter(character.id);
   }
 }
 
@@ -782,7 +1205,39 @@ function normalizeError(error: unknown): string {
 }
 
 watch(projectId, () => void loadProject());
+watch(
+  projectId,
+  () => {
+    // Switching projects clears the previous project's toolbar state before
+    // the new state loads.
+    engineIntegrations.value = [];
+    archivePolicy.value = null;
+    engineDetectedRoot.value = null;
+    engineError.value = null;
+    engineConfirmUninstall.value = false;
+    engineConfirmUninstallId.value = null;
+    engineUninstallOpen.value = false;
+    gameLaunchOptions.value = [];
+    gameLaunchOpen.value = false;
+    void loadEngineState();
+  },
+  { immediate: true },
+);
 watch(() => [selectedItem.value?.id, selectedItem.value?.status, selectedItem.value?.destinationPath, selectedItem.value?.sourcePath], () => void loadPreview());
+watch(() => selectedItem.value?.id, () => void loadEngineMetadata());
+
+// Leaving a capture invalidates the suggestion it auto-picked: the next
+// image starts from its own suggestions instead of inheriting a stale
+// automatic pick (a manual selection still carries over).
+watch(
+  () => selectedItem.value?.id,
+  (_current, previous) => {
+    if (!previous || autoPickedCharacter.value?.itemId !== previous) return;
+    const auto = autoPickedCharacter.value.characterId;
+    if (selectedCharacterId.value === auto) selectedCharacterId.value = null;
+    autoPickedCharacter.value = null;
+  },
+);
 watch(items, () => void nextTick(syncStripBar));
 watch(
   () => [selectedItemId.value, pendingClassification.value] as const,
@@ -793,11 +1248,15 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
-  await initialize();
+  // Register listeners before the first load so a late metadata event that
+  // arrives while initialize() is still running is not lost.
   try {
     unlisteners.push(
       await listen<CaptureItem>("capture:item-created", (event) => upsertItem(event.payload)),
       await listen<CaptureItem>("capture:item-updated", (event) => upsertItem(event.payload)),
+      await listen<{ captureItemId: string }>("capture:engine-metadata-updated", (event) => {
+        if (selectedItem.value?.id === event.payload.captureItemId) void loadEngineMetadata();
+      }),
       await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
         const purgedId = event.payload.captureItemId;
         if (selectedItemId.value === purgedId) {
@@ -817,6 +1276,7 @@ onMounted(async () => {
   } catch {
     // Browser previews do not expose the Tauri event bridge.
   }
+  await initialize();
   await nextTick();
   syncStripBar();
   if (typeof ResizeObserver !== "undefined" && stripRow.value) {
@@ -909,6 +1369,22 @@ onBeforeUnmount(() => {
             <span :title="projectDestination">{{ projectDestination || "选择归档目录" }}</span>
             <ChevronRight :size="15" />
           </button>
+          <label class="archive-size-field">
+            <span>归档图规格</span>
+            <select
+              v-model="archiveSizeChoice"
+              :disabled="Boolean(activeSession) || !projectId"
+              :title="`全局默认：${archiveSizeLabel(archivePolicy?.resolvedSize)}`"
+              class="archive-size-select"
+              @change="saveArchiveSize"
+            >
+              <option value="inherit">继承全局（{{ archiveSizeLabel(archivePolicy?.globalSize) }}）</option>
+              <option value="keep">保持原样</option>
+              <option value="1080p">1080p</option>
+              <option value="1440p">1440p</option>
+              <option value="2160p">2160p</option>
+            </select>
+          </label>
         </section>
 
         <section class="session-control" aria-label="会话控制">
@@ -932,6 +1408,69 @@ onBeforeUnmount(() => {
           <button type="button" :disabled="busy" @click="addSourceDir">
             <FolderPlus :size="16" />添加截图目录
           </button>
+          <button
+            v-if="engineInstalled"
+            type="button"
+            :disabled="busy || !projectId"
+            title="启动游戏（Ren'Py）"
+            @click="launchProjectGame"
+          >
+            <Play :size="16" />启动游戏
+          </button>
+          <div v-if="gameLaunchOpen && gameLaunchOptions.length > 1" class="game-launch-list">
+            <div
+              v-for="option in gameLaunchOptions"
+              :key="option.integrationId"
+              class="game-launch-row"
+            >
+              <span :title="option.executable">
+                {{ option.gameName }} · {{ pathFileName(option.executable) }}{{ option.recommended ? "（推荐）" : "" }}
+              </span>
+              <button type="button" :disabled="busy" @click="startProjectGame(projectId, option)">
+                启动
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            :disabled="busy || engineWorking || !projectId"
+            :title="engineButtonTitle"
+            @click="installEnginePlugins(true)"
+          >
+            <Plug :size="16" />{{ engineInstalled ? "重新安装" : "插件安装" }}
+          </button>
+          <button
+            v-if="engineInstalled"
+            type="button"
+            :disabled="busy || engineWorking || !projectId"
+            title="卸载游戏目录中的 Scene Vault 插件文件"
+            @click="
+              engineIntegrations.length > 1
+                ? (engineUninstallOpen = !engineUninstallOpen)
+                : uninstallEnginePlugin(null)
+            "
+          >
+            <Unplug :size="16" />{{ engineConfirmUninstall ? "确认卸载？" : "卸载" }}
+          </button>
+          <div
+            v-if="engineUninstallOpen && engineIntegrations.length > 1"
+            class="engine-uninstall-list"
+          >
+            <div
+              v-for="view in engineIntegrations"
+              :key="view.integration.id"
+              class="engine-uninstall-row"
+            >
+              <span :title="view.integration.engineRoot">{{ view.integration.engineRoot }}</span>
+              <button
+                type="button"
+                :disabled="engineWorking"
+                @click="uninstallEnginePlugin(view.integration.id)"
+              >
+                {{ engineConfirmUninstallId === view.integration.id ? "确认？" : "卸载" }}
+              </button>
+            </div>
+          </div>
           <template v-if="activeSession">
             <button type="button" :disabled="busy" @click="openImportDialog">
               <FolderInput :size="16" />导入截图
@@ -996,6 +1535,16 @@ onBeforeUnmount(() => {
             <div v-if="selectedItem" class="file-meta">
               <span>{{ pathFileName(selectedItem.sourcePath) }}</span>
               <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
+            </div>
+            <div v-if="engineMetadata" class="file-meta engine-meta">
+              <span v-if="engineMetadata.speakerRaw">说话人 {{ engineMetadata.speakerRaw }}</span>
+              <span v-if="engineMetadata.virtualWidth">引擎 {{ engineMetadata.virtualWidth }}×{{ engineMetadata.virtualHeight }}</span>
+              <span
+                v-if="engineMetadata.dialogue"
+                class="engine-dialogue"
+                :title="engineMetadata.dialogue"
+                style="max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+              >{{ engineMetadata.dialogue }}</span>
             </div>
             <button
               v-if="!isWideLayout"
@@ -1115,14 +1664,43 @@ onBeforeUnmount(() => {
           type="button"
           class="suggestion-row"
           :class="{ selected: selectedCharacterId === suggestedCharacter.id }"
-          @click="selectedCharacterId = suggestedCharacter.id"
+          @click="pickCharacter(suggestedCharacter.id)"
         >
           <Sparkles :size="16" />
           <span>
             <strong>推荐：{{ suggestedCharacter.name }}</strong>
-            <small>相似度 {{ Math.round((selectedItem?.recognitionConfidence ?? 0) * 100) }}%</small>
+            <small>相似度 {{ Math.round((selectedItem?.recognitionConfidence ?? 0) * 100) }}%{{ engineSuggestedCharacter && engineSuggestedCharacter.id === suggestedCharacter.id ? " · 说话人匹配" : "" }}</small>
           </span>
           <Check v-if="selectedCharacterId === suggestedCharacter.id" :size="16" />
+        </button>
+
+        <button
+          v-if="pendingClassification === 'person' && engineSuggestedCharacter && engineSuggestedCharacter.id !== suggestedCharacter?.id"
+          type="button"
+          class="suggestion-row"
+          :class="{ selected: selectedCharacterId === engineSuggestedCharacter.id }"
+          @click="pickCharacter(engineSuggestedCharacter.id)"
+        >
+          <Sparkles :size="16" />
+          <span>
+            <strong>引擎建议：{{ engineSuggestedCharacter.name }}</strong>
+            <small>{{ speakerName ? `当前说话人 ${speakerName}` : "来自 Ren'Py 引擎" }}</small>
+          </span>
+          <Check v-if="selectedCharacterId === engineSuggestedCharacter.id" :size="16" />
+        </button>
+
+        <button
+          v-if="canCreateCharacterFromSpeaker"
+          type="button"
+          class="suggestion-row"
+          :disabled="busy"
+          @click="createCharacterFromSpeaker"
+        >
+          <UserPlus :size="16" />
+          <span>
+            <strong>创建角色「{{ speakerName }}」</strong>
+            <small>来自对话说话人，创建后即可选中</small>
+          </span>
         </button>
 
         <div v-if="pendingClassification !== 'person'" class="classify-guide">
@@ -1151,7 +1729,7 @@ onBeforeUnmount(() => {
               :class="{ selected: selectedCharacterId === character.id }"
               :style="{ fontSize: recentNameFont(character.name) }"
               :title="character.name"
-              @click="selectedCharacterId = character.id"
+              @click="pickCharacter(character.id)"
             >
               {{ character.name }}<kbd>{{ index + 1 }}</kbd>
             </button>
@@ -1173,7 +1751,7 @@ onBeforeUnmount(() => {
             type="button"
             class="character-row"
             :class="{ selected: selectedCharacterId === character.id }"
-            @click="selectedCharacterId = character.id"
+            @click="pickCharacter(character.id)"
           >
             <span class="avatar"><CharacterAvatar :character="character" /></span>
             <span><strong>{{ character.name }}</strong><small>项目角色</small></span>
@@ -1270,6 +1848,59 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.archive-path-button,
+.archive-size-field {
+  height: 40px;
+  border-radius: var(--radius-control);
+  background: var(--capture-surface);
+}
+
+.archive-size-field {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: 0 10px;
+  border: 1px solid var(--capture-border);
+  box-shadow: var(--inner-highlight);
+}
+
+.archive-size-field > span {
+  flex: none;
+  color: var(--capture-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.archive-size-select {
+  width: 0;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  padding: 0 0 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+}
+
+.archive-size-field:focus-within {
+  border-color: var(--ring);
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.archive-size-select:focus-visible { outline: none; }
+
+.archive-size-select:disabled {
+  color: var(--capture-muted);
+  cursor: not-allowed;
+}
+
 .stage-heading .file-state-chip {
   display: inline-flex;
   align-items: center;

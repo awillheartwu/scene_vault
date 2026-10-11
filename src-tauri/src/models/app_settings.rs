@@ -39,6 +39,18 @@ pub struct AppSettings {
     /// used inside one OpenCV/YuNet/SFace/ArcFace request.
     #[serde(default = "default_image_processing_core_limit")]
     pub image_processing_core_limit: u32,
+    /// Whether the local capture-output cache is trimmed automatically once
+    /// it exceeds the configured budget. Only directories whose captures are
+    /// archived (and older than the retention window) are cleared.
+    #[serde(default = "default_true")]
+    pub capture_output_auto_cleanup_enabled: bool,
+    /// Cache budget in MiB that triggers automatic cleanup.
+    #[serde(default = "default_capture_output_cleanup_threshold_mb")]
+    pub capture_output_auto_cleanup_threshold_mb: i64,
+    /// Only capture-output directories archived at least this many days ago
+    /// are cleared automatically.
+    #[serde(default = "default_capture_output_cleanup_retention_days")]
+    pub capture_output_auto_cleanup_retention_days: i64,
 }
 
 impl Default for AppSettings {
@@ -53,8 +65,20 @@ impl Default for AppSettings {
             archive_manifest_auto_write: true,
             thumbnail_cache_size_mb: default_thumbnail_cache_size_mb(),
             image_processing_core_limit: default_image_processing_core_limit(),
+            capture_output_auto_cleanup_enabled: true,
+            capture_output_auto_cleanup_threshold_mb: default_capture_output_cleanup_threshold_mb(),
+            capture_output_auto_cleanup_retention_days:
+                default_capture_output_cleanup_retention_days(),
         }
     }
+}
+
+fn default_capture_output_cleanup_threshold_mb() -> i64 {
+    2048
+}
+
+fn default_capture_output_cleanup_retention_days() -> i64 {
+    14
 }
 
 fn default_thumbnail_cache_size_mb() -> i64 {

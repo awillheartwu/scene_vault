@@ -15,7 +15,7 @@ use tokio::{
 use crate::{
     error::AppError,
     models::vision::{ProcessingSettings, VisionHealth, VisionProcessData, VisionSettings},
-    services::{log_service, vision_settings_service, vision_worker_service},
+    services::{log_service, perf_log_service, vision_settings_service, vision_worker_service},
 };
 
 const PROTOCOL_VERSION: i64 = 1;
@@ -583,7 +583,7 @@ pub(super) async fn invoke_process_in_mode(
         }
     };
     let timings = result.timings.as_ref();
-    log_service::debug(
+    perf_log_service::debug(
         "vision.request",
         format!(
             "request_id={request_id} mode={} action=processScreenshot outcome=ok spawn_ms={} worker_startup_ms={} worker_attempt_ms={:.3} rust_invoke_ms={:.3} rust_total_ms={:.3} processor_init_ms={} read_ms={} detect_ms={} feature_ms={} annotate_ms={} crop_ms={} write_ms={} process_total_ms={} service_total_ms={}",

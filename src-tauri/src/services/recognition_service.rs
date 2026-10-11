@@ -687,7 +687,7 @@ pub(crate) async fn compute_verification(
 }
 
 #[cfg(test)]
-#[path = "recognition_service_tests.rs"]
+#[path = "../../tests/unit/recognition_service_tests.rs"]
 mod tests;
 
 /// Persists a verification result on the capture item. `ok` keeps the label

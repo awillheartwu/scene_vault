@@ -48,6 +48,25 @@ pub struct LogRecord {
     pub duration_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Structured fields for the archive resize events: policy, which output
+    /// the file is (capture / annotated / avatar) and the measured sizes so
+    /// real-world performance can be aggregated without parsing messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +104,13 @@ pub struct ClientLogEventInput {
     pub outcome: Option<String>,
     #[serde(default)]
     pub error_code: Option<String>,
+    /// Optional correlation id so client records pair with backend reads.
+    #[serde(default)]
+    pub capture_item_id: Option<String>,
+    /// Target channel: "perf" for the performance log, otherwise the main
+    /// debug log. Validated at the command boundary.
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +148,10 @@ pub struct LogPolicySettings {
     pub max_archived_files: usize,
     #[serde(default = "default_true")]
     pub automatic_cleanup: bool,
+    /// Performance instrumentation (image reads, resizes, scans, AI request
+    /// timings) into its own file; off keeps the call sites but stops writes.
+    #[serde(default = "default_true")]
+    pub performance_logging: bool,
 }
 
 impl Default for LogPolicySettings {
@@ -131,6 +161,7 @@ impl Default for LogPolicySettings {
             max_file_size_mb: default_log_max_file_size_mb(),
             max_archived_files: default_log_max_archived_files(),
             automatic_cleanup: true,
+            performance_logging: true,
         }
     }
 }

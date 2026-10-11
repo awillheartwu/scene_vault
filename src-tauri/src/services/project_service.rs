@@ -29,8 +29,8 @@ pub async fn create(pool: &SqlitePool, input: CreateProjectInput) -> Result<Proj
 
     let project = sqlx::query_as::<_, Project>(
         r#"
-        INSERT INTO projects (id, name, description, cover_asset_id, cover_capture_item_id)
-        VALUES (?, ?, ?, ?, NULL)
+        INSERT INTO projects (id, name, description, cover_asset_id, cover_capture_item_id, archive_output_size)
+        VALUES (?, ?, ?, ?, NULL, 'inherit')
         RETURNING
             id, name, description, cover_asset_id, cover_capture_item_id,
             last_source_directory, last_destination_directory,
@@ -212,6 +212,9 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, AppError> {
 }
 
 pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSummary>, AppError> {
+    let global_size = crate::services::archive_output_settings_service::get(pool)
+        .await?
+        .size;
     let summaries = sqlx::query_as::<_, ProjectOverviewSummary>(
         r#"
         WITH capture_stats AS (
@@ -267,6 +270,17 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
             COALESCE(cs.completed_count, 0) AS completed_count,
             COALESCE(cs.failed_count, 0) AS failed_count,
             COALESCE(cs.total_bytes, 0) AS total_bytes,
+            (
+                SELECT pei.engine
+                FROM project_engine_integrations pei
+                WHERE pei.project_id = p.id
+                ORDER BY pei.installed_at ASC, pei.id ASC
+                LIMIT 1
+            ) AS engine,
+            CASE
+                WHEN p.archive_output_size = 'inherit' OR p.archive_output_size = '' THEN ?
+                ELSE p.archive_output_size
+            END AS archive_output_size,
             COALESCE(cs.last_capture_at, p.updated_at) AS last_activity_at,
             (
                 SELECT item.id
@@ -283,6 +297,7 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
         ORDER BY last_activity_at DESC, p.name COLLATE NOCASE ASC
         "#,
     )
+    .bind(&global_size)
     .fetch_all(pool)
     .await?;
 
@@ -633,7 +648,12 @@ mod tests {
         .await
         .expect("insert session");
         for (id, status, captured_at, file_size) in [
-            ("capture-1", "awaiting_label", "2026-08-08T01:00:00Z", 1_048_576_i64),
+            (
+                "capture-1",
+                "awaiting_label",
+                "2026-08-08T01:00:00Z",
+                1_048_576_i64,
+            ),
             ("capture-2", "processing", "2026-08-08T02:00:00Z", 2_097_152),
             ("capture-3", "completed", "2026-08-08T03:00:00Z", 3_145_728),
             ("capture-4", "failed", "2026-08-08T04:00:00Z", 4_194_304),
@@ -1042,5 +1062,43 @@ mod tests {
                 .await
                 .expect("b links");
         assert_eq!(b_links, 1, "project B keeps its shared link");
+    }
+
+    #[tokio::test]
+    async fn overview_stays_unique_with_several_engine_installs() {
+        let pool = db::test_pool().await;
+        let project = create(
+            &pool,
+            CreateProjectInput {
+                name: "Multi Game".to_owned(),
+                description: None,
+                cover_asset_id: None,
+            },
+        )
+        .await
+        .expect("create project");
+        let now = "2026-10-10T00:00:00Z";
+        for (id, root) in [("install-a", "C:/games/a"), ("install-b", "C:/games/b")] {
+            sqlx::query(
+                "INSERT INTO project_engine_integrations (id, project_id, engine, engine_root, game_directory, python_major, bridge_version, metadata_directory, manifest_json, installed_at, updated_at) VALUES (?, ?, 'renpy', ?, ?, 3, '1.1.1', NULL, '[]', ?, ?)",
+            )
+            .bind(id)
+            .bind(&project.id)
+            .bind(root)
+            .bind(format!("{root}/game"))
+            .bind(now)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("install row");
+        }
+
+        let overviews = list_overviews(&pool).await.expect("overviews");
+        let matches: Vec<_> = overviews
+            .iter()
+            .filter(|summary| summary.project_id == project.id)
+            .collect();
+        assert_eq!(matches.len(), 1, "one summary row per project");
+        assert_eq!(matches[0].engine.as_deref(), Some("renpy"));
     }
 }

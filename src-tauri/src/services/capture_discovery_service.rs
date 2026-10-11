@@ -54,7 +54,7 @@ pub async fn discover(
 
 async fn discover_with_options(
     pool: &SqlitePool,
-    _app: Option<&AppHandle>,
+    app: Option<&AppHandle>,
     input: DiscoverCapturesInput,
     force_rehash_known: bool,
 ) -> Result<DiscoverCapturesResult, AppError> {
@@ -356,6 +356,28 @@ async fn discover_with_options(
             )
             .await?;
             if inserted {
+                // Engine metadata (Ren'Py bridge sidecar) is attached right
+                // after registration; a missing sidecar is retried by the
+                // background poll because the bridge writes it a moment
+                // after the engine saved the screenshot.
+                match super::engine_metadata_service::try_attach(pool, &registered_item.id).await {
+                    Ok(true) => {
+                        if let Some(app) = app {
+                            let _ = app.emit(
+                                "capture:engine-metadata-updated",
+                                serde_json::json!({ "captureItemId": registered_item.id }),
+                            );
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => log_service::warn(
+                        "engine.metadata",
+                        format!(
+                            "failed to attach engine metadata for capture {}: {error}",
+                            registered_item.id
+                        ),
+                    ),
+                }
                 discovered_items.push(registered_item);
             } else {
                 already_known_count = already_known_count.saturating_add(1);
@@ -691,6 +713,10 @@ async fn poll_active_sessions_once(
             }),
         }
     }
+    // Assign the remaining budget of this poll to engine metadata: captures
+    // whose sidecar arrived after registration, and staged original assets
+    // that became archivable once a destination directory was configured.
+    let _ = super::engine_metadata_service::retry_pending(pool, app, 200).await;
     Ok(())
 }
 

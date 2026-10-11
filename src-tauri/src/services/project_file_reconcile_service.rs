@@ -256,31 +256,50 @@ pub async fn reconcile_project_files(
         if (destination_state == "missing" || avatar_state == "missing") && !archive_scanned {
             archive_scanned = true;
             if let Some(root) = archive_search_root.as_deref() {
-                let archive_scan = file_relink::scan_roots(
-                    &[root.to_owned()],
-                    file_relink::ScanMode::Recursive,
-                )
-                .await;
+                let archive_scan =
+                    file_relink::scan_roots(&[root.to_owned()], file_relink::ScanMode::Recursive)
+                        .await;
                 archive_candidates = archive_scan.candidates;
                 archive_index = file_relink::index_by_identifier(&archive_candidates);
             }
         }
+        // Relocation must verify against what was actually archived: a
+        // policy-downscaled copy no longer matches the source bytes.
+        let destination_fingerprint = if destination_state == "missing" {
+            recorded_archive_fingerprint(pool, &row.id, row.destination_path.as_deref()).await?
+        } else {
+            None
+        };
         let token = archive_naming::short_identifier(&row.id);
         if destination_state == "missing" {
             match file_relink::resolve(&archive_index, &archive_candidates, &(token.clone(), false))
             {
                 file_relink::Match::Unique(candidate) => {
-                    if archive_is_byte_copy(&candidate.normalized_path)
-                        && !archive_copy_matches(candidate, row.content_hash.as_deref(), row.file_size)
-                            .await
-                    {
+                    let verified = match destination_fingerprint.as_deref() {
+                        Some(expected) => {
+                            capture_service::sha256_file(&candidate.path)
+                                .await
+                                .ok()
+                                .as_deref()
+                                == Some(expected)
+                        }
+                        None => {
+                            !archive_is_byte_copy(&candidate.normalized_path)
+                                || archive_copy_matches(
+                                    candidate,
+                                    row.content_hash.as_deref(),
+                                    row.file_size,
+                                )
+                                .await
+                        }
+                    };
+                    if !verified {
                         destination_content_mismatch_count =
                             destination_content_mismatch_count.saturating_add(1);
                     } else {
                         destination_path = Some(candidate.normalized_path.clone());
                         destination_state = "available";
-                        destination_relocated_count =
-                            destination_relocated_count.saturating_add(1);
+                        destination_relocated_count = destination_relocated_count.saturating_add(1);
                     }
                 }
                 file_relink::Match::Ambiguous => {
@@ -359,6 +378,7 @@ pub async fn reconcile_project_files(
         {
             continue;
         }
+        migrate_relocated_fingerprints(&mut transaction, &update).await?;
         let (Some(asset_id), Some(destination_path)) = (
             update.asset_id.as_deref(),
             update.destination_path.as_deref(),
@@ -414,7 +434,8 @@ pub async fn reconcile_project_files(
 /// Archive directories that store a byte-identical copy of the source file.
 /// Annotated person outputs and avatars are derivatives and cannot be verified
 /// against the recorded source hash.
-const BYTE_COPY_DIRECTORIES: [&str; 4] = ["游戏截图", "收藏图", "人物图（原图）", "人物图（未识别）"];
+const BYTE_COPY_DIRECTORIES: [&str; 4] =
+    ["游戏截图", "收藏图", "人物图（原图）", "人物图（未识别）"];
 
 fn archive_is_byte_copy(path: &str) -> bool {
     Path::new(path)
@@ -443,8 +464,73 @@ async fn archive_copy_matches(
         .unwrap_or(false)
 }
 
+/// Content hash recorded for this capture's archive target when it was last
+/// written. Present for derived archives (for example downscaled copies).
+async fn recorded_archive_fingerprint(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    recorded_path: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(recorded_path) = recorded_path else {
+        return Ok(None);
+    };
+    Ok(sqlx::query_scalar(
+        "SELECT content_hash FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?",
+    )
+    .bind(capture_item_id)
+    .bind(recorded_path)
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// Keeps the indexed asset row in step with a relocated archive target so the
 /// history and workbench previews resolve without a re-import.
+/// Verified relocations move the ownership identity with the file: the
+/// fingerprint recorded at the old path must follow to the new one, otherwise
+/// the next relocation can no longer prove the same (possibly downscaled)
+/// archive file and refuses to relink it.
+async fn migrate_relocated_fingerprints(
+    connection: &mut sqlx::SqliteConnection,
+    update: &DestinationUpdate,
+) -> Result<(), AppError> {
+    for (previous, current) in [
+        (
+            update.previous_destination_path.as_deref(),
+            update.destination_path.as_deref(),
+        ),
+        (
+            update.previous_destination_avatar_path.as_deref(),
+            update.destination_avatar_path.as_deref(),
+        ),
+    ] {
+        let (Some(previous), Some(current)) = (previous, current) else {
+            continue;
+        };
+        if previous == current {
+            continue;
+        }
+        // Move the identity when the target is free; when another record
+        // already owns the new path, keep that authoritative row and drop the
+        // stale one so a later relocation cannot pick the wrong identity.
+        sqlx::query(
+            "UPDATE OR IGNORE capture_archive_fingerprints SET path = ? WHERE capture_item_id = ? AND path = ?",
+        )
+        .bind(current)
+        .bind(&update.id)
+        .bind(previous)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
+            "DELETE FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?",
+        )
+        .bind(&update.id)
+        .bind(previous)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn sync_relocated_asset(
     connection: &mut sqlx::SqliteConnection,
     asset_id: &str,
@@ -507,7 +593,6 @@ fn source_state_or_unknown(state: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::{
         db,
         models::{
@@ -516,6 +601,7 @@ mod tests {
         },
         services::{capture_discovery_service, capture_service, project_service, test_support},
     };
+    use std::path::PathBuf;
 
     async fn registered_item(
         pool: &SqlitePool,
@@ -808,6 +894,22 @@ mod tests {
                 .await
                 .expect("archive file");
         }
+        // Identity recorded while the old paths were valid: the hash of the
+        // bytes that were actually archived.
+        let archived_hash = capture_service::sha256_file(&archived_avatar)
+            .await
+            .expect("archived hash");
+        for path in [&old_destination, &old_avatar] {
+            sqlx::query(
+                "INSERT INTO capture_archive_fingerprints (capture_item_id, path, content_hash) VALUES (?, ?, ?)",
+            )
+            .bind(&item_id)
+            .bind(capture_service::path_to_string(path))
+            .bind(&archived_hash)
+            .execute(pool)
+            .await
+            .expect("fingerprint row");
+        }
         project_service::set_destination_directory(
             pool,
             SetProjectDestinationInput {
@@ -871,7 +973,10 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("relocated asset");
-        assert_eq!(asset_path, capture_service::path_to_string(&archived.staged));
+        assert_eq!(
+            asset_path,
+            capture_service::path_to_string(&archived.staged)
+        );
         let metadata: serde_json::Value =
             serde_json::from_str(&metadata_json).expect("asset metadata");
         let avatar = capture_service::path_to_string(&archived.archived_avatar);
@@ -881,6 +986,61 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(avatar.as_str())
         );
+
+        // The recorded identity must follow the verified move, or the next
+        // relocation can no longer prove the downscaled file.
+        let fingerprints: Vec<(String, String)> = sqlx::query_as(
+            "SELECT path, content_hash FROM capture_archive_fingerprints WHERE capture_item_id = ?",
+        )
+        .bind(&archived.item_id)
+        .fetch_all(&pool)
+        .await
+        .expect("fingerprints");
+        assert_eq!(fingerprints.len(), 2);
+        assert!(fingerprints
+            .iter()
+            .any(|(path, _)| path == &capture_service::path_to_string(&archived.staged)));
+        assert!(fingerprints
+            .iter()
+            .any(|(path, _)| path == &capture_service::path_to_string(&archived.archived_avatar)));
+
+        // A second move must still verify against the migrated fingerprint.
+        let second_root = fixture._workspace.path().join("second-archive");
+        let second_staged = second_root
+            .join("zancun2")
+            .join(archived.staged.file_name().expect("staged name"));
+        let second_avatar = second_root
+            .join("头像图")
+            .join(archived.archived_avatar.file_name().expect("avatar name"));
+        for (from, to) in [
+            (&archived.staged, &second_staged),
+            (&archived.archived_avatar, &second_avatar),
+        ] {
+            tokio::fs::create_dir_all(to.parent().expect("parent"))
+                .await
+                .expect("second directory");
+            tokio::fs::rename(from, to).await.expect("second move");
+        }
+        project_service::set_destination_directory(
+            &pool,
+            SetProjectDestinationInput {
+                project_id: fixture.project_id.clone(),
+                directory: capture_service::path_to_string(&second_root),
+            },
+        )
+        .await
+        .expect("second rename");
+        let second = reconcile_project_files(
+            &pool,
+            ReconcileProjectFilesInput {
+                project_id: fixture.project_id.clone(),
+                archive_search_directory: None,
+            },
+        )
+        .await
+        .expect("second reconcile");
+        assert_eq!(second.destination_relocated_count, 2);
+        assert_eq!(second.destination_content_mismatch_count, 0);
     }
 
     #[tokio::test]

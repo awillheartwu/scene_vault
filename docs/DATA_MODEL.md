@@ -159,8 +159,7 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
 
 每个项目最多一条笔记记录。`content` 是本地 Markdown 工作副本，`remote_path` 指向
 项目归档目标目录中的 `笔记.md`；状态记录同步、失败和重试，最后同步内容用于检测外部
-冲突。完整产品语义见
-[截图分类与快速笔记决策](decisions/2026-08-05-capture-classification-and-notes.md)。
+冲突。完整产品语义见 [Capture Session 工作流](CAPTURE_WORKFLOW.md)。
 
 ## 设置
 
@@ -174,6 +173,16 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
   门槛。
 - `capture.archive_naming`：模板与分隔符。`{character}` 永远指主角色；设置只影响
   新归档。
+
+## 引擎适配
+
+- `project_engine_integrations`：每次引擎安装一行（一个项目可安装多个游戏）：引擎类型、
+  游戏根目录、Python 主版本、bridge 版本、元数据缓存目录与安装清单哈希；`game_directory`
+  全局唯一，元数据按截图来源路径归属到对应安装。
+- `capture_engine_metadata`：一次截图的引擎上下文（说话人、对话、分辨率、原始 payload
+  JSON、与现有角色精确匹配的建议）。payload 为权威副本，列字段用于查询与建议。
+- `projects.archive_output_size`：项目级归档输出尺寸（inherit/keep/1080p/1440p/2160p）；
+  `inherit` 时使用全局设置 `archive.output_size`。
 
 ## 全局约定
 

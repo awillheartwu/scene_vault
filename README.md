@@ -105,10 +105,11 @@ GitHub Actions（`.github/workflows/release-windows.yml`）在推送 `v*` 标签
 
 ```text
 src/                 Vue 前端
+tests/               前端测试
 src-tauri/           Tauri/Rust 后端、SQLite 迁移与打包配置
 python/              可选的本地 AI 引擎（版本化 JSON 协议）
 scripts/             开发与发布脚本
-docs/                产品、架构、决策、验收与开发文档
+docs/                产品、架构、验收与开发文档
 AGENTS.md             AI Agent 工作约束
 ```
 
@@ -122,7 +123,6 @@ AGENTS.md             AI Agent 工作约束
 - [资源与存储说明](docs/RESOURCE_USAGE.md)
 - [开发指南](docs/DEVELOPMENT.md)
 - [开发路线图](docs/ROADMAP.md)
-- [技术决策记录](docs/decisions/)
 - [Python AI 协议](python/README.md)
 
 ## 数据与许可

@@ -950,5 +950,5 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-#[path = "data_maintenance_service_tests.rs"]
+#[path = "../../tests/unit/data_maintenance_service_tests.rs"]
 mod tests;

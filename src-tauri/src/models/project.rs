@@ -41,6 +41,10 @@ pub struct ProjectOverviewSummary {
     /// Sum of the recorded source sizes of the listed captures. Private
     /// captures stay out of the totals, exactly like the counts above.
     pub total_bytes: i64,
+    /// Engine badge for the project home (currently only `renpy`).
+    pub engine: Option<String>,
+    /// Effective archive output size after inheritance from the global default.
+    pub archive_output_size: String,
     pub last_activity_at: String,
     pub latest_capture_item_id: Option<String>,
     pub cover_capture_item_id: Option<String>,

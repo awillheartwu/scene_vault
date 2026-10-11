@@ -14,6 +14,7 @@ import {
   LoaderCircle,
   MoreHorizontal,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   Search,
@@ -26,6 +27,7 @@ import PageHeader from "@/components/layout/PageHeader.vue";
 import { ContextMenu } from "@/components/ui/context-menu";
 import ProjectDeleteDialog from "@/components/project/ProjectDeleteDialog.vue";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
+import { toast } from "@/lib/toast";
 import { useContextMenu } from "@/composables/useContextMenu";
 import {
   DropdownMenu,
@@ -36,6 +38,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   captureApi,
+  engineApi,
   type CaptureItem,
   type CaptureRuntimeStatus,
   type ProjectOverviewSummary,
@@ -246,6 +249,15 @@ function openProject(projectId: string) {
   void router.push("/workbench");
 }
 
+async function launchGame(project: ProjectOverviewSummary) {
+  try {
+    const launched = await engineApi.launchGame(project.projectId);
+    toast.success(`已启动游戏：${launched.gameName}`);
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+  }
+}
+
 function startCapture(projectId?: string) {
   if (projectId) selectProject(projectId);
   void router.push("/capture");
@@ -277,6 +289,20 @@ function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(1) + " MB";
   if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
   return bytes + " B";
+}
+
+/// Archive output size as shown on the project home (already resolved).
+function archiveSpecLabel(size: string): string {
+  switch (size) {
+    case "1080p":
+      return "1080p";
+    case "1440p":
+      return "1440p";
+    case "2160p":
+      return "2160p";
+    default:
+      return "保持原样";
+  }
 }
 
 function setupLabel(project: ProjectOverviewSummary): string {
@@ -320,49 +346,53 @@ function setupLabel(project: ProjectOverviewSummary): string {
         <span class="sr-only">搜索项目</span>
         <input v-model="search" type="search" placeholder="搜索项目名称…" />
       </label>
-      <label class="sort-select">
-        <span>排序</span>
-        <select :value="sortMode" @change="setSortMode(($event.target as HTMLSelectElement).value as SortMode)">
-          <option v-for="mode in SORT_MODES" :key="mode.value" :value="mode.value">
-            {{ mode.label }}
-          </option>
-        </select>
-      </label>
-      <button
-        type="button"
-        class="sort-direction-button"
-        :aria-label="sortDirection === 'asc' ? '当前正序，点击切换为倒序' : '当前倒序，点击切换为正序'"
-        :title="sortDirection === 'asc' ? '正序' : '倒序'"
-        @click="toggleSortDirection"
-      >
-        <ArrowUp v-if="sortDirection === 'asc'" :size="16" aria-hidden="true" />
-        <ArrowDown v-else :size="16" aria-hidden="true" />
-      </button>
-      <div class="view-switch" role="group" aria-label="项目显示方式">
-        <button
-          type="button"
-          aria-label="网格视图"
-          :aria-pressed="viewMode === 'grid'"
-          :class="{ active: viewMode === 'grid' }"
-          title="网格视图"
-          @click="setViewMode('grid')"
-        >
-          <Grid2X2 :size="18" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label="列表视图"
-          :aria-pressed="viewMode === 'list'"
-          :class="{ active: viewMode === 'list' }"
-          title="列表视图"
-          @click="setViewMode('list')"
-        >
-          <List :size="19" aria-hidden="true" />
+      <div class="project-toolbar-controls">
+        <div class="project-sort" role="group" aria-label="项目排序">
+          <label class="sort-select">
+            <span>排序</span>
+            <select :value="sortMode" @change="setSortMode(($event.target as HTMLSelectElement).value as SortMode)">
+              <option v-for="mode in SORT_MODES" :key="mode.value" :value="mode.value">
+                {{ mode.label }}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="sort-direction-button"
+            :aria-label="sortDirection === 'asc' ? '当前正序，点击切换为倒序' : '当前倒序，点击切换为正序'"
+            :title="sortDirection === 'asc' ? '正序' : '倒序'"
+            @click="toggleSortDirection"
+          >
+            <ArrowUp v-if="sortDirection === 'asc'" :size="16" aria-hidden="true" />
+            <ArrowDown v-else :size="16" aria-hidden="true" />
+          </button>
+        </div>
+        <div class="view-switch" role="group" aria-label="项目显示方式">
+          <button
+            type="button"
+            aria-label="网格视图"
+            :aria-pressed="viewMode === 'grid'"
+            :class="{ active: viewMode === 'grid' }"
+            title="网格视图"
+            @click="setViewMode('grid')"
+          >
+            <Grid2X2 :size="18" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label="列表视图"
+            :aria-pressed="viewMode === 'list'"
+            :class="{ active: viewMode === 'list' }"
+            title="列表视图"
+            @click="setViewMode('list')"
+          >
+            <List :size="18" aria-hidden="true" />
+          </button>
+        </div>
+        <button type="button" class="new-project-button" @click="createProject">
+          <Plus :size="17" aria-hidden="true" />新建项目
         </button>
       </div>
-      <button type="button" class="new-project-button" @click="createProject">
-        <Plus :size="17" aria-hidden="true" />新建项目
-      </button>
     </div>
 
     <div v-if="loading" class="home-state" aria-live="polite">
@@ -456,9 +486,26 @@ function setupLabel(project: ProjectOverviewSummary): string {
               <CheckCircle2 v-else :size="14" aria-hidden="true" />
               {{ setupLabel(project) }}
             </div>
+            <p class="project-spec" style="display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12px; opacity: 0.85;">
+              <span
+                v-if="project.engine === 'renpy'"
+                style="display: inline-block; padding: 1px 6px; border-radius: 999px; border: 1px solid rgba(128,128,128,0.5); font-size: 11px;"
+              >Ren'Py</span>
+              归档规格：{{ archiveSpecLabel(project.archiveOutputSize) }}
+            </p>
           </div>
         </button>
         <footer class="project-card-footer">
+          <button
+            v-if="project.engine === 'renpy'"
+            type="button"
+            class="launch-project-button"
+            :aria-label="`启动游戏 ${project.name}`"
+            title="启动游戏"
+            @click="launchGame(project)"
+          >
+            <Play :size="17" aria-hidden="true" />启动游戏
+          </button>
           <button
             type="button"
             class="capture-project-button"
@@ -527,11 +574,29 @@ function setupLabel(project: ProjectOverviewSummary): string {
               <span class="row-session" :class="{ active: project.activeSessionCount }">
                 {{ project.activeSessionCount ? "捕获中" : `${project.sessionCount} 个会话` }}
               </span>
+              <span class="row-spec">
+                <span
+                  v-if="project.engine === 'renpy'"
+                  style="display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 999px; border: 1px solid rgba(128,128,128,0.5); font-size: 10px;"
+                >Ren'Py</span>
+                归档规格：{{ archiveSpecLabel(project.archiveOutputSize) }}
+              </span>
             </div>
           </div>
           <div class="row-actions">
             <button
+              v-if="project.engine === 'renpy'"
               type="button"
+              class="row-action-button"
+              :aria-label="`启动游戏 ${project.name}`"
+              title="启动游戏"
+              @click="launchGame(project)"
+            >
+              <Play :size="17" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              class="row-action-button"
               :aria-label="`继续捕获 ${project.name}`"
               title="继续捕获"
               @click="startCapture(project.projectId)"
@@ -674,25 +739,31 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .enter-project-button:hover { box-shadow: var(--glow), var(--inner-highlight); }
 
 .project-toolbar {
-  display: flex;
+  display: grid;
   width: 100%;
+  grid-template-columns: minmax(240px, 1fr) auto;
   align-items: center;
-  justify-content: flex-start;
+  gap: var(--space-3);
+}
+
+.project-toolbar-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .project-search {
   display: flex;
-  min-width: 240px;
-  max-width: 560px;
-  flex: 1 1 360px;
+  min-width: 0;
   height: 44px;
   align-items: center;
   gap: 9px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: color-mix(in srgb, var(--background) 74%, transparent);
   color: var(--muted-foreground);
   transition: border-color .18s ease, box-shadow .18s ease;
@@ -713,15 +784,24 @@ function setupLabel(project: ProjectOverviewSummary): string {
   font-size: 13px;
 }
 
-.sort-select {
-  display: inline-flex;
+.project-sort {
+  display: flex;
+  flex: none;
   height: 44px;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px 0 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: color-mix(in srgb, var(--card) 58%, transparent);
+  box-shadow: var(--inner-highlight);
+}
+
+.sort-select {
+  display: inline-flex;
+  height: 100%;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 10px 0 12px;
+  border-radius: var(--radius-control) 0 0 var(--radius-control);
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 650;
@@ -737,31 +817,48 @@ function setupLabel(project: ProjectOverviewSummary): string {
   font-weight: 600;
 }
 
+.sort-select:focus-within {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.sort-select select:focus-visible { outline: none; }
+
 .sort-direction-button {
   display: grid;
   width: 44px;
-  height: 44px;
+  height: 100%;
+  flex: none;
   place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--card) 58%, transparent);
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+  background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  transition: border-color 0.18s ease, color 0.18s ease;
+  transition: background-color .18s ease, color .18s ease;
 }
 
 .sort-direction-button:hover {
-  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: var(--accent);
 }
 
 .view-switch {
   display: inline-flex;
-  gap: 5px;
+  height: 44px;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--card) 58%, transparent);
+  box-shadow: var(--inner-highlight);
 }
 
-.view-switch button,
 .capture-project-button,
+.launch-project-button,
 .card-action-button,
 .row-action-button,
 .row-actions > button:first-child {
@@ -776,8 +873,21 @@ function setupLabel(project: ProjectOverviewSummary): string {
   transition: border-color .18s ease, background-color .18s ease, color .18s ease, box-shadow .18s ease;
 }
 
+.view-switch button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-control) - 3px);
+  background: transparent;
+  color: var(--muted-foreground);
+  transition: border-color .18s ease, background-color .18s ease, color .18s ease;
+}
+
 .view-switch button:hover,
 .capture-project-button:hover,
+.launch-project-button:hover,
 .card-action-button:hover,
 .row-action-button:hover,
 .row-actions > button:first-child:hover {
@@ -792,10 +902,10 @@ function setupLabel(project: ProjectOverviewSummary): string {
 }
 
 .view-switch button.active {
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   background: color-mix(in srgb, var(--accent) 12%, var(--card));
   color: var(--accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 15%, transparent), var(--inner-highlight);
+  box-shadow: var(--inner-highlight);
 }
 
 .home-alert {
@@ -954,6 +1064,8 @@ function setupLabel(project: ProjectOverviewSummary): string {
 }
 
 .capture-project-button { display: inline-flex; width: auto; padding: 0 14px; gap: 7px; color: var(--foreground); font-weight: 650; }
+.launch-project-button { display: inline-flex; width: auto; padding: 0 14px; gap: 7px; color: var(--accent); font-weight: 650; border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.launch-project-button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .project-action-menu [role="menuitem"] { display: flex; align-items: center; gap: 8px; }
 .project-menu-danger { color: var(--destructive); }
 
@@ -1029,8 +1141,8 @@ function setupLabel(project: ProjectOverviewSummary): string {
   .project-grid,
   .project-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .project-grid-1 { grid-template-columns: minmax(0, 880px); }
-  .project-toolbar { position: sticky; z-index: 10; top: -1px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--background) 92%, transparent); backdrop-filter: var(--panel-blur); }
-  .project-search { max-width: none; flex-basis: calc(100% - 320px); }
+  .project-toolbar { position: sticky; z-index: 10; top: -1px; grid-template-columns: minmax(0, 1fr); padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--background) 92%, transparent); backdrop-filter: var(--panel-blur); }
+  .project-sort { margin-right: auto; }
   .project-cover { aspect-ratio: 16 / 9; }
 }
 

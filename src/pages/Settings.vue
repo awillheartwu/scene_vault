@@ -30,6 +30,7 @@ import {
   pickFile,
   type AppSettings,
   type ArchiveNamingSettings,
+  type ArchiveOutputSettings,
   type BundledFont,
   type AnnotationSettings,
   type CropSettings,
@@ -71,7 +72,7 @@ type SettingsCategoryKey = "general" | "naming" | "recognition" | "processing" |
 
 const CATEGORIES: { key: SettingsCategoryKey; label: string; icon: Component }[] = [
   { key: "general", label: "通用设置", icon: Settings2 },
-  { key: "naming", label: "归档命名规则", icon: FileText },
+  { key: "naming", label: "归档规则", icon: FileText },
   { key: "recognition", label: "自动角色建议", icon: ScanFace },
   { key: "processing", label: "视觉处理参数", icon: Wand2 },
   { key: "vision", label: "视觉引擎", icon: Cpu },
@@ -101,6 +102,9 @@ const appSettings = ref<AppSettings>({
   archiveManifestAutoWrite: true,
   thumbnailCacheSizeMb: 256,
   imageProcessingCoreLimit: 4,
+  captureOutputAutoCleanupEnabled: true,
+  captureOutputAutoCleanupThresholdMb: 2048,
+  captureOutputAutoCleanupRetentionDays: 14,
 });
 const cacheStatus = ref<ThumbnailCacheStatus | null>(null);
 const busy = ref(false);
@@ -109,6 +113,7 @@ const namingSettings = ref<ArchiveNamingSettings>({
   template: DEFAULT_NAMING_TEMPLATE,
   separator: " - ",
 });
+const archiveOutputSettings = ref<ArchiveOutputSettings>({ size: "keep" });
 const recognitionSettings = ref<RecognitionSettings>({
   extractAtRegistration: true,
   verificationEnabled: true,
@@ -196,6 +201,7 @@ interface SettingsBaseline {
   general: AppSettings;
   annotatePerson: boolean;
   naming: ArchiveNamingSettings;
+  archiveOutput: ArchiveOutputSettings;
   recognition: RecognitionSettings;
   processing: {
     detection: DetectionSettings;
@@ -239,7 +245,10 @@ const generalDirty = computed(() =>
     : false,
 );
 const namingDirty = computed(() =>
-  baseline.value ? !deepEqual(namingSettings.value, baseline.value.naming) : false,
+  baseline.value
+    ? !deepEqual(namingSettings.value, baseline.value.naming) ||
+      !deepEqual(archiveOutputSettings.value, baseline.value.archiveOutput)
+    : false,
 );
 const recognitionDirty = computed(() => {
   if (!baseline.value) return false;
@@ -285,6 +294,7 @@ async function initialize() {
     appSettings.value = await captureApi.getAppSettings();
     cacheStatus.value = await captureApi.getThumbnailCacheStatus();
     namingSettings.value = await captureApi.getArchiveNamingSettings();
+    archiveOutputSettings.value = await captureApi.getArchiveOutputSettings();
     recognitionSettings.value = await captureApi.getRecognitionSettings();
     await loadRecognitionProfile();
     const processing = await captureApi.getProcessingSettings();
@@ -303,6 +313,7 @@ async function initialize() {
       general: clone(appSettings.value),
       annotatePerson: annotatePerson.value,
       naming: clone(namingSettings.value),
+      archiveOutput: clone(archiveOutputSettings.value),
       recognition: clone(recognitionSettings.value),
       processing: {
         detection: clone(processingUi.value.detection),
@@ -435,7 +446,15 @@ async function save() {
 async function saveAppSettings() {
   appBusy.value = true;
   try {
-    appSettings.value = await captureApi.updateAppSettings(appSettings.value);
+    // The capture-cache cleanup controls live on the storage panel; keep the
+    // freshest server values so saving this form never reverts them.
+    const fresh = await captureApi.getAppSettings();
+    appSettings.value = await captureApi.updateAppSettings({
+      ...appSettings.value,
+      captureOutputAutoCleanupEnabled: fresh.captureOutputAutoCleanupEnabled,
+      captureOutputAutoCleanupThresholdMb: fresh.captureOutputAutoCleanupThresholdMb,
+      captureOutputAutoCleanupRetentionDays: fresh.captureOutputAutoCleanupRetentionDays,
+    });
     const processing = await captureApi.getProcessingSettings();
     await captureApi.updateProcessingSettings({
       ...processing,
@@ -460,8 +479,14 @@ async function saveNaming() {
     namingSettings.value = await captureApi.updateArchiveNamingSettings(
       namingSettings.value,
     );
-    if (baseline.value) baseline.value.naming = clone(namingSettings.value);
-    toast.success("归档命名规则已保存，只影响新的归档。");
+    archiveOutputSettings.value = await captureApi.updateArchiveOutputSettings(
+      archiveOutputSettings.value,
+    );
+    if (baseline.value) {
+      baseline.value.naming = clone(namingSettings.value);
+      baseline.value.archiveOutput = clone(archiveOutputSettings.value);
+    }
+    toast.success("归档规则已保存，只影响新的归档。");
   } catch (error) {
     toast.error(normalizeError(error));
   } finally {
@@ -1019,7 +1044,7 @@ onBeforeUnmount(() => {
           <form class="settings-card" @submit.prevent="saveNaming">
       <div class="settings-card-title">
         <span class="eyebrow">捕获与归档</span>
-        <h2>归档命名规则</h2>
+        <h2>归档规则</h2>
       </div>
       <div class="settings-field">
         <label for="naming-template">命名模板</label>
@@ -1030,6 +1055,18 @@ onBeforeUnmount(() => {
         <label for="naming-separator">追加分隔符</label>
         <p>模板缺少唯一标识时，用此分隔符把短标识追加到名称末尾。</p>
         <div><input id="naming-separator" v-model="namingSettings.separator" class="separator-input" spellcheck="false" /></div>
+      </div>
+      <div class="settings-field">
+        <label for="archive-output-size">归档输出尺寸（全局默认）</label>
+        <p>所有项目默认按此尺寸在归档时缩小（不放大）；单个项目可在捕获页覆盖。只影响之后的归档。</p>
+        <div>
+          <select id="archive-output-size" v-model="archiveOutputSettings.size">
+            <option value="keep">保持原样</option>
+            <option value="1080p">缩到 1080p</option>
+            <option value="1440p">缩到 1440p</option>
+            <option value="2160p">缩到 2160p</option>
+          </select>
+        </div>
       </div>
       <div class="settings-field">
         <label>占位符</label>

@@ -3,6 +3,7 @@ pub mod capture;
 pub mod character;
 pub mod data_maintenance;
 pub mod diagnostics;
+pub mod engine;
 pub mod notes;
 pub mod project;
 pub mod recognition;

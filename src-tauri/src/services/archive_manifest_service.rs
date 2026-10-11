@@ -51,7 +51,7 @@ struct ArchivedRow {
     source_path: String,
     content_hash: Option<String>,
     destination_path: String,
-    file_size: Option<i64>,
+    asset_file_size: Option<i64>,
     archived_at: Option<String>,
 }
 
@@ -385,10 +385,11 @@ pub async fn rebuild(
     let rows = sqlx::query_as::<_, ArchivedRow>(
         r#"
         SELECT ci.id, ci.character_id, c.name AS character_name, ci.classification,
-               ci.source_path, ci.content_hash, ci.destination_path, ci.file_size,
-               ci.archived_at
+               ci.source_path, ci.content_hash, ci.destination_path,
+               a.file_size AS asset_file_size, ci.archived_at
         FROM capture_items ci
         LEFT JOIN characters c ON c.id = ci.character_id
+        LEFT JOIN assets a ON a.id = ci.asset_id
         WHERE ci.project_id = ?
           AND ci.status = 'completed'
           AND ci.destination_path IS NOT NULL
@@ -453,6 +454,16 @@ pub async fn rebuild(
                     .or_default()
                     .push(file_name.clone());
             }
+            // The manifest reports the size actually on disk: prefer the
+            // indexed asset row, fall back to the file itself, never the
+            // source screenshot's size.
+            let file_size = match row.asset_file_size {
+                Some(size) => Some(size),
+                None => tokio::fs::metadata(directory.join(&file_name))
+                    .await
+                    .ok()
+                    .and_then(|metadata| i64::try_from(metadata.len()).ok()),
+            };
             entries.push(ManifestEntry {
                 file: file_name,
                 capture_item_id: row.id,
@@ -461,7 +472,7 @@ pub async fn rebuild(
                 classification: row.classification,
                 source_path: row.source_path,
                 content_hash: row.content_hash,
-                file_size: row.file_size,
+                file_size,
                 archived_at: row.archived_at,
             });
         }

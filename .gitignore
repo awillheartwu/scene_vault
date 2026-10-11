@@ -53,5 +53,8 @@ python/tests/fixtures/face_eval/
 
 /qa/
 
+# Local Codex CLI config (not part of the project)
+/.codex/
+
 # Local analysis workspace (scratch scripts, exported reports, working images)
 work/

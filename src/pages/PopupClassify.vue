@@ -4,6 +4,11 @@ import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
 import CharacterAvatar from '@/components/character/CharacterAvatar.vue';
 import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
 import { parseFaceBox } from "@/lib/face-box";
+import {
+  characterMatchesSpeaker,
+  findCharacterBySpeaker,
+  isLikelySpeakerName,
+} from "@/lib/speaker-suggestion";
 import { describeError } from "@/lib/vision-errors";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 defineProps<{ embedded?: boolean }>();
@@ -29,8 +34,10 @@ import {
 } from "@lucide/vue";
 import {
   captureApi,
+  engineApi,
   pathMimeType,
   type CaptureClassification,
+  type CaptureEngineMetadata,
   type CaptureItem,
   type Character,
   type ClassifyPopupContext,
@@ -42,6 +49,8 @@ const ctx = ref<ClassifyPopupContext | null>(null);
 const currentIndex = ref(0);
 const mode = ref<"choose" | "person">("choose");
 const selectedCharacterId = ref<string | null>(null);
+const engineMetadata = ref<CaptureEngineMetadata | null>(null);
+let engineMetadataRequest = 0;
 const search = ref("");
 const newName = ref("");
 const previewUrl = ref<string | null>(null);
@@ -82,6 +91,44 @@ const suggestedCharacter = computed(() => {
     ctx.value?.characters.find((character) => character.id === item.suggestedCharacterId) ?? null
   );
 });
+
+const engineName = computed(() => engineMetadata.value?.speakerRaw?.trim() ?? "");
+const engineSuggestedCharacter = computed(() => {
+  const roster = ctx.value?.characters ?? [];
+  // Live match first so a character created or renamed after the capture
+  // still matches; the stored suggestion is only reused while that character
+  // still answers to the speaker name.
+  const live = findCharacterBySpeaker(roster, engineMetadata.value?.speakerRaw);
+  if (live) return live;
+  const suggestedId = engineMetadata.value?.suggestedCharacterId;
+  if (suggestedId) {
+    const stored = roster.find((character) => character.id === suggestedId);
+    if (stored && characterMatchesSpeaker(stored, engineMetadata.value?.speakerRaw)) {
+      return stored;
+    }
+  }
+  return null;
+});
+const canCreateCharacterFromSpeaker = computed(
+  () => isLikelySpeakerName(engineName.value) && !engineSuggestedCharacter.value,
+);
+
+async function loadEngineMetadata() {
+  const item = currentItem.value;
+  const token = ++engineMetadataRequest;
+  engineMetadata.value = null;
+  if (!item) return;
+  try {
+    const view = await engineApi.getCaptureMetadata(item.id);
+    if (token === engineMetadataRequest && currentItem.value?.id === item.id) {
+      engineMetadata.value = view;
+    }
+  } catch {
+    if (token === engineMetadataRequest) engineMetadata.value = null;
+  }
+}
+
+watch(() => currentItem.value?.id, () => void loadEngineMetadata(), { immediate: true });
 
 const characters = computed(() => {
   if (!ctx.value) return [];
@@ -343,6 +390,7 @@ function acceptSuggestion() {
 async function createAndSubmit() {
   const name = newName.value.trim();
   const projectId = ctx.value?.projectId;
+  const item = currentItem.value;
   if (!name || !projectId || busy.value || roiBusy.value || roiBlocked.value || roiLoading.value) return;
   busy.value = true;
   errorMessage.value = "";
@@ -351,8 +399,8 @@ async function createAndSubmit() {
     newName.value = "";
     // Keep the picker fresh: without this the newly created character would
     // only appear after a full context reload, so the next capture's list
-    // would miss it.
-    if (ctx.value) {
+    // would miss it. Merge only into the context the create belonged to.
+    if (ctx.value?.projectId === projectId) {
       ctx.value = {
         ...ctx.value,
         characters: [...ctx.value.characters, character].sort((a, b) =>
@@ -363,7 +411,41 @@ async function createAndSubmit() {
     // commit() re-enters busy handling; release the guard we set for the
     // create call so the label step is not short-circuited.
     busy.value = false;
+    // The queue may have advanced while creating; only classify the capture
+    // the user was looking at.
+    if (!item || currentItem.value?.id !== item.id) return;
     await commit("person", character.id);
+  } catch (error) {
+    errorMessage.value = normalizeError(error);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function createFromSpeakerAndSubmit() {
+  const name = engineName.value;
+  const projectId = ctx.value?.projectId;
+  const item = currentItem.value;
+  if (!name || !projectId || busy.value || roiBusy.value || roiBlocked.value || roiLoading.value) return;
+  busy.value = true;
+  errorMessage.value = "";
+  try {
+    const character = await captureApi.createCharacter(projectId, name);
+    // Only merge into the list the create belonged to; a context reload for
+    // another project must not receive a character that is not its own.
+    if (ctx.value?.projectId === projectId) {
+      ctx.value = {
+        ...ctx.value,
+        characters: [...ctx.value.characters, character].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        ),
+      };
+    }
+    busy.value = false;
+    // The create is a server round-trip; the queue may have advanced. Never
+    // verify or classify a capture the user did not click on.
+    if (!item || currentItem.value?.id !== item.id) return;
+    await submitCharacter(character);
   } catch (error) {
     errorMessage.value = normalizeError(error);
   } finally {
@@ -497,6 +579,11 @@ onMounted(async () => {
         // pending recommendations show up without reopening the popup.
         void refreshItems();
       }),
+      await listen<{ captureItemId: string }>("capture:engine-metadata-updated", (event) => {
+        // The sidecar can land just after the PNG; the retry pass attaches it
+        // later. Re-read only when this is the capture on screen.
+        if (currentItem.value?.id === event.payload.captureItemId) void loadEngineMetadata();
+      }),
     );
   } catch {
     // Browser previews do not expose the Tauri event bridge.
@@ -584,7 +671,7 @@ onBeforeUnmount(() => {
           <Sparkles :size="17" />
           <span>
             <strong>推荐：{{ suggestedCharacter.name }}</strong>
-            <small>相似度 {{ Math.round((currentItem?.recognitionConfidence ?? 0) * 100) }}%</small>
+            <small>相似度 {{ Math.round((currentItem?.recognitionConfidence ?? 0) * 100) }}%{{ engineSuggestedCharacter && engineSuggestedCharacter.id === suggestedCharacter.id ? " · 说话人匹配" : "" }}</small>
           </span>
           <Check :size="16" />
         </button>
@@ -625,9 +712,36 @@ onBeforeUnmount(() => {
           <Sparkles :size="17" />
           <span>
             <strong>推荐：{{ suggestedCharacter.name }}</strong>
-            <small>相似度 {{ Math.round((currentItem?.recognitionConfidence ?? 0) * 100) }}%</small>
+            <small>相似度 {{ Math.round((currentItem?.recognitionConfidence ?? 0) * 100) }}%{{ engineSuggestedCharacter && engineSuggestedCharacter.id === suggestedCharacter.id ? " · 说话人匹配" : "" }}</small>
           </span>
           <Check :size="16" />
+        </button>
+        <button
+          v-if="engineSuggestedCharacter && engineSuggestedCharacter.id !== suggestedCharacter?.id"
+          type="button"
+          class="popup-suggestion"
+          :disabled="busy || roiBusy || roiBlocked || roiLoading"
+          @click="submitCharacter(engineSuggestedCharacter)"
+        >
+          <Sparkles :size="17" />
+          <span>
+            <strong>引擎建议：{{ engineSuggestedCharacter.name }}</strong>
+            <small>{{ engineName ? `当前说话人 ${engineName}` : "来自 Ren'Py 引擎" }}</small>
+          </span>
+          <Check :size="16" />
+        </button>
+        <button
+          v-if="canCreateCharacterFromSpeaker"
+          type="button"
+          class="popup-suggestion"
+          :disabled="busy || roiBusy || roiBlocked || roiLoading"
+          @click="createFromSpeakerAndSubmit"
+        >
+          <Plus :size="17" />
+          <span>
+            <strong>创建角色「{{ engineName }}」</strong>
+            <small>来自对话说话人，创建后立即归类</small>
+          </span>
         </button>
         <div v-if="pendingVerification" class="popup-verification" role="alert">
           <p>{{ verificationWarning }}</p>

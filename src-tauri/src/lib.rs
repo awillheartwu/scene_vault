@@ -192,8 +192,11 @@ pub fn run() {
         })
         .setup(|app| {
             let log_directory = app.path().app_log_dir()?;
-            if let Err(error) = services::log_service::initialize(log_directory) {
+            if let Err(error) = services::log_service::initialize(log_directory.clone()) {
                 eprintln!("[ERROR] [app.startup] could not initialize logging: {error}");
+            }
+            if let Err(error) = services::perf_log_service::initialize(log_directory) {
+                eprintln!("[ERROR] [app.startup] could not initialize perf logging: {error}");
             }
             services::log_service::info(
                 "app.startup",
@@ -217,6 +220,9 @@ pub fn run() {
             let (pool, recovered_items, database_error, restored_on_startup) = startup;
             let normal_mode = database_error.is_none();
             app.manage(AppState { pool: pool.clone() });
+            services::resource_storage_service::configure_capture_output_dir(
+                app.path().app_cache_dir()?.join("capture-output"),
+            );
             app.manage(db::StartupState {
                 database_path,
                 backup_directory,
@@ -240,6 +246,7 @@ pub fn run() {
                 let settings =
                     tauri::async_runtime::block_on(services::log_settings_service::get(&pool))?;
                 services::log_service::configure(&settings)?;
+                services::perf_log_service::configure(&settings);
             }
             if recovered_items > 0 {
                 services::log_service::record_event(models::diagnostics::LogRecord {
@@ -422,6 +429,8 @@ pub fn run() {
             commands::settings::update_app_settings,
             commands::settings::get_archive_naming_settings,
             commands::settings::update_archive_naming_settings,
+            commands::settings::get_archive_output_settings,
+            commands::settings::update_archive_output_settings,
             commands::settings::get_recognition_settings,
             commands::settings::update_recognition_settings,
             commands::settings::get_processing_settings,
@@ -436,6 +445,15 @@ pub fn run() {
             commands::diagnostics::get_process_resource_status,
             commands::diagnostics::get_storage_resource_status,
             commands::diagnostics::cleanup_resource,
+            commands::engine::detect_engine,
+            commands::engine::get_project_engine_integration,
+            commands::engine::install_project_engine_bridge,
+            commands::engine::uninstall_project_engine_bridge,
+            commands::engine::get_capture_engine_metadata,
+            commands::engine::list_project_games,
+            commands::engine::launch_project_game,
+            commands::project::get_project_capture_policy,
+            commands::project::set_project_archive_output_size,
             commands::system::open_directory,
             commands::window::set_window_always_on_top,
         ])
