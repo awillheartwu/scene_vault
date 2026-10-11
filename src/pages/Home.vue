@@ -30,6 +30,13 @@ import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
 import { toast } from "@/lib/toast";
 import { useContextMenu } from "@/composables/useContextMenu";
 import {
+  archiveSpecSummary,
+  engineVersionList,
+  formatBytes,
+  renpyBadgeLabel,
+  renpyBadgeTitle,
+} from "@/lib/image-facts";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -283,28 +290,6 @@ function formatActivity(value: string): string {
   });
 }
 
-function formatBytes(bytes: number): string {
-  if (!bytes) return "0 B";
-  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(2) + " GB";
-  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(1) + " MB";
-  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return bytes + " B";
-}
-
-/// Archive output size as shown on the project home (already resolved).
-function archiveSpecLabel(size: string): string {
-  switch (size) {
-    case "1080p":
-      return "1080p";
-    case "1440p":
-      return "1440p";
-    case "2160p":
-      return "2160p";
-    default:
-      return "保持原样";
-  }
-}
-
 function setupLabel(project: ProjectOverviewSummary): string {
   if (!project.sourceCount && !project.destinationConfigured) return "尚未配置目录";
   if (!project.sourceCount) return "缺少截图来源";
@@ -489,9 +474,10 @@ function setupLabel(project: ProjectOverviewSummary): string {
             <p class="project-spec" style="display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12px; opacity: 0.85;">
               <span
                 v-if="project.engine === 'renpy'"
+                :title="renpyBadgeTitle(engineVersionList(project.engineVersions)) ?? undefined"
                 style="display: inline-block; padding: 1px 6px; border-radius: 999px; border: 1px solid rgba(128,128,128,0.5); font-size: 11px;"
-              >Ren'Py</span>
-              归档规格：{{ archiveSpecLabel(project.archiveOutputSize) }}
+              >{{ renpyBadgeLabel(engineVersionList(project.engineVersions)) }}</span>
+              归档规格：{{ archiveSpecSummary(project.archiveOutputSize, project.archiveOutputFormat, project.archiveOutputQuality) }}
             </p>
           </div>
         </button>
@@ -577,9 +563,10 @@ function setupLabel(project: ProjectOverviewSummary): string {
               <span class="row-spec">
                 <span
                   v-if="project.engine === 'renpy'"
+                  :title="renpyBadgeTitle(engineVersionList(project.engineVersions)) ?? undefined"
                   style="display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 999px; border: 1px solid rgba(128,128,128,0.5); font-size: 10px;"
-                >Ren'Py</span>
-                归档规格：{{ archiveSpecLabel(project.archiveOutputSize) }}
+                >{{ renpyBadgeLabel(engineVersionList(project.engineVersions)) }}</span>
+                归档规格：{{ archiveSpecSummary(project.archiveOutputSize, project.archiveOutputFormat, project.archiveOutputQuality) }}
               </span>
             </div>
           </div>

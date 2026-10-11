@@ -56,10 +56,13 @@ import {
 } from "@/components/ui/dialog";
 import {
   captureApi,
+  engineApi,
   captureStatusLabel,
   pathFileName,
   revealPath,
   type CaptureItem,
+  type CaptureEngineMetadata,
+  type CaptureImageFacts,
   type Character,
   type CharacterSummary,
   type FaceBankModelStatus,
@@ -68,6 +71,12 @@ import {
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
 import { describeError } from "@/lib/vision-errors";
+import {
+  describeArchiveImage,
+  describeSourceImage,
+  renpyBadgeLabel,
+  renpyBadgeTitle,
+} from "@/lib/image-facts";
 import {
   readWorkbenchSnapshot,
   writeWorkbenchSnapshot,
@@ -435,6 +444,52 @@ const viewLabel = computed(() => {
 });
 const selectedItem = computed(
   () => items.value.find((item) => item.id === selectedItemId.value) ?? null,
+);
+
+// Per-capture facts for the detail panel: engine version and the two file
+// summaries. Both are read-only lookups and may legitimately be empty.
+const detailEngineMetadata = ref<CaptureEngineMetadata | null>(null);
+const detailImageFacts = ref<CaptureImageFacts | null>(null);
+let detailFactsRequest = 0;
+
+async function loadDetailFacts() {
+  const item = selectedItem.value;
+  const token = ++detailFactsRequest;
+  detailEngineMetadata.value = null;
+  detailImageFacts.value = null;
+  if (!item) return;
+  try {
+    const [metadata, facts] = await Promise.allSettled([
+      engineApi.getCaptureMetadata(item.id),
+      Promise.resolve().then(() => captureApi.getCaptureImageFacts(item.id)),
+    ]);
+    if (token !== detailFactsRequest || selectedItem.value?.id !== item.id) return;
+    detailEngineMetadata.value = metadata.status === "fulfilled" ? metadata.value : null;
+    detailImageFacts.value = facts.status === "fulfilled" ? facts.value : null;
+  } catch {
+    // Browser previews or test stubs may not provide these lookups.
+    if (token === detailFactsRequest) {
+      detailEngineMetadata.value = null;
+      detailImageFacts.value = null;
+    }
+  }
+}
+
+watch(() => selectedItem.value?.id, () => void loadDetailFacts(), { immediate: true });
+
+const detailEngineBadge = computed(() =>
+  detailEngineMetadata.value
+    ? renpyBadgeLabel([detailEngineMetadata.value.engineVersion])
+    : null,
+);
+const detailEngineBadgeTitle = computed(() =>
+  renpyBadgeTitle([detailEngineMetadata.value?.engineVersion]),
+);
+const sourceImageLine = computed(() =>
+  describeSourceImage(detailImageFacts.value?.source, selectedItem.value?.fileSize ?? null),
+);
+const destinationImageLine = computed(() =>
+  describeArchiveImage(detailImageFacts.value?.destination),
 );
 const canSetSelectedAsAvatar = computed(() => {
   const item = selectedItem.value;
@@ -1667,6 +1722,14 @@ onBeforeUnmount(() => {
             </div>
             <div><dt>当前角色</dt><dd>{{ characterName(selectedItem.characterId) || "未标记" }}</dd></div>
             <div><dt>分类</dt><dd>{{ classificationLabel(selectedItem.classification) }}</dd></div>
+            <div v-if="detailEngineBadge">
+              <dt>引擎</dt>
+              <dd>
+                <span class="detail-engine-badge" :title="detailEngineBadgeTitle ?? undefined">
+                  {{ detailEngineBadge }}
+                </span>
+              </dd>
+            </div>
             <div><dt>捕获时间</dt><dd>{{ new Date(selectedItem.capturedAt).toLocaleString() }}</dd></div>
             <div v-if="selectedItem.processingWarningsJson !== '[]'">
               <dt>处理提示</dt><dd>{{ selectedItem.processingWarningsJson }}</dd>
@@ -1810,26 +1873,35 @@ onBeforeUnmount(() => {
 
           <section class="action-card">
             <span class="action-card-title">定位文件</span>
-            <div class="action-card-body">
-              <button
-                type="button"
-                class="path-button"
-                :disabled="captureVariantReadReason(selectedItem, 'source') !== null"
-                :title="captureVariantReadReason(selectedItem, 'source') ?? '在文件管理器中定位原图'"
-                @click="reveal(selectedItem.sourcePath)"
-              >
-                <Image :size="15" />原图<ExternalLink :size="12" />
-              </button>
-              <button
-                v-if="selectedItem.destinationPath"
-                type="button"
-                class="path-button"
-                :disabled="captureVariantReadReason(selectedItem, 'destination') !== null"
-                :title="captureVariantReadReason(selectedItem, 'destination') ?? '在文件管理器中定位归档图'"
-                @click="reveal(selectedItem.destinationPath)"
-              >
-                <Archive :size="15" />归档图<ExternalLink :size="12" />
-              </button>
+            <div class="action-card-body path-card-body">
+              <div class="path-entry">
+                <button
+                  type="button"
+                  class="path-button"
+                  :disabled="captureVariantReadReason(selectedItem, 'source') !== null"
+                  :title="captureVariantReadReason(selectedItem, 'source') ?? '在文件管理器中定位原图'"
+                  @click="reveal(selectedItem.sourcePath)"
+                >
+                  <Image :size="15" />原图<ExternalLink :size="12" />
+                </button>
+                <small v-if="sourceImageLine" class="path-entry-info">{{ sourceImageLine }}</small>
+              </div>
+              <div v-if="selectedItem.destinationPath" class="path-entry">
+                <button
+                  type="button"
+                  class="path-button"
+                  :disabled="captureVariantReadReason(selectedItem, 'destination') !== null"
+                  :title="captureVariantReadReason(selectedItem, 'destination') ?? '在文件管理器中定位归档图'"
+                  @click="reveal(selectedItem.destinationPath)"
+                >
+                  <Archive :size="15" />归档图<ExternalLink :size="12" />
+                </button>
+                <small
+                  v-if="destinationImageLine"
+                  class="path-entry-info"
+                  :title="destinationImageLine.tooltip ?? undefined"
+                >{{ destinationImageLine.text }}</small>
+              </div>
               <button
                 v-if="selectedItem.destinationAvatarPath"
                 type="button"
@@ -2008,6 +2080,32 @@ onBeforeUnmount(() => {
 .path-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.path-card-body {
+  align-items: flex-start;
+}
+
+.path-entry {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.path-entry-info {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-engine-badge {
+  display: inline-flex;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .character-card.reset-selected { outline: 2px solid var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 10%, var(--card)); }

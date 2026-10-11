@@ -212,9 +212,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, AppError> {
 }
 
 pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSummary>, AppError> {
-    let global_size = crate::services::archive_output_settings_service::get(pool)
-        .await?
-        .size;
+    let global = crate::services::archive_output_settings_service::get(pool).await?;
     let summaries = sqlx::query_as::<_, ProjectOverviewSummary>(
         r#"
         WITH capture_stats AS (
@@ -277,10 +275,26 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
                 ORDER BY pei.installed_at ASC, pei.id ASC
                 LIMIT 1
             ) AS engine,
+            (
+                SELECT GROUP_CONCAT(DISTINCT COALESCE(
+                    pei.engine_version,
+                    CASE pei.python_major WHEN 2 THEN '7' WHEN 3 THEN '8' END
+                ))
+                FROM project_engine_integrations pei
+                WHERE pei.project_id = p.id
+            ) AS engine_versions,
             CASE
                 WHEN p.archive_output_size = 'inherit' OR p.archive_output_size = '' THEN ?
                 ELSE p.archive_output_size
             END AS archive_output_size,
+            CASE
+                WHEN p.archive_output_format = 'inherit' OR p.archive_output_format = '' THEN ?
+                ELSE p.archive_output_format
+            END AS archive_output_format,
+            CASE
+                WHEN p.archive_output_quality IS NULL THEN ?
+                ELSE p.archive_output_quality
+            END AS archive_output_quality,
             COALESCE(cs.last_capture_at, p.updated_at) AS last_activity_at,
             (
                 SELECT item.id
@@ -297,7 +311,9 @@ pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSumm
         ORDER BY last_activity_at DESC, p.name COLLATE NOCASE ASC
         "#,
     )
-    .bind(&global_size)
+    .bind(&global.size)
+    .bind(&global.format)
+    .bind(global.quality)
     .fetch_all(pool)
     .await?;
 
@@ -1078,14 +1094,18 @@ mod tests {
         .await
         .expect("create project");
         let now = "2026-10-10T00:00:00Z";
-        for (id, root) in [("install-a", "C:/games/a"), ("install-b", "C:/games/b")] {
+        for (id, root, version) in [
+            ("install-a", "C:/games/a", Some("8.1.3.23091805")),
+            ("install-b", "C:/games/b", None),
+        ] {
             sqlx::query(
-                "INSERT INTO project_engine_integrations (id, project_id, engine, engine_root, game_directory, python_major, bridge_version, metadata_directory, manifest_json, installed_at, updated_at) VALUES (?, ?, 'renpy', ?, ?, 3, '1.1.1', NULL, '[]', ?, ?)",
+                "INSERT INTO project_engine_integrations (id, project_id, engine, engine_root, game_directory, python_major, engine_version, bridge_version, metadata_directory, manifest_json, installed_at, updated_at) VALUES (?, ?, 'renpy', ?, ?, 3, ?, '1.1.1', NULL, '[]', ?, ?)",
             )
             .bind(id)
             .bind(&project.id)
             .bind(root)
             .bind(format!("{root}/game"))
+            .bind(version)
             .bind(now)
             .bind(now)
             .execute(&pool)
@@ -1100,5 +1120,11 @@ mod tests {
             .collect();
         assert_eq!(matches.len(), 1, "one summary row per project");
         assert_eq!(matches[0].engine.as_deref(), Some("renpy"));
+        let versions = matches[0].engine_versions.clone().unwrap_or_default();
+        assert!(versions.contains("8.1.3.23091805"), "{versions}");
+        assert!(
+            versions.split(',').any(|value| value == "8"),
+            "python-major fallback missing: {versions}"
+        );
     }
 }

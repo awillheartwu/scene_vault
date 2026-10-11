@@ -992,6 +992,13 @@ async fn clean_and_commit<R: FileRecycler>(
         .await?;
     }
     tx.commit().await?;
+    // The archived record is gone with the archived files.
+    if let Err(error) = super::image_facts_service::clear_destination(pool, id).await {
+        log_service::warn(
+            "capture.facts",
+            format!("could not clear archive facts for {id}: {error}"),
+        );
+    }
     super::archive_manifest_service::request_rebuild(&snapshot.project_id);
     Ok(())
 }

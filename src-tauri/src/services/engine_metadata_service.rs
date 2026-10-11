@@ -14,7 +14,7 @@ use crate::{
 const SUPPORTED_SCHEMA_VERSION: i64 = 1;
 
 const METADATA_COLUMNS: &str = "capture_item_id, project_id, engine, schema_version, \
-    bridge_version, speaker_raw, speaker_source, dialogue, suggested_character_id, \
+    bridge_version, engine_version, speaker_raw, speaker_source, dialogue, suggested_character_id, \
     virtual_width, virtual_height, physical_width, physical_height, payload_json, \
     created_at, updated_at";
 
@@ -161,11 +161,11 @@ pub async fn try_attach(pool: &SqlitePool, capture_item_id: &str) -> Result<bool
         r#"
         INSERT INTO capture_engine_metadata (
             capture_item_id, project_id, engine, schema_version, bridge_version,
-            speaker_raw, speaker_source, dialogue, suggested_character_id,
+            engine_version, speaker_raw, speaker_source, dialogue, suggested_character_id,
             virtual_width, virtual_height, physical_width, physical_height,
             payload_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(capture_item_id) DO NOTHING
         "#,
     )
@@ -174,6 +174,7 @@ pub async fn try_attach(pool: &SqlitePool, capture_item_id: &str) -> Result<bool
     .bind(ENGINE_RENPY)
     .bind(payload.schema_version)
     .bind(&payload.bridge_version)
+    .bind(payload.engine_version.as_deref())
     .bind(payload.speaker.as_deref())
     .bind(payload.speaker_source.as_deref())
     .bind(payload.dialogue.as_deref())

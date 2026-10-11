@@ -10,7 +10,7 @@ use crate::{
     models::capture::{ProjectFileReconcileResult, ReconcileProjectFilesInput},
     services::{
         archive_manifest_service, archive_naming, capture_discovery_service, capture_service,
-        file_relink,
+        file_relink, image_facts_service,
     },
 };
 
@@ -335,6 +335,8 @@ pub async fn reconcile_project_files(
 
     let mut transaction = pool.begin().await?;
     let mut source_relocated_count = 0_u32;
+    let mut relocated_source_facts: Vec<(String, String)> = Vec::new();
+    let mut replaced_source_facts: Vec<String> = Vec::new();
     for update in &updates {
         if let Some(path) = &update.new_source_path {
             let applied = sqlx::query(
@@ -351,6 +353,7 @@ pub async fn reconcile_project_files(
             if path != &update.old_source_path && applied.rows_affected() == 1 {
                 source_relocated_count = source_relocated_count.saturating_add(1);
             }
+            relocated_source_facts.push((update.id.clone(), path.clone()));
         } else {
             sqlx::query(
                 "UPDATE capture_items SET source_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND source_path = ?",
@@ -360,6 +363,9 @@ pub async fn reconcile_project_files(
             .bind(&update.old_source_path)
             .execute(&mut *transaction)
             .await?;
+            if update.state == "replaced" {
+                replaced_source_facts.push(update.id.clone());
+            }
         }
     }
     for update in destination_updates {
@@ -394,6 +400,15 @@ pub async fn reconcile_project_files(
         .await?;
     }
     transaction.commit().await?;
+
+    // Image facts follow the file: a verified relocation refreshes them, a
+    // replacement clears them so an old record can never describe new bytes.
+    for (id, path) in relocated_source_facts {
+        let _ = image_facts_service::refresh_source_facts(pool, &id, Path::new(&path)).await;
+    }
+    for id in replaced_source_facts {
+        let _ = image_facts_service::clear_source(pool, &id).await;
+    }
 
     // The check may have relinked a target or refreshed its state, and the
     // rating manifest has to follow either way.

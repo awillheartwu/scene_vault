@@ -31,6 +31,7 @@ pub async fn detect(path: &Path) -> Result<EngineDetection, AppError> {
         .await
         .map_err(|error| AppError::Validation(format!("无法访问 game 目录：{error}")))?;
     let python_major = detect_python_major(&engine_root).await;
+    let engine_version = detect_engine_version(&engine_root).await;
     let bridge_installed = tokio::fs::metadata(
         game_directory.join(crate::services::renpy_bridge_service::BRIDGE_FILE_NAME),
     )
@@ -42,8 +43,44 @@ pub async fn detect(path: &Path) -> Result<EngineDetection, AppError> {
         engine_root: crate::services::capture_service::path_to_string(&engine_root),
         game_directory: crate::services::capture_service::path_to_string(&game_directory),
         python_major,
+        engine_version,
         bridge_installed,
     })
+}
+
+/// Reads the exact engine version from `renpy/vc_version.py`. Ren'Py 7 and 8
+/// both ship that file; Python 2 builds spell the value as `u'…'`.
+async fn detect_engine_version(root: &Path) -> Option<String> {
+    let text = tokio::fs::read_to_string(root.join("renpy").join("vc_version.py"))
+        .await
+        .ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("version") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let rest = match rest.chars().next() {
+            Some('u') | Some('U') => rest[1..].trim_start(),
+            _ => rest,
+        };
+        let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+            continue;
+        };
+        let inner = &rest[1..];
+        let Some(end) = inner.find(quote) else {
+            continue;
+        };
+        let value = inner[..end].trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
 }
 
 /// Accepts the game root, the `game/` folder itself, or a subfolder of a
@@ -149,6 +186,39 @@ mod tests {
         assert_eq!(detection.engine, "renpy");
         assert_eq!(detection.python_major, Some(3));
         assert!(!detection.bridge_installed);
+    }
+
+    #[tokio::test]
+    async fn reads_the_exact_engine_version_from_vc_version_py() {
+        let workspace = tempdir().unwrap();
+        let root = workspace.path().join("demo");
+        write_minimal_game(&root, "py3-windows-x86_64").await;
+        tokio::fs::create_dir_all(root.join("renpy")).await.unwrap();
+        tokio::fs::write(
+            root.join("renpy/vc_version.py"),
+            "branch = 'fix'\nversion = '8.1.3.23091805'\nversion_name = 'x'\n",
+        )
+        .await
+        .unwrap();
+        let detection = detect(&root).await.expect("detect");
+        assert_eq!(detection.engine_version.as_deref(), Some("8.1.3.23091805"));
+
+        // Python 2 games spell the same line with a u prefix.
+        tokio::fs::write(
+            root.join("renpy/vc_version.py"),
+            "version = u'7.6.1.23060707'\n",
+        )
+        .await
+        .unwrap();
+        let detection = detect(&root).await.expect("detect py2");
+        assert_eq!(detection.engine_version.as_deref(), Some("7.6.1.23060707"));
+
+        // A repack without the file simply reports no version.
+        tokio::fs::remove_file(root.join("renpy/vc_version.py"))
+            .await
+            .unwrap();
+        let detection = detect(&root).await.expect("detect without version");
+        assert_eq!(detection.engine_version, None);
     }
 
     #[tokio::test]

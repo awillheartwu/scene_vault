@@ -417,6 +417,18 @@ async fn discover_with_options(
             .bind(&row.id)
             .execute(pool)
             .await?;
+            // Older generations no longer describe the file on disk.
+            sqlx::query(
+                "UPDATE capture_image_facts SET source_json = NULL, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE capture_item_id IN (SELECT id FROM capture_items \
+                 WHERE project_id = ? AND source_path = ? AND id != ?)",
+            )
+            .bind(&session.project_id)
+            .bind(&item.key)
+            .bind(&row.id)
+            .execute(pool)
+            .await?;
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
@@ -426,6 +438,16 @@ async fn discover_with_options(
         // explicit user action; discovery never silently removes history.
         sqlx::query(
             "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ?",
+        )
+        .bind(&session.project_id)
+        .bind(&item.key)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE capture_image_facts SET source_json = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE capture_item_id IN (SELECT id FROM capture_items \
+             WHERE project_id = ? AND source_path = ?)",
         )
         .bind(&session.project_id)
         .bind(&item.key)

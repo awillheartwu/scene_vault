@@ -247,7 +247,7 @@ async fn history_hides_private_captures_by_default() {
     .expect("list history");
     assert_eq!(hidden.total, 1);
     assert_eq!(hidden.entries.len(), 1);
-    assert_eq!(hidden.entries[0].classification, "scene");
+    assert_eq!(hidden.entries[0].entry.classification, "scene");
 
     let visible = list_history(
         &pool,
@@ -426,7 +426,10 @@ async fn runs_session_label_and_processing_state_transitions() {
     .expect("list history");
     assert_eq!(history.total, 1);
     assert_eq!(history.entries.len(), 1);
-    assert_eq!(history.entries[0].character_name.as_deref(), Some("Aurora"));
+    assert_eq!(
+        history.entries[0].entry.character_name.as_deref(),
+        Some("Aurora")
+    );
 
     let ended = end_session(
         &pool,

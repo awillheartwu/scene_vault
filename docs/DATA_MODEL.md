@@ -183,6 +183,17 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
   JSON、与现有角色精确匹配的建议）。payload 为权威副本，列字段用于查询与建议。
 - `projects.archive_output_size`：项目级归档输出尺寸（inherit/keep/1080p/1440p/2160p）；
   `inherit` 时使用全局设置 `archive.output_size`。
+- `projects.archive_output_format` 与 `projects.archive_output_quality`：项目级归档
+  格式（inherit/keep/png/jpeg/webp）与 JPEG 质量（空表示继承全局）；`inherit` 时分别
+  使用全局设置中的同名字段。
+- `project_engine_integrations.engine_version`：安装时从 `renpy/vc_version.py` 读取的
+  精确引擎版本；`capture_engine_metadata.engine_version` 是 bridge 1.1.4 起随截图上报
+  的运行中版本，两者都可能为空（旧安装/旧截图）。
+- `capture_image_facts`：每张截图一行（`capture_item_id` 主键，随截图级联删除），
+  `source_json` 记录原图的宽高与格式，`destination_json` 记录归档图的宽高、格式、字节
+  数、实际质量（`qualityKind` 为 lossless/quality/unknown）、请求的尺寸规格与是否应用。
+  只描述应用实际见过的文件：检测到替换或重新归档时刷新或清空，读取时还会核对归档文件
+  的当前大小，避免展示旧数据。
 
 ## 全局约定
 

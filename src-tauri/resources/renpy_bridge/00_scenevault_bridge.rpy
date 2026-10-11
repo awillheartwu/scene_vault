@@ -19,7 +19,7 @@ init -1000 python:
     import os
     import time
 
-    SCENEVAULT_BRIDGE_VERSION = "1.1.3"
+    SCENEVAULT_BRIDGE_VERSION = "1.1.4"
     SCENEVAULT_BRIDGE_SCHEMA = 1
 
     def _sv_text(value):
@@ -132,6 +132,9 @@ init -1000 python:
                 "screenshot": {"file": os.path.basename(screenshot_path)},
             }
             errors = []
+            engine_version = self._engine_version()
+            if engine_version:
+                payload["engineVersion"] = engine_version
             speaker, speaker_source, speaker_variable = self.current_speaker()
             if speaker:
                 payload["speaker"] = speaker
@@ -306,6 +309,31 @@ init -1000 python:
             if width <= 0 or height <= 0:
                 return None
             return (width, height)
+
+        def _engine_version(self):
+            """Exact version of the running engine, when the build exposes it.
+
+            Both spellings of ``renpy.version`` exist in the wild: a plain
+            string on some builds and a callable on others, so accept either
+            and strip the "Ren'Py " prefix.
+            """
+            for attribute in ("version_only", "version"):
+                value = getattr(renpy, attribute, None)
+                if value is None:
+                    continue
+                try:
+                    text = value() if callable(value) else value
+                except Exception:
+                    continue
+                text = _sv_text(text)
+                if not text:
+                    continue
+                text = text.strip()
+                if text.lower().startswith("ren'py "):
+                    text = text[7:].strip()
+                if text:
+                    return text
+            return None
 
         def scene_tags(self):
             tags = None

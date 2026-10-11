@@ -38,18 +38,21 @@ import {
   pathMimeType,
   type CaptureClassification,
   type CaptureEngineMetadata,
+  type CaptureImageFacts,
   type CaptureItem,
   type Character,
   type ClassifyPopupContext,
   type VerificationResult,
 } from "@/lib/capture-api";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
+import CaptureEngineChips from "@/components/capture/CaptureEngineChips.vue";
 
 const ctx = ref<ClassifyPopupContext | null>(null);
 const currentIndex = ref(0);
 const mode = ref<"choose" | "person">("choose");
 const selectedCharacterId = ref<string | null>(null);
 const engineMetadata = ref<CaptureEngineMetadata | null>(null);
+const imageFacts = ref<CaptureImageFacts | null>(null);
 let engineMetadataRequest = 0;
 const search = ref("");
 const newName = ref("");
@@ -117,14 +120,21 @@ async function loadEngineMetadata() {
   const item = currentItem.value;
   const token = ++engineMetadataRequest;
   engineMetadata.value = null;
+  imageFacts.value = null;
   if (!item) return;
   try {
-    const view = await engineApi.getCaptureMetadata(item.id);
-    if (token === engineMetadataRequest && currentItem.value?.id === item.id) {
-      engineMetadata.value = view;
-    }
+    const [metadata, facts] = await Promise.allSettled([
+      engineApi.getCaptureMetadata(item.id),
+      Promise.resolve().then(() => captureApi.getCaptureImageFacts(item.id)),
+    ]);
+    if (token !== engineMetadataRequest || currentItem.value?.id !== item.id) return;
+    engineMetadata.value = metadata.status === "fulfilled" ? metadata.value : null;
+    imageFacts.value = facts.status === "fulfilled" ? facts.value : null;
   } catch {
-    if (token === engineMetadataRequest) engineMetadata.value = null;
+    if (token === engineMetadataRequest) {
+      engineMetadata.value = null;
+      imageFacts.value = null;
+    }
   }
 }
 
@@ -641,6 +651,11 @@ onBeforeUnmount(() => {
       <img v-else-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
         <div v-else class="popup-preview-empty"><ImageOff :size="28" /><span>无法加载预览</span></div>
       </div>
+      <CaptureEngineChips
+        class="popup-engine-chips"
+        :engine-metadata="engineMetadata"
+        :image-facts="imageFacts"
+      />
       <CaptureProgress persistent />
 
       <div v-if="ctx && ctx.items.length > 1" class="popup-nav">
@@ -936,6 +951,12 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: #0d1114;
   box-shadow: var(--card-shadow), var(--inner-highlight);
+}
+
+.popup-engine-chips {
+  flex: none;
+  margin: 8px 14px 0;
+  justify-content: flex-start;
 }
 
 .popup-preview.compact {

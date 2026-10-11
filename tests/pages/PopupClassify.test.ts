@@ -16,6 +16,7 @@ const { api, eventHandlers } = vi.hoisted(() => ({
     label: vi.fn(),
     verifyCaptureIdentity: vi.fn(),
     createCharacter: vi.fn(),
+    getCaptureImageFacts: vi.fn(async () => ({ source: null, destination: null })),
   },
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
 }));
@@ -98,6 +99,7 @@ function engineMetadataFixture(speaker: string) {
     engine: "renpy",
     schemaVersion: 1,
     bridgeVersion: "1.1.2",
+    engineVersion: "8.1.3.23091805",
     speakerRaw: speaker,
     speakerSource: "_last_say_who",
     dialogue: "…",
@@ -263,6 +265,11 @@ describe("PopupClassify", () => {
     });
     const wrapper = mount(PopupClassify);
     await flushPromises();
+    const chips = wrapper.find(".engine-chips");
+    expect(chips.exists()).toBe(true);
+    expect(chips.text()).toContain("Ren'Py 8");
+    expect(chips.text()).toContain("说话人 Mira");
+    expect(chips.text()).toContain("引擎 1920×1080");
     await wrapper
       .findAll("button")
       .find((button) => button.text().includes("人物"))!

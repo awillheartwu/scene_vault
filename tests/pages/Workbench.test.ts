@@ -55,6 +55,7 @@ const { api, eventHandlers, listenMock, pickDirectoryMock } = vi.hoisted(() => {
     revealPath: vi.fn(),
     readImage: vi.fn(),
     readThumbnail: vi.fn(),
+    getCaptureImageFacts: vi.fn(async () => ({ source: null, destination: null })),
     },
     eventHandlers,
     pickDirectoryMock: vi.fn(),
@@ -75,6 +76,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
+  engineApi: { getCaptureMetadata: vi.fn(async () => null) },
   captureStatusLabel: (status: string) => status,
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",

@@ -454,6 +454,8 @@ pub fn run() {
             commands::engine::launch_project_game,
             commands::project::get_project_capture_policy,
             commands::project::set_project_archive_output_size,
+            commands::project::set_project_capture_policy,
+            commands::capture::get_capture_image_facts,
             commands::system::open_directory,
             commands::window::set_window_always_on_top,
         ])
