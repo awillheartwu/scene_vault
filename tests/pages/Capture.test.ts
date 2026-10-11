@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CaptureImageFacts } from "@/lib/capture-api";
 
 const { eventHandlers, api } = vi.hoisted(() => ({
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
@@ -40,6 +41,9 @@ const { eventHandlers, api } = vi.hoisted(() => ({
     createCharacter: vi.fn(),
     startSession: vi.fn(),
     endSession: vi.fn(),
+    getCaptureImageFacts: vi.fn(
+      async (): Promise<CaptureImageFacts> => ({ source: null, destination: null }),
+    ),
   },
 }));
 
@@ -140,6 +144,7 @@ function engineMetadataFixture(speaker: string, suggestedCharacterId: string | n
     engine: "renpy",
     schemaVersion: 1,
     bridgeVersion: "1.1.2",
+    engineVersion: "8.1.3.23091805",
     speakerRaw: speaker,
     speakerSource: "_last_say_who",
     dialogue: "…",
@@ -358,6 +363,10 @@ describe("Capture quick-label flow", () => {
   });
 
   it("preselects the dialogue speaker suggestion when no face suggestion exists", async () => {
+    api.getCaptureImageFacts.mockResolvedValue({
+      source: { width: 3840, height: 2160, format: "png" },
+      destination: null,
+    });
     invokeMock.mockImplementation(async (command: string) => {
       switch (command) {
         case "get_project_engine_integration":
@@ -372,6 +381,13 @@ describe("Capture quick-label flow", () => {
     });
     const wrapper = mount(Capture);
     await flushPromises();
+
+    const chips = wrapper.find(".engine-chips");
+    expect(chips.exists()).toBe(true);
+    expect(chips.text()).toContain("Ren'Py 8");
+    expect(chips.text()).toContain("说话人 Ethan");
+    expect(chips.text()).toContain("引擎 1920×1080");
+    expect(chips.text()).toContain("截图 3840×2160");
 
     await wrapper
       .findAll("button")

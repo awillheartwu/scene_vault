@@ -20,12 +20,13 @@ use crate::{
             StartCaptureSessionInput, StartCaptureSessionResult, UnimportedCapture,
         },
         diagnostics::{LogLevel, LogRecord},
+        image_facts::CaptureImageFacts,
     },
     services::{
         archive_manifest_service, capture_archive_service, capture_deletion_service,
         capture_discovery_service, capture_service, file_recycle_service::SystemRecycleBin,
-        log_service, perf_log_service, project_file_reconcile_service, thumbnail_service,
-        timing::elapsed_ms,
+        image_facts_service, log_service, perf_log_service, project_file_reconcile_service,
+        thumbnail_service, timing::elapsed_ms,
     },
 };
 
@@ -593,6 +594,16 @@ pub async fn classify_popup_context(
     state: State<'_, AppState>,
 ) -> Result<ClassifyPopupContext, AppError> {
     capture_service::classify_popup_context(&state.pool).await
+}
+
+/// Resolution/format/quality facts for the original and archived files of
+/// one capture. Read-only; unknown values simply stay empty.
+#[tauri::command]
+pub async fn get_capture_image_facts(
+    state: State<'_, AppState>,
+    input: CaptureItemIdInput,
+) -> Result<CaptureImageFacts, AppError> {
+    image_facts_service::read(&state.pool, input.capture_item_id.trim()).await
 }
 
 fn session_event(event: &str, session: &CaptureSession) {

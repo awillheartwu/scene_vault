@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::image_facts::{ArchiveImageFacts, SourceImageFacts};
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSession {
@@ -435,8 +437,20 @@ pub struct CaptureHistoryEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureHistoryPage {
-    pub entries: Vec<CaptureHistoryEntry>,
+    pub entries: Vec<CaptureHistoryEntryView>,
     pub total: i64,
+}
+
+/// One history row plus the parsed image facts of its two files. Facts are
+/// attached after the main query (one batched lookup), so the entry struct
+/// itself stays exactly what SQL returns.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureHistoryEntryView {
+    #[serde(flatten)]
+    pub entry: CaptureHistoryEntry,
+    pub source_image: Option<SourceImageFacts>,
+    pub destination_image: Option<ArchiveImageFacts>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

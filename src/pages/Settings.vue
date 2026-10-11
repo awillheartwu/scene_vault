@@ -113,7 +113,11 @@ const namingSettings = ref<ArchiveNamingSettings>({
   template: DEFAULT_NAMING_TEMPLATE,
   separator: " - ",
 });
-const archiveOutputSettings = ref<ArchiveOutputSettings>({ size: "keep" });
+const archiveOutputSettings = ref<ArchiveOutputSettings>({
+  size: "keep",
+  format: "keep",
+  quality: 90,
+});
 const recognitionSettings = ref<RecognitionSettings>({
   extractAtRegistration: true,
   verificationEnabled: true,
@@ -1065,7 +1069,35 @@ onBeforeUnmount(() => {
             <option value="1080p">缩到 1080p</option>
             <option value="1440p">缩到 1440p</option>
             <option value="2160p">缩到 2160p</option>
+            <option value="native">按游戏设定尺寸</option>
           </select>
+        </div>
+      </div>
+      <div class="settings-field">
+        <label for="archive-output-format">归档输出格式（全局默认）</label>
+        <p>归档时可转换图片格式；WebP 为无损编码，保留原格式时不重新编码。单个项目可在捕获页覆盖。</p>
+        <div>
+          <select id="archive-output-format" v-model="archiveOutputSettings.format">
+            <option value="keep">保持原格式</option>
+            <option value="png">PNG</option>
+            <option value="jpeg">JPEG</option>
+            <option value="webp">WebP（无损）</option>
+          </select>
+        </div>
+      </div>
+      <div class="settings-field">
+        <label for="archive-output-quality">JPEG 质量（全局默认）</label>
+        <p>仅对 JPEG 生效（PNG 与无损 WebP 不受影响）；实际使用的参数会记录在每张截图上。</p>
+        <div class="archive-quality-row">
+          <input
+            id="archive-output-quality"
+            v-model.number="archiveOutputSettings.quality"
+            type="range"
+            min="60"
+            max="100"
+            step="1"
+          />
+          <span>{{ archiveOutputSettings.quality }}</span>
         </div>
       </div>
       <div class="settings-field">
@@ -1519,6 +1551,25 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.archive-quality-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.archive-quality-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.archive-quality-row span {
+  min-width: 26px;
+  color: var(--foreground);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .settings-page > :deep(.page-header) {
   width: 100%;
 }

@@ -7,6 +7,7 @@ pub mod character;
 pub mod data_maintenance;
 pub mod diagnostics;
 pub mod engine;
+pub mod image_facts;
 pub mod project;
 pub mod project_note;
 pub mod recognition;

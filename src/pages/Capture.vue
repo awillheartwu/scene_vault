@@ -71,6 +71,7 @@ import {
   type CaptureItem,
   type CaptureClassification,
   type CaptureEngineMetadata,
+  type CaptureImageFacts,
   type CaptureRuntimeStatus,
   type CaptureSession,
   type Character,
@@ -83,6 +84,8 @@ import {
   type VerificationResult,
 } from "@/lib/capture-api";
 import { toast } from "@/lib/toast";
+import CaptureEngineChips from "@/components/capture/CaptureEngineChips.vue";
+import { archiveFormatLabel, archiveSizeLabel } from "@/lib/image-facts";
 
 const { isWideLayout } = useAdaptiveLayout();
 
@@ -352,12 +355,23 @@ async function loadEngineMetadata() {
   // its speaker suggestion can never be clicked for the new image.
   const token = ++engineMetadataRequest;
   engineMetadata.value = null;
+  imageFacts.value = null;
   if (!item) return;
   try {
-    const view = await engineApi.getCaptureMetadata(item.id);
-    if (token === engineMetadataRequest) engineMetadata.value = view;
+    const [metadata, facts] = await Promise.allSettled([
+      engineApi.getCaptureMetadata(item.id),
+      // Lazy so a test/preview stub without this lookup cannot break the
+      // engine metadata fetch above.
+      Promise.resolve().then(() => captureApi.getCaptureImageFacts(item.id)),
+    ]);
+    if (token !== engineMetadataRequest) return;
+    engineMetadata.value = metadata.status === "fulfilled" ? metadata.value : null;
+    imageFacts.value = facts.status === "fulfilled" ? facts.value : null;
   } catch {
-    if (token === engineMetadataRequest) engineMetadata.value = null;
+    if (token === engineMetadataRequest) {
+      engineMetadata.value = null;
+      imageFacts.value = null;
+    }
   }
 }
 
@@ -380,19 +394,10 @@ const engineStaleInstalls = computed(() =>
 );
 const archivePolicy = ref<CapturePolicyView | null>(null);
 const archiveSizeChoice = ref("inherit");
-
-function archiveSizeLabel(size: string | null | undefined): string {
-  switch (size) {
-    case "1080p":
-      return "1080p";
-    case "1440p":
-      return "1440p";
-    case "2160p":
-      return "2160p";
-    default:
-      return "保持原样";
-  }
-}
+const archiveFormatChoice = ref("inherit");
+const archiveQualityInherit = ref(true);
+const archiveQualityChoice = ref(90);
+const imageFacts = ref<CaptureImageFacts | null>(null);
 
 const engineButtonTitle = computed(() => {
   if (engineError.value) return engineError.value;
@@ -444,7 +449,7 @@ async function loadEngineState() {
     engineConfirmUninstallId.value = null;
     engineUninstallOpen.value = false;
     archivePolicy.value = policy;
-    if (policy) archiveSizeChoice.value = policy.projectSize;
+    if (policy) applyPolicyChoices(policy);
   } catch (error) {
     if (token === engineStateRequest && projectId.value === current) {
       engineError.value = normalizeError(error);
@@ -454,23 +459,35 @@ async function loadEngineState() {
 
 let archiveSaveRequest = 0;
 
-async function saveArchiveSize() {
+function applyPolicyChoices(policy: CapturePolicyView) {
+  archiveSizeChoice.value = policy.projectSize;
+  archiveFormatChoice.value = policy.projectFormat;
+  archiveQualityInherit.value = policy.projectQuality == null;
+  archiveQualityChoice.value = policy.projectQuality ?? policy.globalQuality;
+}
+
+async function saveArchivePolicy() {
   const current = projectId.value;
   if (!current) return;
   const token = ++archiveSaveRequest;
   try {
-    const policy = await engineApi.setArchiveOutputSize(current, archiveSizeChoice.value);
+    const policy = await engineApi.setProjectCapturePolicy({
+      projectId: current,
+      archiveOutputSize: archiveSizeChoice.value,
+      archiveOutputFormat: archiveFormatChoice.value,
+      archiveOutputQuality: archiveQualityInherit.value ? null : archiveQualityChoice.value,
+    });
     if (token !== archiveSaveRequest || projectId.value !== current) return;
     // Invalidate any specification read that started before this save; its
     // stale value must not overwrite what was just persisted.
     engineStateRequest += 1;
     archivePolicy.value = policy;
-    archiveSizeChoice.value = policy.projectSize;
-    toast.success("归档图规格已保存。");
+    applyPolicyChoices(policy);
+    toast.success("归档规格已保存。");
   } catch (error) {
     if (token === archiveSaveRequest && projectId.value === current) {
       toast.error(normalizeError(error));
-      if (archivePolicy.value) archiveSizeChoice.value = archivePolicy.value.projectSize;
+      if (archivePolicy.value) applyPolicyChoices(archivePolicy.value);
     }
   }
 }
@@ -1376,15 +1393,59 @@ onBeforeUnmount(() => {
               :disabled="Boolean(activeSession) || !projectId"
               :title="`全局默认：${archiveSizeLabel(archivePolicy?.resolvedSize)}`"
               class="archive-size-select"
-              @change="saveArchiveSize"
+              @change="saveArchivePolicy"
             >
               <option value="inherit">继承全局（{{ archiveSizeLabel(archivePolicy?.globalSize) }}）</option>
               <option value="keep">保持原样</option>
               <option value="1080p">1080p</option>
               <option value="1440p">1440p</option>
               <option value="2160p">2160p</option>
+              <option value="native">按游戏设定尺寸</option>
             </select>
           </label>
+          <label class="archive-size-field">
+            <span>归档格式</span>
+            <select
+              v-model="archiveFormatChoice"
+              :disabled="Boolean(activeSession) || !projectId"
+              :title="`全局默认：${archiveFormatLabel(archivePolicy?.globalFormat)}`"
+              class="archive-size-select"
+              @change="saveArchivePolicy"
+            >
+              <option value="inherit">继承全局（{{ archiveFormatLabel(archivePolicy?.globalFormat) }}）</option>
+              <option value="keep">保持原格式</option>
+              <option value="png">PNG</option>
+              <option value="jpeg">JPEG</option>
+              <option value="webp">WebP（无损）</option>
+            </select>
+          </label>
+          <div class="archive-quality-field">
+            <label
+              class="archive-quality-toggle"
+              :title="`全局默认 JPEG 质量 ${archivePolicy?.globalQuality ?? 90}`"
+            >
+              <input
+                v-model="archiveQualityInherit"
+                type="checkbox"
+                :disabled="Boolean(activeSession) || !projectId"
+                @change="saveArchivePolicy"
+              />
+              <span>跟随全局</span>
+            </label>
+            <input
+              v-model.number="archiveQualityChoice"
+              class="archive-quality-range"
+              type="range"
+              min="60"
+              max="100"
+              step="1"
+              :disabled="archiveQualityInherit || Boolean(activeSession) || !projectId"
+              :aria-label="`JPEG 质量 ${archiveQualityChoice}`"
+              @change="saveArchivePolicy"
+            />
+            <span class="archive-quality-value">{{ archiveQualityInherit ? "—" : archiveQualityChoice }}</span>
+          </div>
+          <p class="archive-quality-hint">JPEG 质量；PNG 与无损 WebP 不受影响。</p>
         </section>
 
         <section class="session-control" aria-label="会话控制">
@@ -1536,16 +1597,7 @@ onBeforeUnmount(() => {
               <span>{{ pathFileName(selectedItem.sourcePath) }}</span>
               <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
             </div>
-            <div v-if="engineMetadata" class="file-meta engine-meta">
-              <span v-if="engineMetadata.speakerRaw">说话人 {{ engineMetadata.speakerRaw }}</span>
-              <span v-if="engineMetadata.virtualWidth">引擎 {{ engineMetadata.virtualWidth }}×{{ engineMetadata.virtualHeight }}</span>
-              <span
-                v-if="engineMetadata.dialogue"
-                class="engine-dialogue"
-                :title="engineMetadata.dialogue"
-                style="max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-              >{{ engineMetadata.dialogue }}</span>
-            </div>
+            <CaptureEngineChips :engine-metadata="engineMetadata" :image-facts="imageFacts" />
             <button
               v-if="!isWideLayout"
               type="button"
@@ -1899,6 +1951,61 @@ onBeforeUnmount(() => {
 .archive-size-select:disabled {
   color: var(--capture-muted);
   cursor: not-allowed;
+}
+
+.archive-quality-field {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: 0 10px;
+  border: 1px solid var(--capture-border);
+  border-radius: var(--radius-control);
+  background: var(--capture-surface);
+  box-shadow: var(--inner-highlight);
+  color: var(--capture-muted);
+  font-size: 11.5px;
+}
+
+.archive-quality-field:focus-within {
+  border-color: var(--ring);
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.archive-quality-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.archive-quality-range {
+  width: 0;
+  min-width: 0;
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.archive-quality-range:disabled {
+  opacity: 0.5;
+}
+
+.archive-quality-value {
+  flex: none;
+  min-width: 20px;
+  color: var(--foreground);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.archive-quality-hint {
+  margin: var(--space-1) 2px 0;
+  color: var(--capture-muted);
+  font-size: 10.5px;
 }
 
 .stage-heading .file-state-chip {

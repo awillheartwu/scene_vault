@@ -43,8 +43,16 @@ pub struct ProjectOverviewSummary {
     pub total_bytes: i64,
     /// Engine badge for the project home (currently only `renpy`).
     pub engine: Option<String>,
+    /// Distinct engine versions of this project's installations, joined by
+    /// commas; falls back to the python-major equivalent (7/8) when the exact
+    /// version could not be read.
+    pub engine_versions: Option<String>,
     /// Effective archive output size after inheritance from the global default.
     pub archive_output_size: String,
+    /// Effective archive output format after inheritance.
+    pub archive_output_format: String,
+    /// Effective archive JPEG quality after inheritance.
+    pub archive_output_quality: i64,
     pub last_activity_at: String,
     pub latest_capture_item_id: Option<String>,
     pub cover_capture_item_id: Option<String>,

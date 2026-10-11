@@ -3,14 +3,31 @@ use serde::{Deserialize, Serialize};
 /// Engine kind identifiers persisted in `project_engine_integrations.engine`.
 pub const ENGINE_RENPY: &str = "renpy";
 
-/// Archive output size values a user can pick (besides `inherit`).
-pub const ARCHIVE_OUTPUT_SIZES: [&str; 4] = ["keep", "1080p", "1440p", "2160p"];
+/// Archive output size values a user can pick (besides `inherit`). `native`
+/// follows the engine-reported screen size of each capture.
+pub const ARCHIVE_OUTPUT_SIZES: [&str; 5] = ["keep", "1080p", "1440p", "2160p", "native"];
+
+/// Archive output format values a user can pick (besides `inherit`).
+pub const ARCHIVE_OUTPUT_FORMATS: [&str; 4] = ["keep", "png", "jpeg", "webp"];
+
+/// JPEG quality bounds and default used by the archive re-encode step.
+pub const ARCHIVE_OUTPUT_QUALITY_MIN: i64 = 60;
+pub const ARCHIVE_OUTPUT_QUALITY_MAX: i64 = 100;
+pub const DEFAULT_ARCHIVE_OUTPUT_QUALITY: i64 = 90;
 
 /// Project value meaning "use the global default".
 pub const ARCHIVE_OUTPUT_INHERIT: &str = "inherit";
 
 pub fn is_archive_output_size(value: &str) -> bool {
     ARCHIVE_OUTPUT_SIZES.contains(&value)
+}
+
+pub fn is_archive_output_format(value: &str) -> bool {
+    ARCHIVE_OUTPUT_FORMATS.contains(&value)
+}
+
+pub fn is_archive_output_quality(value: i64) -> bool {
+    (ARCHIVE_OUTPUT_QUALITY_MIN..=ARCHIVE_OUTPUT_QUALITY_MAX).contains(&value)
 }
 
 /// Result of inspecting a user-selected folder or executable. Read-only: the
@@ -25,6 +42,8 @@ pub struct EngineDetection {
     pub game_directory: String,
     /// Python major version shipped with the engine build, when detectable.
     pub python_major: Option<i64>,
+    /// Exact engine version read from `renpy/vc_version.py`, when readable.
+    pub engine_version: Option<String>,
     /// Whether a Scene Vault bridge file already sits in `game/`.
     pub bridge_installed: bool,
 }
@@ -110,6 +129,8 @@ pub struct ProjectEngineIntegration {
     pub engine_root: String,
     pub game_directory: String,
     pub python_major: Option<i64>,
+    /// Exact engine version, when it could be read from the installation.
+    pub engine_version: Option<String>,
     pub bridge_version: String,
     /// App-cache directory the bridge writes screenshot metadata files into.
     pub metadata_directory: Option<String>,
@@ -151,6 +172,9 @@ pub struct CaptureEngineMetadata {
     pub engine: String,
     pub schema_version: i64,
     pub bridge_version: String,
+    /// Engine version reported by the bridge with this screenshot; None for
+    /// captures taken before bridge 1.1.4 or without the value.
+    pub engine_version: Option<String>,
     pub speaker_raw: Option<String>,
     pub speaker_source: Option<String>,
     pub dialogue: Option<String>,
@@ -172,6 +196,7 @@ pub struct CaptureEngineMetadata {
 pub struct RenpySidecar {
     pub schema_version: i64,
     pub bridge_version: String,
+    pub engine_version: Option<String>,
     pub speaker: Option<String>,
     pub speaker_source: Option<String>,
     pub dialogue: Option<String>,
@@ -191,6 +216,26 @@ pub struct CapturePolicyView {
     /// The global default, shown as "inherit" on its own line so the label
     /// never turns into the project override.
     pub global_size: String,
+    pub project_format: String,
+    pub resolved_format: String,
+    pub global_format: String,
+    /// Project JPEG quality; None means "inherit the global default".
+    pub project_quality: Option<i64>,
+    pub resolved_quality: i64,
+    pub global_quality: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectCapturePolicyInput {
+    pub project_id: String,
+    /// `inherit`, `keep`, `1080p`, `1440p`, `2160p` or `native`.
+    pub archive_output_size: String,
+    /// `inherit`, `keep`, `png`, `jpeg` or `webp`.
+    pub archive_output_format: String,
+    /// JPEG quality (60–100); None inherits the global default.
+    #[serde(default)]
+    pub archive_output_quality: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,18 +253,32 @@ pub struct SetArchiveOutputSizeInput {
 pub struct ArchiveOutputSettings {
     #[serde(default = "default_archive_output_size")]
     pub size: String,
+    #[serde(default = "default_archive_output_format")]
+    pub format: String,
+    #[serde(default = "default_archive_output_quality")]
+    pub quality: i64,
 }
 
 impl Default for ArchiveOutputSettings {
     fn default() -> Self {
         Self {
             size: default_archive_output_size(),
+            format: default_archive_output_format(),
+            quality: default_archive_output_quality(),
         }
     }
 }
 
 fn default_archive_output_size() -> String {
     "keep".to_owned()
+}
+
+fn default_archive_output_format() -> String {
+    "keep".to_owned()
+}
+
+fn default_archive_output_quality() -> i64 {
+    DEFAULT_ARCHIVE_OUTPUT_QUALITY
 }
 
 #[derive(Debug, Deserialize)]

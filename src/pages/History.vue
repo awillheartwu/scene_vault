@@ -20,14 +20,23 @@ import { useContextMenu, type ContextMenuItem } from "@/composables/useContextMe
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 import {
   captureApi,
+  engineApi,
   captureStatusLabel,
   pathFileName,
   revealPath,
   type CaptureSession,
   type Character,
   type CaptureHistoryEntry,
+  type CaptureEngineMetadata,
   type Project,
 } from "@/lib/capture-api";
+import {
+  describeArchiveImage,
+  describeSourceImage,
+  formatResolution,
+  renpyBadgeLabel,
+  renpyBadgeTitle,
+} from "@/lib/image-facts";
 
 const { isWideLayout } = useAdaptiveLayout();
 const CURRENT_PROJECT_KEY = "scene-vault.capture.project";
@@ -60,6 +69,53 @@ watch([projectId, sessionId, characterId, status, showPrivate], () => { resetSel
 
 const selected = computed(() => entries.value.find((entry) => entry.id === selectedId.value) ?? entries.value[0] ?? null);
 const filtered = computed(() => entries.value);
+
+// The engine badge needs one extra read for the selected row only; the file
+// facts already arrive with the list entries.
+const selectedEngineMetadata = ref<CaptureEngineMetadata | null>(null);
+let selectedEngineRequest = 0;
+
+async function loadSelectedEngine() {
+  const entry = selected.value;
+  const token = ++selectedEngineRequest;
+  selectedEngineMetadata.value = null;
+  if (!entry) return;
+  try {
+    const view = await engineApi.getCaptureMetadata(entry.id);
+    if (token === selectedEngineRequest && selected.value?.id === entry.id) {
+      selectedEngineMetadata.value = view;
+    }
+  } catch {
+    // Browser previews or test stubs may not provide the engine lookup.
+    if (token === selectedEngineRequest) selectedEngineMetadata.value = null;
+  }
+}
+
+watch(() => selected.value?.id, () => void loadSelectedEngine(), { immediate: true });
+
+const selectedEngineBadge = computed(() =>
+  selectedEngineMetadata.value ? renpyBadgeLabel([selectedEngineMetadata.value.engineVersion]) : null,
+);
+const selectedEngineBadgeTitle = computed(() =>
+  renpyBadgeTitle([selectedEngineMetadata.value?.engineVersion]),
+);
+const selectedSourceLine = computed(() =>
+  describeSourceImage(selected.value?.sourceImage ?? null, selected.value?.fileSize ?? null),
+);
+const selectedDestinationLine = computed(() =>
+  describeArchiveImage(selected.value?.destinationImage ?? null),
+);
+
+/** Compact list cell: `3840×2160 → 1920×1080` (either side may be missing). */
+function entryResolutionLine(entry: CaptureHistoryEntry): string | null {
+  const source = formatResolution(entry.sourceImage?.width, entry.sourceImage?.height);
+  const destination = formatResolution(
+    entry.destinationImage?.width,
+    entry.destinationImage?.height,
+  );
+  if (source && destination) return `${source} → ${destination}`;
+  return source ?? destination ?? null;
+}
 const resetSelectableIds = computed(() => filtered.value.filter((entry) => entry.classification !== "unclassified").map((entry) => entry.id));
 
 async function initialize() {
@@ -363,6 +419,9 @@ onBeforeUnmount(() => {
               <span>{{ new Date(entry.capturedAt).toLocaleString() }} · {{ entry.projectName }}</span>
             </div>
             <div class="history-character"><UserRound :size="15" />{{ entry.characterName || "未标记" }}</div>
+            <div v-if="entryResolutionLine(entry)" class="history-media">
+              {{ entryResolutionLine(entry) }}
+            </div>
             <span class="status-pill" :data-status="entry.status">{{ captureStatusLabel(entry.status, entry.failureStage) }}</span>
             <span
               v-for="issue in captureFileIssues(entry)"
@@ -404,6 +463,21 @@ onBeforeUnmount(() => {
                 <dd :data-state="issue.state">{{ issue.label }}</dd>
               </div>
               <div><dt>角色</dt><dd>{{ selected.characterName || "未标记" }}</dd></div>
+              <div v-if="selectedEngineBadge">
+                <dt>引擎</dt>
+                <dd>
+                  <span class="detail-engine-badge" :title="selectedEngineBadgeTitle ?? undefined">
+                    {{ selectedEngineBadge }}
+                  </span>
+                </dd>
+              </div>
+              <div v-if="selectedSourceLine"><dt>原图</dt><dd>{{ selectedSourceLine }}</dd></div>
+              <div v-if="selectedDestinationLine">
+                <dt>归档图</dt>
+                <dd :title="selectedDestinationLine.tooltip ?? undefined">
+                  {{ selectedDestinationLine.text }}
+                </dd>
+              </div>
               <div><dt>会话</dt><dd>{{ selected.sessionStatus }}</dd></div>
               <div><dt>捕获时间</dt><dd>{{ new Date(selected.capturedAt).toLocaleString() }}</dd></div>
               <div v-if="selected.processingWarningsJson !== '[]'"><dt>处理提示</dt><dd>{{ selected.processingWarningsJson }}</dd></div>
@@ -578,4 +652,23 @@ onBeforeUnmount(() => {
 .history-row.reset-selected { background: color-mix(in srgb, var(--accent) 12%, var(--card)); box-shadow: inset 3px 0 0 var(--accent); }
 .history-row-select { display: contents; color: inherit; text-align: left; cursor: pointer; }
 .history-row:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.history-media {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-engine-badge {
+  display: inline-flex;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+}
 </style>

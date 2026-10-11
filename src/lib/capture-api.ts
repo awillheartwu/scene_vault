@@ -84,7 +84,14 @@ export interface ProjectOverviewSummary {
   failedCount: number;
   totalBytes: number;
   engine: string | null;
+  /** Distinct engine versions of this project's installs (e.g. "8.1.3,7");
+   *  falls back to the python-major equivalent when unknown. */
+  engineVersions: string | null;
   archiveOutputSize: string;
+  /** Effective archive format after inheritance (keep/png/jpeg/webp). */
+  archiveOutputFormat: string;
+  /** Effective archive JPEG quality after inheritance. */
+  archiveOutputQuality: number;
   lastActivityAt: string;
   latestCaptureItemId: string | null;
   coverCaptureItemId: string | null;
@@ -447,6 +454,40 @@ export interface CaptureHistoryEntry extends CaptureItem {
   projectName: string;
   sessionStatus: string;
   characterName: string | null;
+  /** Parsed facts for the original and archived file, when recorded. */
+  sourceImage: SourceImageFacts | null;
+  destinationImage: ArchiveImageFacts | null;
+}
+
+/** Header facts about the original capture file. Unknown parts stay null. */
+export interface SourceImageFacts {
+  width: number | null;
+  height: number | null;
+  format: string | null;
+}
+
+/** Facts about the archived file: resolution, format, quality and size. */
+export interface ArchiveImageFacts {
+  width: number | null;
+  height: number | null;
+  format: string | null;
+  bytes: number | null;
+  /** `lossless`, `quality` or `unknown`; null when nothing was recorded. */
+  qualityKind: "lossless" | "quality" | "unknown" | null;
+  /** JPEG quality actually used; null for lossless or unknown outputs. */
+  quality: number | null;
+  /** Requested size policy: keep / 1080p / 1440p / 2160p / native. */
+  sizePolicy: string | null;
+  /** False when the requested size policy could not be applied. */
+  sizePolicyApplied: boolean | null;
+  /** False when a requested format conversion could not be applied. */
+  formatApplied: boolean | null;
+}
+
+/** Both file variants of one capture, from get_capture_image_facts. */
+export interface CaptureImageFacts {
+  source: SourceImageFacts | null;
+  destination: ArchiveImageFacts | null;
 }
 
 export interface CaptureHistoryPage {
@@ -1090,6 +1131,10 @@ export const captureApi = {
   suggestForCapture: (captureItemId: string) =>
     invoke<CaptureItem>("suggest_for_capture", { input: { captureItemId } }),
   classifyPopupContext: () => invoke<ClassifyPopupContext>("classify_popup_context"),
+  getCaptureImageFacts: (captureItemId: string) =>
+    invoke<CaptureImageFacts>("get_capture_image_facts", {
+      input: { captureItemId },
+    }),
   getProjectNote: (projectId: string) =>
     invoke<ProjectNote>("get_project_note", { input: { projectId } }),
   updateProjectNote: (projectId: string, content: string) =>
@@ -1153,6 +1198,8 @@ export interface EngineDetection {
   engineRoot: string;
   gameDirectory: string;
   pythonMajor: number | null;
+  /** Exact engine version from renpy/vc_version.py, when readable. */
+  engineVersion: string | null;
   bridgeInstalled: boolean;
 }
 
@@ -1163,6 +1210,7 @@ export interface ProjectEngineIntegration {
   engineRoot: string;
   gameDirectory: string;
   pythonMajor: number | null;
+  engineVersion: string | null;
   bridgeVersion: string;
   manifestJson: string;
   installedAt: string;
@@ -1198,6 +1246,8 @@ export interface CaptureEngineMetadata {
   engine: string;
   schemaVersion: number;
   bridgeVersion: string;
+  /** Engine version reported with this screenshot (bridge 1.1.4+). */
+  engineVersion: string | null;
   speakerRaw: string | null;
   speakerSource: string | null;
   dialogue: string | null;
@@ -1216,10 +1266,19 @@ export interface CapturePolicyView {
   resolvedSize: string;
   /** Global default, so the inherit label never shows a project override. */
   globalSize: string;
+  projectFormat: string;
+  resolvedFormat: string;
+  globalFormat: string;
+  /** Project JPEG quality; null means "inherit the global default". */
+  projectQuality: number | null;
+  resolvedQuality: number;
+  globalQuality: number;
 }
 
 export interface ArchiveOutputSettings {
   size: string;
+  format: string;
+  quality: number;
 }
 
 export const engineApi = {
@@ -1247,6 +1306,12 @@ export const engineApi = {
     invoke<CapturePolicyView>("set_project_archive_output_size", {
       input: { projectId, archiveOutputSize },
     }),
+  setProjectCapturePolicy: (input: {
+    projectId: string;
+    archiveOutputSize: string;
+    archiveOutputFormat: string;
+    archiveOutputQuality: number | null;
+  }) => invoke<CapturePolicyView>("set_project_capture_policy", { input }),
   listProjectGames: (projectId: string) =>
     invoke<ProjectGameLaunchOption[]>("list_project_games", { input: { projectId } }),
   launchGame: (projectId: string, integrationId?: string, executable?: string) =>

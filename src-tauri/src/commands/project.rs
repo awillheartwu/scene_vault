@@ -6,8 +6,8 @@ use crate::{
     models::{
         diagnostics::{LogLevel, LogRecord},
         engine::{
-            is_archive_output_size, CapturePolicyView, ProjectIdInput, SetArchiveOutputSizeInput,
-            ARCHIVE_OUTPUT_INHERIT,
+            CapturePolicyView, ProjectIdInput, SetArchiveOutputSizeInput,
+            SetProjectCapturePolicyInput,
         },
         project::{
             AddProjectSourceDirectoryInput, CreateProjectInput, Project, ProjectDeletionPreview,
@@ -16,7 +16,7 @@ use crate::{
             SetProjectSourceDirectoryEnabledInput,
         },
     },
-    services::{log_service, project_service},
+    services::{archive_output_settings_service, log_service, project_service},
 };
 
 #[tauri::command]
@@ -133,26 +133,7 @@ pub async fn get_project_capture_policy(
     state: State<'_, AppState>,
     input: ProjectIdInput,
 ) -> Result<CapturePolicyView, AppError> {
-    let project_id = input.project_id.trim();
-    let value: Option<String> =
-        sqlx::query_scalar("SELECT archive_output_size FROM projects WHERE id = ?")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let project_size = value.ok_or_else(|| AppError::NotFound("project".to_owned()))?;
-    let resolved_size = crate::services::archive_output_settings_service::resolve_for_project(
-        &state.pool,
-        project_id,
-    )
-    .await?;
-    let global_size = crate::services::archive_output_settings_service::get(&state.pool)
-        .await?
-        .size;
-    Ok(CapturePolicyView {
-        project_size,
-        resolved_size,
-        global_size,
-    })
+    archive_output_settings_service::project_policy_view(&state.pool, input.project_id.trim()).await
 }
 
 #[tauri::command]
@@ -160,37 +141,28 @@ pub async fn set_project_archive_output_size(
     state: State<'_, AppState>,
     input: SetArchiveOutputSizeInput,
 ) -> Result<CapturePolicyView, AppError> {
-    let project_id = input.project_id.trim();
-    let value = input.archive_output_size.trim().to_lowercase();
-    if value != ARCHIVE_OUTPUT_INHERIT && !is_archive_output_size(&value) {
-        return Err(AppError::Validation(
-            "归档输出尺寸只能是 inherit / keep / 1080p / 1440p / 2160p".to_owned(),
-        ));
-    }
-    let result = sqlx::query(
-        "UPDATE projects SET archive_output_size = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-    )
-    .bind(&value)
-    .bind(project_id)
-    .execute(&state.pool)
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("project".to_owned()));
-    }
-    project_event("archive_output_size_updated", project_id);
-    let resolved_size = crate::services::archive_output_settings_service::resolve_for_project(
+    let project_id = input.project_id.trim().to_owned();
+    let view = archive_output_settings_service::set_project_size(
         &state.pool,
-        project_id,
+        &project_id,
+        &input.archive_output_size,
     )
     .await?;
-    let global_size = crate::services::archive_output_settings_service::get(&state.pool)
-        .await?
-        .size;
-    Ok(CapturePolicyView {
-        project_size: value,
-        resolved_size,
-        global_size,
-    })
+    project_event("archive_output_size_updated", &project_id);
+    Ok(view)
+}
+
+/// Saves size, format and quality for one project in a single call.
+#[tauri::command]
+pub async fn set_project_capture_policy(
+    state: State<'_, AppState>,
+    input: SetProjectCapturePolicyInput,
+) -> Result<CapturePolicyView, AppError> {
+    let project_id = input.project_id.trim().to_owned();
+    let view =
+        archive_output_settings_service::set_project_capture_policy(&state.pool, input).await?;
+    project_event("archive_output_size_updated", &project_id);
+    Ok(view)
 }
 
 fn project_event(event: &str, project_id: &str) {

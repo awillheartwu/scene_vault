@@ -19,7 +19,7 @@ use crate::{
 pub const BRIDGE_FILE_NAME: &str = "00_scenevault_bridge.rpy";
 pub const BRIDGE_COMPILED_FILE_NAME: &str = "00_scenevault_bridge.rpyc";
 pub const BRIDGE_CONFIG_FILE_NAME: &str = "scenevault_bridge.json";
-pub const BRIDGE_VERSION: &str = "1.1.3";
+pub const BRIDGE_VERSION: &str = "1.1.4";
 
 /// Distinctive string constant inside the compiled bridge; used together with
 /// the verified source hash before the engine-compiled artifact is recorded
@@ -32,7 +32,7 @@ const COMPILED_MARKER: &[u8] = b"scenevault_bridge.json";
 static BRIDGE_MUTATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const INTEGRATION_COLUMNS: &str =
-    "id, project_id, engine, engine_root, game_directory, python_major, \
+    "id, project_id, engine, engine_root, game_directory, python_major, engine_version, \
     bridge_version, metadata_directory, manifest_json, installed_at, updated_at";
 
 /// Installs the bridge into the picked game: writes the `.rpy` glue plus a
@@ -205,6 +205,7 @@ pub async fn install(
                 engine = ?,
                 engine_root = ?,
                 python_major = ?,
+                engine_version = ?,
                 bridge_version = ?,
                 metadata_directory = ?,
                 manifest_json = ?,
@@ -216,6 +217,7 @@ pub async fn install(
         .bind(&detection.engine)
         .bind(&detection.engine_root)
         .bind(detection.python_major)
+        .bind(detection.engine_version.as_deref())
         .bind(BRIDGE_VERSION)
         .bind(capture_service::path_to_string(&metadata_directory))
         .bind(&manifest_json)
@@ -229,9 +231,10 @@ pub async fn install(
             r#"
             INSERT INTO project_engine_integrations (
                 id, project_id, engine, engine_root, game_directory, python_major,
-                bridge_version, metadata_directory, manifest_json, installed_at, updated_at
+                engine_version, bridge_version, metadata_directory, manifest_json,
+                installed_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&integration_id)
@@ -240,6 +243,7 @@ pub async fn install(
         .bind(&detection.engine_root)
         .bind(&detection.game_directory)
         .bind(detection.python_major)
+        .bind(detection.engine_version.as_deref())
         .bind(BRIDGE_VERSION)
         .bind(capture_service::path_to_string(&metadata_directory))
         .bind(&manifest_json)
@@ -970,6 +974,7 @@ mod tests {
             engine_root: crate::services::capture_service::path_to_string(workspace.path()),
             game_directory: crate::services::capture_service::path_to_string(&game),
             python_major: Some(3),
+            engine_version: None,
             bridge_version: BRIDGE_VERSION.to_owned(),
             metadata_directory: None,
             manifest_json: serde_json::to_string(&manifest).unwrap(),
@@ -1031,6 +1036,7 @@ mod tests {
             engine_root: crate::services::capture_service::path_to_string(workspace.path()),
             game_directory: crate::services::capture_service::path_to_string(&game),
             python_major: Some(3),
+            engine_version: None,
             bridge_version: BRIDGE_VERSION.to_owned(),
             metadata_directory: None,
             manifest_json: serde_json::to_string(&manifest).unwrap(),

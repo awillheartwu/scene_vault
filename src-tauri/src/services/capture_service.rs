@@ -9,14 +9,14 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::capture::{
-        CaptureHistoryEntry, CaptureHistoryPage, CaptureItem, CaptureItemIdInput, CaptureItemPage,
-        CaptureSession, ClassifyPopupContext, CompleteCaptureProcessingInput,
-        EndCaptureSessionInput, ImportDirectoryCapturesInput, LabelCaptureInput,
-        ListCaptureHistoryInput, ListCategoryItemsInput, MarkCaptureFailedInput,
+        CaptureHistoryEntry, CaptureHistoryEntryView, CaptureHistoryPage, CaptureItem,
+        CaptureItemIdInput, CaptureItemPage, CaptureSession, ClassifyPopupContext,
+        CompleteCaptureProcessingInput, EndCaptureSessionInput, ImportDirectoryCapturesInput,
+        LabelCaptureInput, ListCaptureHistoryInput, ListCategoryItemsInput, MarkCaptureFailedInput,
         RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput, SessionSourceDirectory,
         StartCaptureSessionInput, StartCaptureSessionResult, UnimportedCapture,
     },
-    services::timing::elapsed_ms,
+    services::{image_facts_service, log_service, timing::elapsed_ms},
 };
 
 #[derive(Debug)]
@@ -406,10 +406,12 @@ pub(crate) async fn validate_source_identity_timed(
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => {
             set_source_file_state(pool, &item.id, "missing").await?;
+            clear_source_facts_best_effort(pool, &item.id).await;
             return Err(AppError::NotFound("capture source image".to_owned()));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             set_source_file_state(pool, &item.id, "missing").await?;
+            clear_source_facts_best_effort(pool, &item.id).await;
             return Err(AppError::NotFound("capture source image".to_owned()));
         }
         Err(error) => return Err(error.into()),
@@ -430,6 +432,7 @@ pub(crate) async fn validate_source_identity_timed(
         .is_some_and(|value| value != hash)
     {
         set_source_file_state(pool, &item.id, "replaced").await?;
+        clear_source_facts_best_effort(pool, &item.id).await;
         return Err(AppError::Conflict(
             "capture source was replaced by different content; check file changes first".to_owned(),
         ));
@@ -451,7 +454,58 @@ pub(crate) async fn validate_source_identity_timed(
     .execute(pool)
     .await?;
     timing.db_ms = elapsed_ms(db_started);
+    refresh_source_facts_best_effort(pool, &item.id, &item.source_path).await;
     Ok((path, timing))
+}
+
+/// Best-effort facts refresh: an unreadable header must never fail capture
+/// registration or identity validation.
+async fn refresh_source_facts_best_effort(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    source_path: &str,
+) {
+    if let Err(error) = super::image_facts_service::refresh_source_facts(
+        pool,
+        capture_item_id,
+        Path::new(source_path),
+    )
+    .await
+    {
+        log_service::warn(
+            "capture.facts",
+            format!("could not refresh image facts for {capture_item_id}: {error}"),
+        );
+    }
+}
+
+async fn clear_source_facts_best_effort(pool: &SqlitePool, capture_item_id: &str) {
+    if let Err(error) = super::image_facts_service::clear_source(pool, capture_item_id).await {
+        log_service::warn(
+            "capture.facts",
+            format!("could not clear image facts for {capture_item_id}: {error}"),
+        );
+    }
+}
+
+/// Older generations of a replaced file no longer describe the file on disk.
+async fn clear_replaced_source_facts(
+    pool: &SqlitePool,
+    project_id: &str,
+    source_path: &str,
+    keep_id: &str,
+) {
+    let _ = sqlx::query(
+        "UPDATE capture_image_facts SET source_json = NULL, \
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE capture_item_id IN (SELECT id FROM capture_items \
+         WHERE project_id = ? AND source_path = ? AND id != ?)",
+    )
+    .bind(project_id)
+    .bind(source_path)
+    .bind(keep_id)
+    .execute(pool)
+    .await;
 }
 
 pub(crate) async fn set_source_file_state(
@@ -810,6 +864,20 @@ pub async fn list_history(
     .bind(offset)
     .fetch_all(pool)
     .await?;
+    // Attach the image facts for this page in one batched lookup.
+    let ids: Vec<String> = entries.iter().map(|entry| entry.id.clone()).collect();
+    let mut facts = image_facts_service::read_many(pool, &ids).await?;
+    let entries = entries
+        .into_iter()
+        .map(|entry| {
+            let found = facts.remove(&entry.id).unwrap_or_default();
+            CaptureHistoryEntryView {
+                entry,
+                source_image: found.source,
+                destination_image: found.destination,
+            }
+        })
+        .collect();
     Ok(CaptureHistoryPage { entries, total })
 }
 
@@ -2475,7 +2543,9 @@ pub(crate) async fn register_discovered_path(
         .bind(&item.id)
         .execute(pool)
         .await?;
+        clear_replaced_source_facts(pool, &session.project_id, &source_path, &item.id).await;
     }
+    refresh_source_facts_best_effort(pool, &item.id, &item.source_path).await;
     Ok((item, created))
 }
 

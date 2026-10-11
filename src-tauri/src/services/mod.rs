@@ -18,6 +18,7 @@ pub mod file_recycle_service;
 pub mod file_relink;
 pub mod font_service;
 pub mod game_launch_service;
+pub mod image_facts_service;
 pub mod log_service;
 pub mod log_settings_service;
 pub mod notes_service;

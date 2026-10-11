@@ -10,11 +10,12 @@ use crate::{
         archive_naming::ArchiveNamingSettings,
         capture::{CaptureItem, CaptureItemIdInput},
         diagnostics::{LogLevel, LogRecord},
+        image_facts::ArchiveImageFacts,
     },
     services::{
         archive_naming::{self, ArchiveNameContext},
-        archive_naming_settings_service, capture_service, log_service, perf_log_service,
-        processing_settings_service,
+        archive_naming_settings_service, capture_service, image_facts_service, log_service,
+        perf_log_service, processing_settings_service,
     },
 };
 
@@ -117,11 +118,23 @@ async fn archive_pending_item(
         .await?
         .annotate_person
         .unwrap_or(true);
-    // Effective archive output policy: the project override, or the global
-    // default when the project inherits it.
-    let output_size =
-        super::archive_output_settings_service::resolve_for_project(pool, &session.project_id)
+    // Effective archive policy: the project override, or the global default
+    // when the project inherits it. `native` additionally needs this
+    // capture's engine-reported screen size.
+    let policy =
+        super::archive_output_settings_service::resolve_spec_for_project(pool, &session.project_id)
             .await?;
+    let native_size = if policy.size == "native" {
+        capture_engine_screen_size(pool, &item.id).await?
+    } else {
+        None
+    };
+    let spec = ArchiveSpec {
+        size: policy.size,
+        format: policy.format,
+        quality: policy.quality,
+        native_size,
+    };
 
     match item.classification.as_str() {
         // A person capture without an annotated output was archived through
@@ -129,7 +142,7 @@ async fn archive_pending_item(
         // screenshot under a clearly separated directory so a later full
         // reprocess can write the regular annotated output without conflict.
         "person" if item.annotated_path.is_some() => {
-            archive_person_item(pool, item, &destination_root, &naming, &output_size).await
+            archive_person_item(pool, item, &destination_root, &naming, &spec).await
         }
         // Explicit annotation disabled: the capture is fully recognized (face
         // vector + character) but has no labeled copy, so the raw screenshot
@@ -142,7 +155,7 @@ async fn archive_pending_item(
                 "人物图（原图）",
                 character_name.as_deref(),
                 &naming,
-                &output_size,
+                &spec,
             )
             .await
         }
@@ -158,7 +171,7 @@ async fn archive_pending_item(
                 "人物图（未识别）",
                 None,
                 &naming,
-                &output_size,
+                &spec,
             )
             .await
         }
@@ -170,7 +183,7 @@ async fn archive_pending_item(
                 "游戏截图",
                 None,
                 &naming,
-                &output_size,
+                &spec,
             )
             .await
         }
@@ -182,7 +195,7 @@ async fn archive_pending_item(
                 "收藏图",
                 None,
                 &naming,
-                &output_size,
+                &spec,
             )
             .await
         }
@@ -192,12 +205,34 @@ async fn archive_pending_item(
     }
 }
 
+/// Engine-reported screen size for one capture, used by the `native` size
+/// policy. Missing metadata (or a non-engine capture) yields None, and the
+/// archive keeps the original size.
+async fn capture_engine_screen_size(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+) -> Result<Option<(u32, u32)>, AppError> {
+    let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT virtual_width, virtual_height FROM capture_engine_metadata \
+         WHERE capture_item_id = ?",
+    )
+    .bind(capture_item_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(width, height)| match (width, height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => {
+            Some((width as u32, height as u32))
+        }
+        _ => None,
+    }))
+}
+
 async fn archive_person_item(
     pool: &SqlitePool,
     item: &CaptureItem,
     destination_root: &Path,
     naming: &ArchiveNamingSettings,
-    output_size: &str,
+    spec: &ArchiveSpec,
 ) -> Result<CaptureItem, AppError> {
     let annotated_path = item
         .annotated_path
@@ -212,12 +247,12 @@ async fn archive_person_item(
     // Annotated frames and oversized avatar crops follow the same output
     // bound as raw copies; nothing is ever upscaled.
     let prepared_annotated =
-        prepare_archive_source(&annotated_path, output_size, destination_root).await?;
-    log_resize_event(item, output_size, &prepared_annotated, "annotated");
+        prepare_archive_source(&annotated_path, spec, destination_root).await?;
+    log_resize_event(item, &spec.size, &prepared_annotated, "annotated");
     let prepared_avatar = match avatar_path.as_deref() {
         Some(path) => {
-            let prepared = prepare_archive_source(path, output_size, destination_root).await?;
-            log_resize_event(item, output_size, &prepared, "avatar");
+            let prepared = prepare_archive_source(path, spec, destination_root).await?;
+            log_resize_event(item, &spec.size, &prepared, "avatar");
             Some(prepared)
         }
         None => None,
@@ -300,6 +335,7 @@ async fn archive_person_item(
             &final_annotated,
             final_avatar.as_deref(),
             annotated_size,
+            &prepared_annotated.facts,
         )
         .await
     }
@@ -318,7 +354,7 @@ async fn archive_source_direct(
     subdirectory: &str,
     character_name: Option<&str>,
     naming: &ArchiveNamingSettings,
-    output_size: &str,
+    spec: &ArchiveSpec,
 ) -> Result<CaptureItem, AppError> {
     let source = Path::new(&item.source_path);
     let source = validate_local_archive_source(source).await?;
@@ -335,8 +371,8 @@ async fn archive_source_direct(
     // Optional archive-time downscale. The prepared copy becomes the archived
     // identity so {seq} reuse and retry checks compare against the same bytes
     // that are actually written.
-    let prepared = prepare_archive_source(&source, output_size, destination_root).await?;
-    log_resize_event(item, output_size, &prepared, "capture");
+    let prepared = prepare_archive_source(&source, spec, destination_root).await?;
+    log_resize_event(item, &spec.size, &prepared, "capture");
     let outcome = async {
         let directory = destination_root.join(subdirectory);
         let context = ArchiveNameContext {
@@ -353,28 +389,51 @@ async fn archive_source_direct(
         let final_path =
             resolve_legacy_repair_destination(pool, item, &prepared.path, final_path).await?;
         let archived_size = copy_tracked_archive(pool, item, &prepared.path, &final_path).await?;
-        persist_completed_archive(pool, item, &final_path, None, archived_size).await
+        persist_completed_archive(
+            pool,
+            item,
+            &final_path,
+            None,
+            archived_size,
+            &prepared.facts,
+        )
+        .await
     }
     .await;
     prepared.cleanup().await;
     outcome
 }
 
-/// A source file to archive: either the original capture or a downscaled
+/// Fully resolved archive policy handed to the preparation step.
+#[derive(Debug, Clone)]
+struct ArchiveSpec {
+    size: String,
+    format: String,
+    quality: i64,
+    /// Engine screen size, only used when `size` is `native`.
+    native_size: Option<(u32, u32)>,
+}
+
+/// A source file to archive: either the original capture or a re-encoded
 /// temporary copy prepared for this archival.
 struct PreparedSource {
     path: PathBuf,
     temporary: Option<PathBuf>,
     resize: Option<ResizeInfo>,
+    /// Facts for the bytes this preparation produced; the archive step
+    /// refreshes `bytes` with the size actually written.
+    facts: ArchiveImageFacts,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ResizeInfo {
     from: (u32, u32),
     to: (u32, u32),
     from_bytes: u64,
     to_bytes: u64,
     duration_ms: f64,
+    output_format: String,
+    quality: Option<i64>,
 }
 
 /// One structured record per archived file: the actual downscale (with
@@ -386,8 +445,18 @@ fn log_resize_event(item: &CaptureItem, policy: &str, prepared: &PreparedSource,
             level: LogLevel::Info,
             module: "capture.archive".to_owned(),
             message: format!(
-                "archive resize: {}x{} -> {}x{}, {} -> {} bytes",
-                info.from.0, info.from.1, info.to.0, info.to.1, info.from_bytes, info.to_bytes
+                "archive output: {}x{} -> {}x{}, {} -> {} bytes, {}{}",
+                info.from.0,
+                info.from.1,
+                info.to.0,
+                info.to.1,
+                info.from_bytes,
+                info.to_bytes,
+                info.output_format,
+                match info.quality {
+                    Some(quality) => format!(" q{quality}"),
+                    None => " lossless".to_owned(),
+                }
             ),
             event: Some("archive_resize".to_owned()),
             project_id: Some(item.project_id.clone()),
@@ -448,65 +517,99 @@ fn archive_output_height(policy: &str) -> Option<u32> {
     }
 }
 
-/// Applies the project's archive output bound to a raw source copy. Never
-/// upscales; formats other than PNG/JPEG are archived untouched.
+/// Applies the project's archive policy to one source file: optional
+/// downscale (never upscale) plus optional format conversion. A file is only
+/// re-encoded when the size or the format actually needs to change, so
+/// "keep size + convert" still converts while "keep + keep" stays a copy.
 async fn prepare_archive_source(
     source: &Path,
-    policy: &str,
+    spec: &ArchiveSpec,
     destination_root: &Path,
 ) -> Result<PreparedSource, AppError> {
-    let keep = |path: &Path| PreparedSource {
-        path: path.to_path_buf(),
-        temporary: None,
-        resize: None,
-    };
     let started = std::time::Instant::now();
-    let Some(target_height) = archive_output_height(policy) else {
-        return Ok(keep(source));
+    let probe = image_facts_service::probe_file(source).await;
+    let source_format = probe.as_ref().map(|probe| probe.format.clone());
+    let wants_convert = spec.format != "keep";
+    let target_format = if wants_convert {
+        Some(spec.format.clone())
+    } else {
+        source_format.clone()
     };
-    let bytes = tokio::fs::read(source).await?;
-    let Ok(format) = image::guess_format(&bytes) else {
-        return Ok(keep(source));
+    let target_height = match spec.size.as_str() {
+        "keep" => None,
+        "native" => spec.native_size.map(|(_, height)| height),
+        other => archive_output_height(other),
     };
-    if !matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg) {
-        return Ok(keep(source));
+    let needs_resize = match (target_height, probe.as_ref()) {
+        (Some(target), Some(probe)) => target < probe.height,
+        _ => false,
+    };
+    // A "keep" policy never re-encodes a webp source: the only encoder in
+    // this build would turn a lossy webp into a much larger lossless one.
+    let reencodable = probe.is_some()
+        && (wants_convert || matches!(source_format.as_deref(), Some("png") | Some("jpeg")));
+    let convert_needed = wants_convert && target_format.as_deref() != source_format.as_deref();
+    let reencode = reencodable && (convert_needed || needs_resize);
+    let size_policy_applied = if spec.size == "keep" {
+        true
+    } else if spec.size == "native" && spec.native_size.is_none() {
+        false
+    } else {
+        probe.is_some() && (!needs_resize || reencode)
+    };
+    let format_applied = !wants_convert || !convert_needed || reencode;
+
+    if !reencode {
+        let bytes = tokio::fs::metadata(source).await?.len();
+        let facts = ArchiveImageFacts {
+            width: probe.as_ref().map(|probe| probe.width),
+            height: probe.as_ref().map(|probe| probe.height),
+            format: source_format.clone(),
+            bytes: Some(bytes),
+            quality_kind: Some(
+                if source_format.as_deref() == Some("png") {
+                    "lossless"
+                } else {
+                    "unknown"
+                }
+                .to_owned(),
+            ),
+            quality: None,
+            size_policy: Some(spec.size.clone()),
+            size_policy_applied: Some(size_policy_applied),
+            format_applied: Some(format_applied),
+        };
+        return Ok(PreparedSource {
+            path: source.to_path_buf(),
+            temporary: None,
+            resize: None,
+            facts,
+        });
     }
+
+    let bytes = tokio::fs::read(source).await?;
     let image = image::load_from_memory(&bytes)
         .map_err(|error| AppError::Image(format!("cannot decode archive source: {error}")))?;
-    if image.height() <= target_height {
-        return Ok(keep(source));
-    }
     let from = (image.width(), image.height());
-    let scale = f64::from(target_height) / f64::from(image.height());
-    let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
-    let resized = image.resize_exact(width, target_height, image::imageops::FilterType::Lanczos3);
-    let mut buffer = Vec::new();
-    match format {
-        image::ImageFormat::Png => resized
-            .write_to(
-                &mut std::io::Cursor::new(&mut buffer),
-                image::ImageFormat::Png,
-            )
-            .map_err(|error| AppError::Image(format!("cannot encode resized png: {error}")))?,
-        _ => resized
-            .to_rgb8()
-            .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut buffer,
-                90,
-            ))
-            .map_err(|error| AppError::Image(format!("cannot encode resized jpeg: {error}")))?,
-    }
-    let extension = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("png");
+    let output = if needs_resize {
+        let target = target_height.expect("resize requires a resolved target height");
+        let scale = f64::from(target) / f64::from(image.height());
+        let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
+        image.resize_exact(width, target, image::imageops::FilterType::Lanczos3)
+    } else {
+        image
+    };
+    let output_format = target_format.unwrap_or_else(|| "png".to_owned());
+    let (buffer, quality_kind, quality) =
+        encode_archive_output(&output, &output_format, spec.quality)?;
     let temporary = destination_root.join(format!(
-        ".scenevault-resize-{}.{extension}",
-        uuid::Uuid::new_v4()
+        ".scenevault-resize-{}.{}",
+        uuid::Uuid::new_v4(),
+        extension_for_format(&output_format)
     ));
     let to_bytes = buffer.len() as u64;
-    let to = (resized.width(), resized.height());
-    tokio::fs::write(&temporary, buffer).await?;
+    let to = (output.width(), output.height());
+    tokio::fs::write(&temporary, &buffer).await?;
     Ok(PreparedSource {
         path: temporary.clone(),
         temporary: Some(temporary),
@@ -516,8 +619,88 @@ async fn prepare_archive_source(
             from_bytes: bytes.len() as u64,
             to_bytes,
             duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+            output_format: output_format.clone(),
+            quality,
         }),
+        facts: ArchiveImageFacts {
+            width: Some(to.0),
+            height: Some(to.1),
+            format: Some(output_format),
+            bytes: Some(to_bytes),
+            quality_kind: Some(quality_kind.to_owned()),
+            quality,
+            size_policy: Some(spec.size.clone()),
+            size_policy_applied: Some(size_policy_applied),
+            format_applied: Some(format_applied),
+        },
     })
+}
+
+fn extension_for_format(format: &str) -> &'static str {
+    match format {
+        "jpeg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
+    }
+}
+
+/// JPEG has no alpha channel: composite transparency on a white background
+/// instead of silently dropping the alpha bytes.
+fn flatten_on_white(image: &image::DynamicImage) -> image::RgbImage {
+    if !image.color().has_alpha() {
+        return image.to_rgb8();
+    }
+    let rgba = image.to_rgba8();
+    image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+        let pixel = rgba.get_pixel(x, y);
+        let alpha = u32::from(pixel[3]);
+        let blend = |channel: u8| -> u8 {
+            ((u32::from(channel) * alpha + 255 * (255 - alpha)) / 255) as u8
+        };
+        image::Rgb([blend(pixel[0]), blend(pixel[1]), blend(pixel[2])])
+    })
+}
+
+/// Encodes one prepared image. The returned kind/quality feed the facts and
+/// the perf log, so the UI never has to guess what a file went through.
+fn encode_archive_output(
+    image: &image::DynamicImage,
+    format: &str,
+    quality: i64,
+) -> Result<(Vec<u8>, &'static str, Option<i64>), AppError> {
+    let mut buffer = Vec::new();
+    match format {
+        "jpeg" => {
+            let rgb = flatten_on_white(image);
+            rgb.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut buffer,
+                quality as u8,
+            ))
+            .map_err(|error| AppError::Image(format!("cannot encode resized jpeg: {error}")))?;
+            Ok((buffer, "quality", Some(quality)))
+        }
+        "webp" => {
+            let has_alpha = image.color().has_alpha();
+            let (pixels, color) = if has_alpha {
+                (image.to_rgba8().into_raw(), image::ExtendedColorType::Rgba8)
+            } else {
+                (image.to_rgb8().into_raw(), image::ExtendedColorType::Rgb8)
+            };
+            image::codecs::webp::WebPEncoder::new_lossless(std::io::Cursor::new(&mut buffer))
+                .encode(&pixels, image.width(), image.height(), color)
+                .map_err(|error| AppError::Image(format!("cannot encode resized webp: {error}")))?;
+            Ok((buffer, "lossless", None))
+        }
+        _ => {
+            image
+                .write_to(
+                    &mut std::io::Cursor::new(&mut buffer),
+                    image::ImageFormat::Png,
+                )
+                .map_err(|error| AppError::Image(format!("cannot encode resized png: {error}")))?;
+            Ok((buffer, "lossless", None))
+        }
+    }
 }
 
 /// Called while the completed capture is locked, BEFORE its old local outputs
@@ -716,6 +899,7 @@ async fn persist_completed_archive(
     final_path: &Path,
     final_avatar: Option<&Path>,
     archived_size: u64,
+    facts: &ArchiveImageFacts,
 ) -> Result<CaptureItem, AppError> {
     let asset_path = capture_service::path_to_string(final_path);
     let avatar_path = final_avatar.map(capture_service::path_to_string);
@@ -832,6 +1016,12 @@ async fn persist_completed_archive(
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(|| AppError::Conflict("capture archive state changed".to_owned()))?;
+
+    // Record what the archived bytes actually are (resolution, format,
+    // quality, size) so the UI shows facts instead of re-deriving anything.
+    let mut facts = facts.clone();
+    facts.bytes = Some(archived_size);
+    super::image_facts_service::upsert_destination_tx(&mut transaction, &item.id, &facts).await?;
 
     transaction.commit().await?;
 
@@ -2271,6 +2461,15 @@ mod storage_policy_tests {
         bytes
     }
 
+    fn spec(size: &str, format: &str) -> ArchiveSpec {
+        ArchiveSpec {
+            size: size.to_owned(),
+            format: format.to_owned(),
+            quality: 90,
+            native_size: None,
+        }
+    }
+
     #[test]
     fn policy_maps_to_target_height_only_for_known_sizes() {
         assert_eq!(archive_output_height("keep"), None);
@@ -2288,7 +2487,7 @@ mod storage_policy_tests {
             .await
             .unwrap();
 
-        let prepared = prepare_archive_source(&oversized, "1080p", workspace.path())
+        let prepared = prepare_archive_source(&oversized, &spec("1080p", "keep"), workspace.path())
             .await
             .expect("prepare");
         assert!(prepared.temporary.is_some(), "expected a resized copy");
@@ -2304,16 +2503,130 @@ mod storage_policy_tests {
         tokio::fs::write(&small, png_bytes(1280, 720))
             .await
             .unwrap();
-        let kept = prepare_archive_source(&small, "1080p", workspace.path())
+        let kept = prepare_archive_source(&small, &spec("1080p", "keep"), workspace.path())
             .await
             .expect("prepare small");
         assert!(kept.temporary.is_none());
         assert_eq!(kept.path, small);
+        assert_eq!(kept.facts.size_policy_applied, Some(true));
 
-        let keep_policy = prepare_archive_source(&oversized, "keep", workspace.path())
-            .await
-            .expect("prepare keep");
+        let keep_policy =
+            prepare_archive_source(&oversized, &spec("keep", "keep"), workspace.path())
+                .await
+                .expect("prepare keep");
         assert!(keep_policy.temporary.is_none());
         assert_eq!(keep_policy.path, oversized);
+        assert_eq!(keep_policy.facts.quality_kind.as_deref(), Some("lossless"));
+    }
+
+    #[tokio::test]
+    async fn converts_format_even_when_the_size_is_kept() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("capture.png");
+        tokio::fs::write(&source, png_bytes(800, 600))
+            .await
+            .unwrap();
+        let prepared = prepare_archive_source(&source, &spec("keep", "webp"), workspace.path())
+            .await
+            .expect("prepare");
+        assert!(
+            prepared.temporary.is_some(),
+            "format conversion must re-encode"
+        );
+        assert_eq!(
+            prepared.path.extension().and_then(|value| value.to_str()),
+            Some("webp")
+        );
+        assert_eq!(image::image_dimensions(&prepared.path).unwrap(), (800, 600));
+        assert_eq!(prepared.facts.format.as_deref(), Some("webp"));
+        assert_eq!(prepared.facts.quality_kind.as_deref(), Some("lossless"));
+        assert_eq!(prepared.facts.quality, None);
+        assert_eq!(prepared.facts.size_policy.as_deref(), Some("keep"));
+        assert_eq!(prepared.facts.format_applied, Some(true));
+        prepared.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn jpeg_conversion_flattens_transparency_on_white_and_records_the_quality() {
+        let workspace = tempdir().unwrap();
+        let transparent = workspace.path().join("cutout.png");
+        let mut image = image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 0, 0]));
+        for x in 8..16 {
+            for y in 0..16 {
+                image.put_pixel(x, y, image::Rgba([200, 10, 10, 255]));
+            }
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_with_encoder(image::codecs::png::PngEncoder::new(&mut bytes))
+            .expect("encode png");
+        tokio::fs::write(&transparent, bytes).await.unwrap();
+
+        let mut jpeg_spec = spec("keep", "jpeg");
+        jpeg_spec.quality = 88;
+        let prepared = prepare_archive_source(&transparent, &jpeg_spec, workspace.path())
+            .await
+            .expect("prepare");
+        assert_eq!(prepared.facts.quality_kind.as_deref(), Some("quality"));
+        assert_eq!(prepared.facts.quality, Some(88));
+        let decoded = image::open(&prepared.path).expect("decode jpeg").to_rgb8();
+        let white = decoded.get_pixel(2, 2);
+        assert!(
+            white[0] >= 240 && white[1] >= 240 && white[2] >= 240,
+            "transparent pixels must composite on white, got {white:?}"
+        );
+        let red = decoded.get_pixel(13, 13);
+        assert!(
+            red[0] > 150 && red[0] > red[2],
+            "opaque pixels keep their color, got {red:?}"
+        );
+        prepared.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn native_policy_follows_the_engine_size_and_marks_missing_metadata() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("capture.png");
+        tokio::fs::write(&source, png_bytes(3840, 2160))
+            .await
+            .unwrap();
+
+        let mut native = spec("native", "keep");
+        native.native_size = Some((1920, 1080));
+        let prepared = prepare_archive_source(&source, &native, workspace.path())
+            .await
+            .expect("prepare");
+        assert_eq!(
+            image::image_dimensions(&prepared.path).unwrap(),
+            (1920, 1080)
+        );
+        assert_eq!(prepared.facts.size_policy.as_deref(), Some("native"));
+        assert_eq!(prepared.facts.size_policy_applied, Some(true));
+        prepared.cleanup().await;
+
+        let missing = spec("native", "keep");
+        let kept = prepare_archive_source(&source, &missing, workspace.path())
+            .await
+            .expect("prepare without engine data");
+        assert!(kept.temporary.is_none());
+        assert_eq!(kept.path, source);
+        assert_eq!(kept.facts.size_policy_applied, Some(false));
+    }
+
+    #[tokio::test]
+    async fn undecodable_sources_pass_through_and_report_the_unapplied_conversion() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("weird.bmp");
+        tokio::fs::write(&source, b"BMfake-bytes-that-no-decoder-accepts")
+            .await
+            .unwrap();
+        let prepared = prepare_archive_source(&source, &spec("keep", "png"), workspace.path())
+            .await
+            .expect("prepare");
+        assert!(prepared.temporary.is_none());
+        assert_eq!(prepared.path, source);
+        assert_eq!(prepared.facts.format, None);
+        assert_eq!(prepared.facts.format_applied, Some(false));
+        assert_eq!(prepared.facts.size_policy_applied, Some(true));
     }
 }
