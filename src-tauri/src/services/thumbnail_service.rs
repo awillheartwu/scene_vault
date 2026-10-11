@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use crate::{
     error::AppError,
     models::diagnostics::{LogLevel, LogRecord},
-    services::log_service,
+    services::{log_service, timing::elapsed_ms},
 };
 
 /// Longest edge of generated thumbnails. 320px keeps text in annotated views
@@ -193,44 +193,82 @@ fn fingerprint(source: &Path, generation: &str) -> Result<SourceFingerprint, App
     })
 }
 
+/// Segment timings of one thumbnail read, reported to diagnostics by the read
+/// commands. A cache hit shows up as decode_ms == 0 with cache_hit == true.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThumbnailReadTiming {
+    /// Waiting for a generation slot; cache hits take a slot as well.
+    pub permit_wait_ms: f64,
+    /// Cache validation: source fingerprints, sidecar parse and byte hashing.
+    pub lookup_ms: f64,
+    /// Decoding the original and encoding the JPEG (cache misses only).
+    pub decode_ms: f64,
+    /// Metadata build, JPEG/sidecar publication, post-publish verification and
+    /// the periodic cache-size maintenance.
+    pub publish_ms: f64,
+    pub cache_hit: bool,
+}
+
+pub struct ThumbnailRead {
+    pub bytes: Vec<u8>,
+    pub timing: ThumbnailReadTiming,
+}
+
 /// Pass the capture processing_version (and source/derived variant identity)
 /// here when available. Generation must change whenever derived files change.
-pub async fn read_thumbnail_with_generation(
+/// Reads the cached thumbnail, generating and publishing it on a cache miss,
+/// and reports segment timings for read-path diagnostics.
+pub async fn read_thumbnail_timed(
     root: &Path,
     item_id: &str,
     variant: &str,
     source: &Path,
     cache_limit_bytes: u64,
     generation: &str,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<ThumbnailRead, AppError> {
     // Hold the permit through publication, including if the async caller is
     // cancelled while the blocking decoder finishes. No late writer can pair
     // an old JPEG with another request's metadata.
+    let permit_started = Instant::now();
     let permit = generation_limit().acquire().await;
+    let permit_wait_ms = elapsed_ms(permit_started);
     let cache = cache_path(root, item_id, variant);
     let source = source.to_path_buf();
     let generation = generation.to_owned();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        read_cached(&cache, &source, &generation, cache_limit_bytes, generate)
+        read_cached_timed(&cache, &source, &generation, cache_limit_bytes, generate)
     })
     .await
     .map_err(|error| AppError::Image(format!("thumbnail task failed: {error}")))?;
-    if result.is_err() {
-        log_service::record_event(LogRecord {
-            level: LogLevel::Warn,
-            module: "thumbnail.cache".to_owned(),
-            message: "thumbnail generation failed".to_owned(),
-            event: Some("generation_failed".to_owned()),
-            capture_item_id: Some(item_id.to_owned()),
-            outcome: Some("failed".to_owned()),
-            error_code: Some("thumbnail_generation_error".to_owned()),
-            ..Default::default()
-        });
+    match result {
+        Ok((bytes, mut timing)) => {
+            timing.permit_wait_ms = permit_wait_ms;
+            Ok(ThumbnailRead { bytes, timing })
+        }
+        Err(error) => {
+            log_service::record_event(LogRecord {
+                level: LogLevel::Warn,
+                module: "thumbnail.cache".to_owned(),
+                message: "thumbnail generation failed".to_owned(),
+                event: Some("generation_failed".to_owned()),
+                capture_item_id: Some(item_id.to_owned()),
+                outcome: Some("failed".to_owned()),
+                error_code: Some("thumbnail_generation_error".to_owned()),
+                ..Default::default()
+            });
+            Err(error)
+        }
     }
-    result
 }
 
+/// Everything that is neither decoding nor publishing counts as cache lookup.
+fn finish_timing(timing: &mut ThumbnailReadTiming, started: Instant) {
+    timing.lookup_ms = (elapsed_ms(started) - timing.decode_ms - timing.publish_ms).max(0.0);
+}
+
+/// Test-only bytes-only wrapper around read_cached_timed.
+#[cfg(test)]
 fn read_cached(
     cache: &Path,
     source: &Path,
@@ -238,6 +276,19 @@ fn read_cached(
     cache_limit_bytes: u64,
     decode: impl Fn(&Path) -> Result<Vec<u8>, AppError>,
 ) -> Result<Vec<u8>, AppError> {
+    read_cached_timed(cache, source, generation, cache_limit_bytes, decode)
+        .map(|(bytes, _timing)| bytes)
+}
+
+fn read_cached_timed(
+    cache: &Path,
+    source: &Path,
+    generation: &str,
+    cache_limit_bytes: u64,
+    decode: impl Fn(&Path) -> Result<Vec<u8>, AppError>,
+) -> Result<(Vec<u8>, ThumbnailReadTiming), AppError> {
+    let started = Instant::now();
+    let mut timing = ThumbnailReadTiming::default();
     let sidecar = cache.with_extension("json");
     for _ in 0..3 {
         let before = fingerprint(source, generation)?;
@@ -249,7 +300,9 @@ fn read_cached(
                         if Sha256::digest(&bytes).to_vec() == metadata.thumbnail_sha256
                             && fingerprint(source, generation)? == before
                         {
-                            return Ok(bytes);
+                            timing.cache_hit = true;
+                            finish_timing(&mut timing, started);
+                            return Ok((bytes, timing));
                         }
                     }
                 }
@@ -257,10 +310,13 @@ fn read_cached(
         }
         // Unproven old caches are regenerated lazily on first visible use.
         // Neither timestamps nor an empty generation prove source association.
+        let decode_started = Instant::now();
         let bytes = decode(source)?;
+        timing.decode_ms += elapsed_ms(decode_started);
         if fingerprint(source, generation)? != before {
             continue;
         }
+        let publish_started = Instant::now();
         let metadata = CacheMetadata {
             version: 2,
             source: before,
@@ -286,13 +342,16 @@ fn read_cached(
         let _ = std::fs::remove_file(&temporary_metadata);
         publish?;
         if fingerprint(source, generation)? != metadata.source {
+            timing.publish_ms += elapsed_ms(publish_started);
             continue;
         }
         let writes = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
         if writes.is_multiple_of(MAINTENANCE_INTERVAL) {
             enforce_cache_limit(parent, cache_limit_bytes);
         }
-        return Ok(bytes);
+        timing.publish_ms += elapsed_ms(publish_started);
+        finish_timing(&mut timing, started);
+        return Ok((bytes, timing));
     }
     Err(AppError::Image(
         "thumbnail source changed repeatedly during generation".to_owned(),
@@ -451,7 +510,11 @@ mod tests {
         source: &Path,
         cache_limit_bytes: u64,
     ) -> Result<Vec<u8>, AppError> {
-        read_thumbnail_with_generation(root, item_id, variant, source, cache_limit_bytes, "").await
+        Ok(
+            read_thumbnail_timed(root, item_id, variant, source, cache_limit_bytes, "")
+                .await?
+                .bytes,
+        )
     }
 
     fn write_test_png(path: &Path, width: u32, height: u32) {
@@ -541,6 +604,36 @@ mod tests {
             .unwrap();
         assert_ne!(first, second);
         assert_eq!(second, generate(&source).unwrap());
+    }
+
+    #[tokio::test]
+    async fn timed_read_distinguishes_cache_hits_from_generation() {
+        let dir = tempdir().expect("temp dir");
+        let source = dir.path().join("source.png");
+        write_test_png(&source, 800, 480);
+
+        let first = read_thumbnail_timed(dir.path(), "item", "source", &source, u64::MAX, "source")
+            .await
+            .expect("first read");
+        assert!(!first.timing.cache_hit);
+        assert!(
+            first.timing.decode_ms > 0.0,
+            "a cache miss must report decode time"
+        );
+        assert!(first.timing.lookup_ms >= 0.0);
+        assert!(first.timing.publish_ms >= 0.0);
+
+        let second =
+            read_thumbnail_timed(dir.path(), "item", "source", &source, u64::MAX, "source")
+                .await
+                .expect("second read");
+        assert!(second.timing.cache_hit);
+        assert_eq!(second.timing.decode_ms, 0.0);
+        assert!(
+            second.timing.lookup_ms > 0.0,
+            "a cache hit still validates the cache"
+        );
+        assert_eq!(first.bytes, second.bytes);
     }
 
     #[test]

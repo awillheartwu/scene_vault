@@ -374,4 +374,4 @@ Write-Host "[5/6] Done. Artifacts:"
 Get-ChildItem $LogDir -Filter "scene-vault-*-setup.exe" | ForEach-Object {
     Write-Host ("  {0}  {1} MB" -f $_.Name, [math]::Round($_.Length / 1MB, 1))
 }
-Write-Host "[6/6] Next: install on a clean Windows machine and run the acceptance checklist (see docs/decisions/2026-08-11-windows-delivery.md)."
+Write-Host "[6/6] Next: install on a clean Windows machine and run the Windows acceptance checklist (see docs/CAPTURE_WORKFLOW.md)."

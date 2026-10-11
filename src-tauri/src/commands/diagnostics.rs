@@ -13,8 +13,9 @@ use crate::{
         CleanupResourceInput, CleanupResourceResult, ProcessResourceStatus, StorageResourceStatus,
     },
     services::{
-        log_service, log_settings_service, process_resource_service, resource_storage_service,
-        resource_storage_service::ResourcePaths, thumbnail_service, vision_settings_service,
+        log_service, log_settings_service, perf_log_service, process_resource_service,
+        resource_storage_service, resource_storage_service::ResourcePaths, thumbnail_service,
+        vision_settings_service,
     },
 };
 
@@ -30,6 +31,7 @@ pub async fn update_log_settings(
 ) -> Result<LogPolicySettings, AppError> {
     let settings = log_settings_service::update(&state.pool, input).await?;
     log_service::configure(&settings)?;
+    perf_log_service::configure(&settings);
     log_service::record_event(LogRecord {
         level: crate::models::diagnostics::LogLevel::Info,
         module: "settings.logging".to_owned(),
@@ -62,6 +64,11 @@ pub async fn record_client_event(input: ClientLogEventInput) -> Result<(), AppEr
         .as_deref()
         .map(|value| validate_token("errorCode", value, 80))
         .transpose()?;
+    let capture_item_id = input
+        .capture_item_id
+        .as_deref()
+        .map(|value| validate_token("captureItemId", value, 128))
+        .transpose()?;
     if input
         .duration_ms
         .is_some_and(|value| !value.is_finite() || value < 0.0)
@@ -70,18 +77,33 @@ pub async fn record_client_event(input: ClientLogEventInput) -> Result<(), AppEr
             "durationMs must be a finite non-negative number".to_owned(),
         ));
     }
+    let channel = match input.channel.as_deref() {
+        None | Some("log") => false,
+        Some("perf") => true,
+        Some(_) => {
+            return Err(AppError::Validation(
+                "channel must be log or perf".to_owned(),
+            ))
+        }
+    };
     let message = sanitize_client_message(input.message.as_deref().unwrap_or(&event));
-    log_service::record_event(LogRecord {
+    let record = LogRecord {
         level: input.level,
         module: format!("ui.{module}"),
         message,
         event: Some(event),
         operation_id,
+        capture_item_id,
         duration_ms: input.duration_ms,
         outcome,
         error_code,
         ..Default::default()
-    });
+    };
+    if channel {
+        perf_log_service::record_event(record);
+    } else {
+        log_service::record_event(record);
+    }
     Ok(())
 }
 
@@ -142,6 +164,15 @@ mod tests {
     }
 
     #[test]
+    fn client_capture_item_id_accepts_uuid_and_rejects_noise() {
+        assert_eq!(
+            validate_token("captureItemId", "5f1c0e6e-1c1a-4a1f-9d3c-2b7e5a4c8d90", 128,).unwrap(),
+            "5f1c0e6e-1c1a-4a1f-9d3c-2b7e5a4c8d90"
+        );
+        assert!(validate_token("captureItemId", "bad id", 128).is_err());
+    }
+
+    #[test]
     fn python_runtime_path_prefers_configured_python_then_sidecar_then_fallback() {
         let fallback = PathBuf::from("C:/app/ai-runtime");
         let sidecar = PathBuf::from("D:/sv/scene-vault-ai.exe");
@@ -174,9 +205,14 @@ pub async fn get_log_status() -> Result<LogStatus, AppError> {
 
 #[tauri::command]
 pub async fn cleanup_debug_logs() -> Result<LogCleanupResult, AppError> {
-    let result = tauri::async_runtime::spawn_blocking(log_service::cleanup)
+    let mut result = tauri::async_runtime::spawn_blocking(log_service::cleanup)
         .await
         .map_err(|error| AppError::Io(std::io::Error::other(error)))??;
+    // The performance channel keeps its own archives; the manual cleanup
+    // covers both so its scope matches the storage statistics.
+    result.removed_files = result
+        .removed_files
+        .saturating_add(perf_log_service::cleanup()?);
     log_service::record_event(LogRecord {
         level: crate::models::diagnostics::LogLevel::Info,
         module: "logging.cleanup".to_owned(),
@@ -295,17 +331,23 @@ pub async fn cleanup_resource(
                 .await?
         }
         "expired_logs" | "logs" => {
-            let before = log_service::status()?;
+            let before = log_service::status()?
+                .total_bytes
+                .saturating_add(perf_log_service::total_bytes()?);
             let cleanup = tauri::async_runtime::spawn_blocking(log_service::cleanup)
                 .await
                 .map_err(|error| AppError::Io(std::io::Error::other(error)))??;
+            let perf_removed = perf_log_service::cleanup()?;
+            let after = cleanup
+                .status
+                .total_bytes
+                .saturating_add(perf_log_service::total_bytes()?);
             CleanupResourceResult {
                 kind: "expired_logs".to_owned(),
-                removed_files: cleanup.removed_files as u64,
-                reclaimed_bytes: before
-                    .total_bytes
-                    .saturating_sub(cleanup.status.total_bytes),
-                message: "已按日志保留策略清理过期归档。当前日志不会被删除。".to_owned(),
+                removed_files: cleanup.removed_files.saturating_add(perf_removed) as u64,
+                reclaimed_bytes: before.saturating_sub(after),
+                message: "已按日志保留策略清理过期归档（含性能日志）。当前日志不会被删除。"
+                    .to_owned(),
             }
         }
         _ => {

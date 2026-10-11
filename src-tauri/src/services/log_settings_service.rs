@@ -73,6 +73,7 @@ mod tests {
             max_file_size_mb: 10,
             max_archived_files: 40,
             automatic_cleanup: false,
+            performance_logging: true,
         };
         assert_eq!(update(&pool, settings.clone()).await.unwrap(), settings);
         assert_eq!(get(&pool).await.unwrap(), settings);

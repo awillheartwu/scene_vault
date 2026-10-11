@@ -13,7 +13,8 @@ use crate::{
     },
     services::{
         archive_naming::{self, ArchiveNameContext},
-        archive_naming_settings_service, capture_service, log_service, processing_settings_service,
+        archive_naming_settings_service, capture_service, log_service, perf_log_service,
+        processing_settings_service,
     },
 };
 
@@ -37,7 +38,13 @@ pub async fn archive(
     let item = capture_service::set_archive_pending_for_retry(pool, capture_item_id).await?;
 
     match archive_pending_item(pool, &item).await {
-        Ok(completed) => Ok(completed),
+        Ok(completed) => {
+            // Throttled, best-effort cache maintenance that also covers the
+            // background worker path (which archives without going through
+            // the IPC command).
+            super::resource_storage_service::request_auto_cleanup(pool.clone());
+            Ok(completed)
+        }
         Err(error) => {
             archive_event(
                 &item,
@@ -110,6 +117,11 @@ async fn archive_pending_item(
         .await?
         .annotate_person
         .unwrap_or(true);
+    // Effective archive output policy: the project override, or the global
+    // default when the project inherits it.
+    let output_size =
+        super::archive_output_settings_service::resolve_for_project(pool, &session.project_id)
+            .await?;
 
     match item.classification.as_str() {
         // A person capture without an annotated output was archived through
@@ -117,7 +129,7 @@ async fn archive_pending_item(
         // screenshot under a clearly separated directory so a later full
         // reprocess can write the regular annotated output without conflict.
         "person" if item.annotated_path.is_some() => {
-            archive_person_item(pool, item, &destination_root, &naming).await
+            archive_person_item(pool, item, &destination_root, &naming, &output_size).await
         }
         // Explicit annotation disabled: the capture is fully recognized (face
         // vector + character) but has no labeled copy, so the raw screenshot
@@ -130,6 +142,7 @@ async fn archive_pending_item(
                 "人物图（原图）",
                 character_name.as_deref(),
                 &naming,
+                &output_size,
             )
             .await
         }
@@ -145,14 +158,33 @@ async fn archive_pending_item(
                 "人物图（未识别）",
                 None,
                 &naming,
+                &output_size,
             )
             .await
         }
         "scene" => {
-            archive_source_direct(pool, item, &destination_root, "游戏截图", None, &naming).await
+            archive_source_direct(
+                pool,
+                item,
+                &destination_root,
+                "游戏截图",
+                None,
+                &naming,
+                &output_size,
+            )
+            .await
         }
         "private" => {
-            archive_source_direct(pool, item, &destination_root, "收藏图", None, &naming).await
+            archive_source_direct(
+                pool,
+                item,
+                &destination_root,
+                "收藏图",
+                None,
+                &naming,
+                &output_size,
+            )
+            .await
         }
         _ => Err(AppError::Validation(
             "unclassified capture cannot be archived".to_owned(),
@@ -165,6 +197,7 @@ async fn archive_person_item(
     item: &CaptureItem,
     destination_root: &Path,
     naming: &ArchiveNamingSettings,
+    output_size: &str,
 ) -> Result<CaptureItem, AppError> {
     let annotated_path = item
         .annotated_path
@@ -176,77 +209,106 @@ async fn archive_person_item(
     } else {
         None
     };
-
-    let character_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM characters WHERE id = ?")
-            .bind(item.character_id.as_deref())
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-    let source_stem = Path::new(&item.source_path)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("capture");
-    let annotated_extension = annotated_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::Validation("annotated output has no extension".to_owned()))?;
-    let annotated_directory = destination_root.join("人物图");
-    let annotated_context = ArchiveNameContext {
-        source_stem,
-        character_name: character_name.as_deref(),
-        capture_item_id: &item.id,
-        classification: &item.classification,
-        captured_at: Some(&item.captured_at),
-        avatar: false,
+    // Annotated frames and oversized avatar crops follow the same output
+    // bound as raw copies; nothing is ever upscaled.
+    let prepared_annotated =
+        prepare_archive_source(&annotated_path, output_size, destination_root).await?;
+    log_resize_event(item, output_size, &prepared_annotated, "annotated");
+    let prepared_avatar = match avatar_path.as_deref() {
+        Some(path) => {
+            let prepared = prepare_archive_source(path, output_size, destination_root).await?;
+            log_resize_event(item, output_size, &prepared, "avatar");
+            Some(prepared)
+        }
+        None => None,
     };
-    let final_annotated = resolve_archive_destination(
-        naming,
-        &annotated_context,
-        &annotated_directory,
-        annotated_extension,
-        &annotated_path,
-    )
-    .await?;
-    let final_annotated =
-        resolve_legacy_repair_destination(pool, item, &annotated_path, final_annotated).await?;
-    let annotated_size =
-        copy_tracked_archive(pool, item, &annotated_path, &final_annotated).await?;
 
-    let final_avatar = if let Some(avatar_path) = avatar_path {
-        let avatar_extension = avatar_path
+    let outcome = async {
+        let character_name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM characters WHERE id = ?")
+                .bind(item.character_id.as_deref())
+                .fetch_optional(pool)
+                .await?
+                .flatten();
+        let source_stem = Path::new(&item.source_path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("capture");
+        let annotated_extension = prepared_annotated
+            .path
             .extension()
             .and_then(|value| value.to_str())
-            .ok_or_else(|| AppError::Validation("avatar output has no extension".to_owned()))?;
-        let avatar_directory = destination_root.join("头像图");
-        let avatar_context = ArchiveNameContext {
-            avatar: true,
-            ..annotated_context
+            .ok_or_else(|| AppError::Validation("annotated output has no extension".to_owned()))?;
+        let annotated_directory = destination_root.join("人物图");
+        let annotated_context = ArchiveNameContext {
+            source_stem,
+            character_name: character_name.as_deref(),
+            capture_item_id: &item.id,
+            classification: &item.classification,
+            captured_at: Some(&item.captured_at),
+            avatar: false,
         };
-        let destination = resolve_archive_destination(
+        let final_annotated = resolve_archive_destination(
             naming,
-            &avatar_context,
-            &avatar_directory,
-            avatar_extension,
-            &avatar_path,
+            &annotated_context,
+            &annotated_directory,
+            annotated_extension,
+            &prepared_annotated.path,
         )
         .await?;
-        let destination =
-            resolve_legacy_repair_destination(pool, item, &avatar_path, destination).await?;
-        copy_tracked_archive(pool, item, &avatar_path, &destination).await?;
-        Some(destination)
-    } else {
-        None
-    };
+        let final_annotated = resolve_legacy_repair_destination(
+            pool,
+            item,
+            &prepared_annotated.path,
+            final_annotated,
+        )
+        .await?;
+        let annotated_size =
+            copy_tracked_archive(pool, item, &prepared_annotated.path, &final_annotated).await?;
 
-    persist_completed_archive(
-        pool,
-        item,
-        &final_annotated,
-        final_avatar.as_deref(),
-        annotated_size,
-    )
-    .await
+        let final_avatar = if let Some(prepared_avatar) = prepared_avatar.as_ref() {
+            let avatar_extension = prepared_avatar
+                .path
+                .extension()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| AppError::Validation("avatar output has no extension".to_owned()))?;
+            let avatar_directory = destination_root.join("头像图");
+            let avatar_context = ArchiveNameContext {
+                avatar: true,
+                ..annotated_context
+            };
+            let destination = resolve_archive_destination(
+                naming,
+                &avatar_context,
+                &avatar_directory,
+                avatar_extension,
+                &prepared_avatar.path,
+            )
+            .await?;
+            let destination =
+                resolve_legacy_repair_destination(pool, item, &prepared_avatar.path, destination)
+                    .await?;
+            copy_tracked_archive(pool, item, &prepared_avatar.path, &destination).await?;
+            Some(destination)
+        } else {
+            None
+        };
+
+        persist_completed_archive(
+            pool,
+            item,
+            &final_annotated,
+            final_avatar.as_deref(),
+            annotated_size,
+        )
+        .await
+    }
+    .await;
+    prepared_annotated.cleanup().await;
+    if let Some(prepared) = prepared_avatar.as_ref() {
+        prepared.cleanup().await;
+    }
+    outcome
 }
 
 async fn archive_source_direct(
@@ -256,31 +318,206 @@ async fn archive_source_direct(
     subdirectory: &str,
     character_name: Option<&str>,
     naming: &ArchiveNamingSettings,
+    output_size: &str,
 ) -> Result<CaptureItem, AppError> {
     let source = Path::new(&item.source_path);
     let source = validate_local_archive_source(source).await?;
     let source_stem = source
         .file_stem()
         .and_then(|value| value.to_str())
-        .unwrap_or("capture");
+        .unwrap_or("capture")
+        .to_owned();
     let extension = source
         .extension()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::Validation("source capture has no extension".to_owned()))?;
-    let directory = destination_root.join(subdirectory);
-    let context = ArchiveNameContext {
-        source_stem,
-        character_name,
-        capture_item_id: &item.id,
-        classification: &item.classification,
-        captured_at: Some(&item.captured_at),
-        avatar: false,
+        .ok_or_else(|| AppError::Validation("source capture has no extension".to_owned()))?
+        .to_owned();
+    // Optional archive-time downscale. The prepared copy becomes the archived
+    // identity so {seq} reuse and retry checks compare against the same bytes
+    // that are actually written.
+    let prepared = prepare_archive_source(&source, output_size, destination_root).await?;
+    log_resize_event(item, output_size, &prepared, "capture");
+    let outcome = async {
+        let directory = destination_root.join(subdirectory);
+        let context = ArchiveNameContext {
+            source_stem: &source_stem,
+            character_name,
+            capture_item_id: &item.id,
+            classification: &item.classification,
+            captured_at: Some(&item.captured_at),
+            avatar: false,
+        };
+        let final_path =
+            resolve_archive_destination(naming, &context, &directory, &extension, &prepared.path)
+                .await?;
+        let final_path =
+            resolve_legacy_repair_destination(pool, item, &prepared.path, final_path).await?;
+        let archived_size = copy_tracked_archive(pool, item, &prepared.path, &final_path).await?;
+        persist_completed_archive(pool, item, &final_path, None, archived_size).await
+    }
+    .await;
+    prepared.cleanup().await;
+    outcome
+}
+
+/// A source file to archive: either the original capture or a downscaled
+/// temporary copy prepared for this archival.
+struct PreparedSource {
+    path: PathBuf,
+    temporary: Option<PathBuf>,
+    resize: Option<ResizeInfo>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeInfo {
+    from: (u32, u32),
+    to: (u32, u32),
+    from_bytes: u64,
+    to_bytes: u64,
+    duration_ms: f64,
+}
+
+/// One structured record per archived file: the actual downscale (with
+/// duration and byte counts), or a debug "skipped" entry when the policy
+/// asked for a size but the source was already small / unsupported.
+fn log_resize_event(item: &CaptureItem, policy: &str, prepared: &PreparedSource, file_kind: &str) {
+    match &prepared.resize {
+        Some(info) => perf_log_service::record_event(LogRecord {
+            level: LogLevel::Info,
+            module: "capture.archive".to_owned(),
+            message: format!(
+                "archive resize: {}x{} -> {}x{}, {} -> {} bytes",
+                info.from.0, info.from.1, info.to.0, info.to.1, info.from_bytes, info.to_bytes
+            ),
+            event: Some("archive_resize".to_owned()),
+            project_id: Some(item.project_id.clone()),
+            capture_item_id: Some(item.id.clone()),
+            duration_ms: Some(info.duration_ms),
+            outcome: Some("succeeded".to_owned()),
+            policy: Some(policy.to_owned()),
+            file_kind: Some(file_kind.to_owned()),
+            input_width: Some(info.from.0),
+            input_height: Some(info.from.1),
+            output_width: Some(info.to.0),
+            output_height: Some(info.to.1),
+            input_bytes: Some(info.from_bytes),
+            output_bytes: Some(info.to_bytes),
+            ..Default::default()
+        }),
+        None if policy != "keep" => perf_log_service::record_event(LogRecord {
+            level: LogLevel::Debug,
+            module: "capture.archive".to_owned(),
+            message: format!("archive resize skipped (policy={policy})"),
+            event: Some("archive_resize".to_owned()),
+            project_id: Some(item.project_id.clone()),
+            capture_item_id: Some(item.id.clone()),
+            outcome: Some("skipped".to_owned()),
+            policy: Some(policy.to_owned()),
+            file_kind: Some(file_kind.to_owned()),
+            ..Default::default()
+        }),
+        None => perf_log_service::record_event(LogRecord {
+            level: LogLevel::Debug,
+            module: "capture.archive".to_owned(),
+            message: format!("archive resize unchanged (policy={policy})"),
+            event: Some("archive_resize".to_owned()),
+            project_id: Some(item.project_id.clone()),
+            capture_item_id: Some(item.id.clone()),
+            outcome: Some("unchanged".to_owned()),
+            policy: Some(policy.to_owned()),
+            file_kind: Some(file_kind.to_owned()),
+            ..Default::default()
+        }),
+    }
+}
+
+impl PreparedSource {
+    async fn cleanup(&self) {
+        if let Some(temporary) = &self.temporary {
+            let _ = tokio::fs::remove_file(temporary).await;
+        }
+    }
+}
+
+fn archive_output_height(policy: &str) -> Option<u32> {
+    match policy {
+        "1080p" => Some(1080),
+        "1440p" => Some(1440),
+        "2160p" => Some(2160),
+        _ => None,
+    }
+}
+
+/// Applies the project's archive output bound to a raw source copy. Never
+/// upscales; formats other than PNG/JPEG are archived untouched.
+async fn prepare_archive_source(
+    source: &Path,
+    policy: &str,
+    destination_root: &Path,
+) -> Result<PreparedSource, AppError> {
+    let keep = |path: &Path| PreparedSource {
+        path: path.to_path_buf(),
+        temporary: None,
+        resize: None,
     };
-    let final_path =
-        resolve_archive_destination(naming, &context, &directory, extension, &source).await?;
-    let final_path = resolve_legacy_repair_destination(pool, item, &source, final_path).await?;
-    let archived_size = copy_tracked_archive(pool, item, &source, &final_path).await?;
-    persist_completed_archive(pool, item, &final_path, None, archived_size).await
+    let started = std::time::Instant::now();
+    let Some(target_height) = archive_output_height(policy) else {
+        return Ok(keep(source));
+    };
+    let bytes = tokio::fs::read(source).await?;
+    let Ok(format) = image::guess_format(&bytes) else {
+        return Ok(keep(source));
+    };
+    if !matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg) {
+        return Ok(keep(source));
+    }
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| AppError::Image(format!("cannot decode archive source: {error}")))?;
+    if image.height() <= target_height {
+        return Ok(keep(source));
+    }
+    let from = (image.width(), image.height());
+    let scale = f64::from(target_height) / f64::from(image.height());
+    let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
+    let resized = image.resize_exact(width, target_height, image::imageops::FilterType::Lanczos3);
+    let mut buffer = Vec::new();
+    match format {
+        image::ImageFormat::Png => resized
+            .write_to(
+                &mut std::io::Cursor::new(&mut buffer),
+                image::ImageFormat::Png,
+            )
+            .map_err(|error| AppError::Image(format!("cannot encode resized png: {error}")))?,
+        _ => resized
+            .to_rgb8()
+            .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut buffer,
+                90,
+            ))
+            .map_err(|error| AppError::Image(format!("cannot encode resized jpeg: {error}")))?,
+    }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("png");
+    let temporary = destination_root.join(format!(
+        ".scenevault-resize-{}.{extension}",
+        uuid::Uuid::new_v4()
+    ));
+    let to_bytes = buffer.len() as u64;
+    let to = (resized.width(), resized.height());
+    tokio::fs::write(&temporary, buffer).await?;
+    Ok(PreparedSource {
+        path: temporary.clone(),
+        temporary: Some(temporary),
+        resize: Some(ResizeInfo {
+            from,
+            to,
+            from_bytes: bytes.len() as u64,
+            to_bytes,
+            duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+        }),
+    })
 }
 
 /// Called while the completed capture is locked, BEFORE its old local outputs
@@ -2013,5 +2250,70 @@ mod tests {
         );
         assert!(completed.annotated_path.is_none());
         assert!(source.is_file(), "source screenshot must stay untouched");
+    }
+}
+
+#[cfg(test)]
+mod storage_policy_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb([200, 100, 50]),
+        ));
+        let mut bytes = Vec::new();
+        image
+            .write_with_encoder(image::codecs::png::PngEncoder::new(&mut bytes))
+            .expect("encode png");
+        bytes
+    }
+
+    #[test]
+    fn policy_maps_to_target_height_only_for_known_sizes() {
+        assert_eq!(archive_output_height("keep"), None);
+        assert_eq!(archive_output_height("1080p"), Some(1080));
+        assert_eq!(archive_output_height("1440p"), Some(1440));
+        assert_eq!(archive_output_height("2160p"), Some(2160));
+        assert_eq!(archive_output_height("720p"), None);
+    }
+
+    #[tokio::test]
+    async fn downscales_oversized_raw_copies_and_leaves_smaller_ones_alone() {
+        let workspace = tempdir().unwrap();
+        let oversized = workspace.path().join("capture.png");
+        tokio::fs::write(&oversized, png_bytes(3840, 2160))
+            .await
+            .unwrap();
+
+        let prepared = prepare_archive_source(&oversized, "1080p", workspace.path())
+            .await
+            .expect("prepare");
+        assert!(prepared.temporary.is_some(), "expected a resized copy");
+        assert_eq!(
+            image::image_dimensions(&prepared.path).unwrap(),
+            (1920, 1080)
+        );
+        let temporary = prepared.path.clone();
+        prepared.cleanup().await;
+        assert!(!temporary.exists(), "resize scratch file must be removed");
+
+        let small = workspace.path().join("small.png");
+        tokio::fs::write(&small, png_bytes(1280, 720))
+            .await
+            .unwrap();
+        let kept = prepare_archive_source(&small, "1080p", workspace.path())
+            .await
+            .expect("prepare small");
+        assert!(kept.temporary.is_none());
+        assert_eq!(kept.path, small);
+
+        let keep_policy = prepare_archive_source(&oversized, "keep", workspace.path())
+            .await
+            .expect("prepare keep");
+        assert!(keep_policy.temporary.is_none());
+        assert_eq!(keep_policy.path, oversized);
     }
 }

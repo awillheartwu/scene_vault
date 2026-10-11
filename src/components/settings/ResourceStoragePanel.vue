@@ -29,7 +29,13 @@ import {
   type LogPolicySettings,
   type StorageResourceEntry,
   type StorageResourceStatus,
+  type AppSettings,
 } from "@/lib/capture-api";
+import {
+  captureCleanupDraft,
+  clearCaptureCleanupDraft,
+  rememberCaptureCleanupDraft,
+} from "@/lib/capture-cleanup-draft";
 import { recordClientEvent } from "@/lib/client-log";
 import { toast } from "@/lib/toast";
 import { describeError } from "@/lib/vision-errors";
@@ -51,9 +57,12 @@ const logSettings = ref<LogPolicySettings>({
   maxFileSizeMb: 5,
   maxArchivedFiles: 20,
   automaticCleanup: true,
+  performanceLogging: true,
 });
 const logSettingsLoading = ref(true);
 const logSettingsBusy = ref(false);
+const captureSettings = ref<AppSettings | null>(null);
+const captureSettingsBusy = ref(false);
 const startupStatus = ref<DatabaseStartupStatus | null>(null);
 const preflightReport = ref<PreflightReport | null>(null);
 const backupResult = ref<DatabaseBackupResult | null>(null);
@@ -184,6 +193,29 @@ async function refreshLogSettings() {
     toast.error(`读取日志策略失败：${normalizeError(error)}`);
   } finally {
     logSettingsLoading.value = false;
+  }
+}
+
+// The panel unmounts when another category is shown, so an unsaved edit
+// lives in the module-level draft and is re-applied on the next mount.
+function rememberCaptureDraft() {
+  if (captureSettings.value) rememberCaptureCleanupDraft(captureSettings.value);
+}
+
+async function refreshCaptureSettings() {
+  try {
+    const settings = await captureApi.getAppSettings();
+    const draft = captureCleanupDraft();
+    captureSettings.value = draft
+      ? {
+          ...settings,
+          captureOutputAutoCleanupEnabled: draft.captureOutputAutoCleanupEnabled,
+          captureOutputAutoCleanupThresholdMb: draft.captureOutputAutoCleanupThresholdMb,
+          captureOutputAutoCleanupRetentionDays: draft.captureOutputAutoCleanupRetentionDays,
+        }
+      : settings;
+  } catch (error) {
+    toast.error(`读取缓存清理设置失败：${normalizeError(error)}`);
   }
 }
 
@@ -337,6 +369,31 @@ async function saveLogSettings() {
   }
 }
 
+async function saveCaptureSettings() {
+  if (!captureSettings.value || captureSettingsBusy.value) return;
+  captureSettingsBusy.value = true;
+  try {
+    // Keep the other app settings exactly as the server has them; this form
+    // only owns the capture-cache cleanup fields.
+    const fresh = await captureApi.getAppSettings();
+    captureSettings.value = await captureApi.updateAppSettings({
+      ...fresh,
+      captureOutputAutoCleanupEnabled: captureSettings.value.captureOutputAutoCleanupEnabled,
+      captureOutputAutoCleanupThresholdMb:
+        captureSettings.value.captureOutputAutoCleanupThresholdMb,
+      captureOutputAutoCleanupRetentionDays:
+        captureSettings.value.captureOutputAutoCleanupRetentionDays,
+    });
+    clearCaptureCleanupDraft();
+    toast.success("缓存清理设置已保存");
+    await refreshStorage(false);
+  } catch (error) {
+    toast.error(`保存缓存清理设置失败：${normalizeError(error)}`);
+  } finally {
+    captureSettingsBusy.value = false;
+  }
+}
+
 function startProcessSampling() {
   stopProcessSampling();
   if (document.hidden) return;
@@ -402,6 +459,7 @@ onMounted(() => {
   void refreshStartupStatus();
   void refreshStorage();
   void refreshLogSettings();
+  void refreshCaptureSettings();
 });
 
 onBeforeUnmount(() => {
@@ -518,6 +576,59 @@ onBeforeUnmount(() => {
           <label class="log-policy-toggle">
             <input v-model="logSettings.automaticCleanup" type="checkbox" />
             <span>启动及日志轮转时自动清理过期归档</span>
+          </label>
+          <label class="log-policy-toggle">
+            <input v-model="logSettings.performanceLogging" type="checkbox" />
+            <span>性能日志写入独立文件（图片读取 / 压缩 / 扫描 / AI 请求耗时）</span>
+          </label>
+        </div>
+      </form>
+      <form
+        v-if="captureSettings"
+        class="log-policy-card"
+        @submit.prevent="saveCaptureSettings"
+      >
+        <div class="log-policy-heading">
+          <div>
+            <strong>处理缓存自动清理</strong>
+            <span>超过体积上限时清理已归档、且归档时间超过保留天数的本地中间产物；归档文件与原始截图不受影响。</span>
+          </div>
+          <button type="submit" class="section-action" :disabled="captureSettingsBusy">
+            <LoaderCircle v-if="captureSettingsBusy" class="animate-spin" :size="16" />
+            <Save v-else :size="16" />保存设置
+          </button>
+        </div>
+        <div class="log-policy-fields">
+          <label>
+            缓存上限（MB）
+            <input
+              v-model.number="captureSettings.captureOutputAutoCleanupThresholdMb"
+              type="number"
+              min="128"
+              max="32768"
+              step="128"
+              @input="rememberCaptureDraft()"
+            />
+            <small>128–32768 MiB</small>
+          </label>
+          <label>
+            归档保留天数
+            <input
+              v-model.number="captureSettings.captureOutputAutoCleanupRetentionDays"
+              type="number"
+              min="1"
+              max="365"
+              @input="rememberCaptureDraft()"
+            />
+            <small>1–365 天</small>
+          </label>
+          <label class="log-policy-toggle">
+            <input
+              v-model="captureSettings.captureOutputAutoCleanupEnabled"
+              type="checkbox"
+              @change="rememberCaptureDraft()"
+            />
+            <span>超过上限时自动清理本地处理缓存</span>
           </label>
         </div>
       </form>

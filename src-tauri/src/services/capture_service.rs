@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sqlx::SqlitePool;
@@ -16,6 +16,7 @@ use crate::{
         RegisterCaptureInput, RelabelCaptureInput, RetryCaptureInput, SessionSourceDirectory,
         StartCaptureSessionInput, StartCaptureSessionResult, UnimportedCapture,
     },
+    services::timing::elapsed_ms,
 };
 
 #[derive(Debug)]
@@ -343,6 +344,43 @@ pub fn image_path(item: &CaptureItem, variant: &str) -> Result<PathBuf, AppError
     Ok(PathBuf::from(path))
 }
 
+/// I/O and CPU split of the source identity check, for read-path diagnostics.
+/// Non-source variants report zeros because they never hash the original.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SourceIdentityTiming {
+    /// Stat of the source path.
+    pub stat_ms: f64,
+    /// Reading the file contents for hashing.
+    pub read_ms: f64,
+    /// SHA-256 of the file contents.
+    pub hash_ms: f64,
+    /// Refreshing the stored file state.
+    pub db_ms: f64,
+}
+
+/// Splits reading from hashing so a slow source disk and a slow hash can be
+/// told apart in the diagnostics log.
+pub(crate) struct FileHashTiming {
+    pub read_ms: f64,
+    pub hash_ms: f64,
+}
+
+pub(crate) async fn sha256_file_timed(path: &Path) -> Result<(String, FileHashTiming), AppError> {
+    let read_started = Instant::now();
+    let bytes = tokio::fs::read(path).await?;
+    let read_ms = elapsed_ms(read_started);
+    let (digest, hash_ms) = tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        let started = Instant::now();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        (format!("{:x}", hasher.finalize()), elapsed_ms(started))
+    })
+    .await
+    .map_err(|error| AppError::Io(std::io::Error::other(error.to_string())))?;
+    Ok((digest, FileHashTiming { read_ms, hash_ms }))
+}
+
 /// Confirms that the watched path still contains the immutable content owned
 /// by this capture. Processing and archive paths always hash the file: size
 /// and mtime are only discovery hints and are not strong enough to authorize
@@ -351,7 +389,19 @@ pub async fn validate_source_identity(
     pool: &SqlitePool,
     item: &CaptureItem,
 ) -> Result<PathBuf, AppError> {
+    validate_source_identity_timed(pool, item)
+        .await
+        .map(|(path, _timing)| path)
+}
+
+/// Same check as validate_source_identity, reporting where the time went.
+pub(crate) async fn validate_source_identity_timed(
+    pool: &SqlitePool,
+    item: &CaptureItem,
+) -> Result<(PathBuf, SourceIdentityTiming), AppError> {
+    let mut timing = SourceIdentityTiming::default();
     let path = PathBuf::from(&item.source_path);
+    let stat_started = Instant::now();
     let metadata = match tokio::fs::metadata(&path).await {
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => {
@@ -364,13 +414,16 @@ pub async fn validate_source_identity(
         }
         Err(error) => return Err(error.into()),
     };
+    timing.stat_ms = elapsed_ms(stat_started);
     let size = i64::try_from(metadata.len())
         .map_err(|_| AppError::Validation("capture source is too large".to_owned()))?;
     let modified = metadata
         .modified()
         .ok()
         .and_then(|value| unix_millis(value).ok());
-    let hash = sha256_file(&path).await?;
+    let (hash, hash_timing) = sha256_file_timed(&path).await?;
+    timing.read_ms = hash_timing.read_ms;
+    timing.hash_ms = hash_timing.hash_ms;
     if item
         .content_hash
         .as_deref()
@@ -381,6 +434,7 @@ pub async fn validate_source_identity(
             "capture source was replaced by different content; check file changes first".to_owned(),
         ));
     }
+    let db_started = Instant::now();
     sqlx::query(
         r#"
         UPDATE capture_items
@@ -396,7 +450,8 @@ pub async fn validate_source_identity(
     .bind(&item.id)
     .execute(pool)
     .await?;
-    Ok(path)
+    timing.db_ms = elapsed_ms(db_started);
+    Ok((path, timing))
 }
 
 pub(crate) async fn set_source_file_state(
@@ -2184,7 +2239,7 @@ async fn write_primary_face_tx(
 }
 
 #[cfg(test)]
-#[path = "capture_service_tests.rs"]
+#[path = "../../tests/unit/capture_service_tests.rs"]
 mod tests;
 
 pub(crate) async fn mark_archive_pending_from_processing(

@@ -56,6 +56,12 @@ fn normalize(mut settings: AppSettings) -> Result<AppSettings, AppError> {
         MIN_IMAGE_PROCESSING_CORE_LIMIT,
         MAX_IMAGE_PROCESSING_CORE_LIMIT,
     );
+    settings.capture_output_auto_cleanup_threshold_mb = settings
+        .capture_output_auto_cleanup_threshold_mb
+        .clamp(128, 32768);
+    settings.capture_output_auto_cleanup_retention_days = settings
+        .capture_output_auto_cleanup_retention_days
+        .clamp(1, 365);
     Ok(settings)
 }
 

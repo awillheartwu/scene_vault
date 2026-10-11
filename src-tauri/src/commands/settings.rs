@@ -7,12 +7,13 @@ use crate::{
         app_settings::{AppSettings, UpdateAppSettingsInput},
         archive_naming::{ArchiveNamingSettings, UpdateArchiveNamingSettingsInput},
         diagnostics::{LogLevel, LogRecord},
+        engine::{ArchiveOutputSettings, UpdateArchiveOutputSettingsInput},
         recognition_settings::{RecognitionSettings, UpdateRecognitionSettingsInput},
         vision::ProcessingSettings,
     },
     services::{
-        app_settings_service, archive_naming_settings_service, log_service,
-        processing_settings_service, recognition_settings_service, shortcuts,
+        app_settings_service, archive_naming_settings_service, archive_output_settings_service,
+        log_service, processing_settings_service, recognition_settings_service, shortcuts,
         vision_worker_service,
     },
 };
@@ -53,6 +54,23 @@ pub async fn update_archive_naming_settings(
 ) -> Result<ArchiveNamingSettings, AppError> {
     let saved = archive_naming_settings_service::update(&state.pool, input).await?;
     settings_event("archive_naming_updated");
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn get_archive_output_settings(
+    state: State<'_, AppState>,
+) -> Result<ArchiveOutputSettings, AppError> {
+    archive_output_settings_service::get(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn update_archive_output_settings(
+    state: State<'_, AppState>,
+    input: UpdateArchiveOutputSettingsInput,
+) -> Result<ArchiveOutputSettings, AppError> {
+    let saved = archive_output_settings_service::update(&state.pool, input).await?;
+    settings_event("archive_output_settings_updated");
     Ok(saved)
 }
 

@@ -18,7 +18,10 @@ use tokio::{
 use crate::{
     error::AppError,
     models::vision::{VisionProcessData, VisionSettings},
-    services::{log_service, vision_engine_service::EngineResponse, vision_settings_service},
+    services::{
+        log_service, perf_log_service, vision_engine_service::EngineResponse,
+        vision_settings_service,
+    },
 };
 
 use super::vision_engine_service::ProgressCallback;
@@ -525,7 +528,7 @@ pub(super) fn record_python_log_line(line: &str) -> bool {
         .as_deref()
         .unwrap_or(&event.event)
         .replace(['\r', '\n'], " | ");
-    log_service::record_event(crate::models::diagnostics::LogRecord {
+    let record = crate::models::diagnostics::LogRecord {
         level,
         module: format!("vision.python.{}", event.module),
         message: truncate(&message, 500),
@@ -536,7 +539,14 @@ pub(super) fn record_python_log_line(line: &str) -> bool {
         error_code: event.error_code.filter(|value| valid_log_token(value, 80)),
         worker_mode: Some("python".to_owned()),
         ..Default::default()
-    });
+    };
+    if record.event.as_deref() == Some("request_succeeded") {
+        // Routine per-request timing belongs to the performance channel;
+        // failures and other lifecycle events stay in the main log.
+        perf_log_service::record_event(record);
+    } else {
+        log_service::record_event(record);
+    }
     true
 }
 

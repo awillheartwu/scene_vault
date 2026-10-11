@@ -40,7 +40,7 @@ struct GlobalLogService {
 }
 
 #[derive(Debug, Clone)]
-struct LogPolicy {
+pub(crate) struct LogPolicy {
     max_file_bytes: u64,
     retention_days: i64,
     max_archived_files: usize,
@@ -61,15 +61,26 @@ impl Default for LogPolicy {
 #[derive(Debug)]
 pub struct LogStore {
     directory: PathBuf,
+    file_prefix: String,
+    current_file: String,
     policy: Mutex<LogPolicy>,
     operation_lock: Mutex<()>,
 }
 
 impl LogStore {
-    fn new(directory: PathBuf, policy: LogPolicy) -> Result<Self, AppError> {
+    /// One rotating JSONL channel. The main log and the performance channel
+    /// only differ in directory and file names.
+    pub(crate) fn new(
+        directory: PathBuf,
+        file_prefix: &str,
+        current_file: &str,
+        policy: LogPolicy,
+    ) -> Result<Self, AppError> {
         fs::create_dir_all(&directory)?;
         let store = Self {
             directory,
+            file_prefix: file_prefix.to_owned(),
+            current_file: current_file.to_owned(),
             policy: Mutex::new(policy),
             operation_lock: Mutex::new(()),
         };
@@ -77,7 +88,7 @@ impl LogStore {
     }
 
     fn current_path(&self) -> PathBuf {
-        self.directory.join(CURRENT_LOG_FILE)
+        self.directory.join(&self.current_file)
     }
 
     fn append(&self, record: &LogRecord) -> Result<(), AppError> {
@@ -113,12 +124,15 @@ impl LogStore {
         }
 
         let stamp = Utc::now().format("%Y%m%d-%H%M%S%.3f");
-        let mut archived = self.directory.join(format!("scene-vault-{stamp}.jsonl"));
+        let mut archived = self
+            .directory
+            .join(format!("{}{stamp}{LOG_FILE_SUFFIX}", self.file_prefix));
         let mut suffix = 1_u16;
         while archived.exists() {
-            archived = self
-                .directory
-                .join(format!("scene-vault-{stamp}-{suffix}.jsonl"));
+            archived = self.directory.join(format!(
+                "{}{stamp}-{suffix}{LOG_FILE_SUFFIX}",
+                self.file_prefix
+            ));
             suffix = suffix.saturating_add(1);
         }
         if let Err(error) = fs::rename(current, archived) {
@@ -141,7 +155,7 @@ impl LogStore {
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if !name.starts_with(LOG_FILE_PREFIX) || !name.ends_with(LOG_FILE_SUFFIX) {
+            if !name.starts_with(&self.file_prefix) || !name.ends_with(LOG_FILE_SUFFIX) {
                 continue;
             }
             let metadata = match entry.metadata() {
@@ -171,7 +185,8 @@ impl LogStore {
         let mut removed = 0_usize;
         let mut kept_archives = 0_usize;
         for (path, modified, _) in self.log_files()? {
-            if path.file_name().and_then(|value| value.to_str()) == Some(CURRENT_LOG_FILE) {
+            if path.file_name().and_then(|value| value.to_str()) == Some(self.current_file.as_str())
+            {
                 continue;
             }
             let modified: DateTime<Utc> = modified.into();
@@ -286,7 +301,7 @@ impl LogStore {
         })
     }
 
-    fn status(&self) -> Result<LogStatus, AppError> {
+    pub(crate) fn status(&self) -> Result<LogStatus, AppError> {
         let _guard = self
             .operation_lock
             .lock()
@@ -313,7 +328,7 @@ impl LogStore {
         })
     }
 
-    fn cleanup_policy(&self) -> Result<usize, AppError> {
+    pub(crate) fn cleanup_policy(&self) -> Result<usize, AppError> {
         let _guard = self
             .operation_lock
             .lock()
@@ -321,7 +336,7 @@ impl LogStore {
         self.cleanup_unlocked()
     }
 
-    fn configure(&self, settings: &LogPolicySettings) -> Result<(), AppError> {
+    pub(crate) fn configure(&self, settings: &LogPolicySettings) -> Result<(), AppError> {
         let _guard = self
             .operation_lock
             .lock()
@@ -377,21 +392,35 @@ fn parse_boundary(value: Option<&str>, label: &str) -> Result<Option<DateTime<Ut
 }
 
 pub fn initialize(directory: PathBuf) -> Result<(), AppError> {
-    let store = Arc::new(LogStore::new(directory, LogPolicy::default())?);
+    let store = Arc::new(LogStore::new(
+        directory,
+        LOG_FILE_PREFIX,
+        CURRENT_LOG_FILE,
+        LogPolicy::default(),
+    )?);
+    let sender = spawn_jsonl_writer(Arc::clone(&store), "scene-vault-log-writer")?;
+    GLOBAL_LOG_SERVICE
+        .set(GlobalLogService { store, sender })
+        .map_err(|_| AppError::Conflict("log service is already initialized".to_owned()))
+}
+
+/// Shared writer loop for JSONL channels (main log and the performance log):
+/// one dedicated thread drains a bounded queue and appends/rotates records.
+pub(crate) fn spawn_jsonl_writer(
+    store: Arc<LogStore>,
+    thread_name: &str,
+) -> Result<SyncSender<LogRecord>, AppError> {
     let (sender, receiver) = mpsc::sync_channel::<LogRecord>(LOG_QUEUE_CAPACITY);
-    let writer_store = Arc::clone(&store);
     std::thread::Builder::new()
-        .name("scene-vault-log-writer".to_owned())
+        .name(thread_name.to_owned())
         .spawn(move || {
             while let Ok(record) = receiver.recv() {
-                if let Err(error) = writer_store.append(&record) {
+                if let Err(error) = store.append(&record) {
                     eprintln!("[ERROR] [logging] could not persist log record: {error}");
                 }
             }
         })?;
-    GLOBAL_LOG_SERVICE
-        .set(GlobalLogService { store, sender })
-        .map_err(|_| AppError::Conflict("log service is already initialized".to_owned()))
+    Ok(sender)
 }
 
 pub fn record(level: LogLevel, module: impl Into<String>, message: impl Into<String>) {
@@ -537,7 +566,13 @@ mod tests {
     #[test]
     fn writes_queries_and_filters_structured_records() {
         let temp = tempdir().unwrap();
-        let store = LogStore::new(temp.path().to_path_buf(), LogPolicy::default()).unwrap();
+        let store = LogStore::new(
+            temp.path().to_path_buf(),
+            LOG_FILE_PREFIX,
+            CURRENT_LOG_FILE,
+            LogPolicy::default(),
+        )
+        .unwrap();
         store
             .append(&record(
                 "2026-08-09T01:00:00.000Z",
@@ -601,7 +636,13 @@ mod tests {
         assert!(legacy.event.is_none());
 
         let temp = tempdir().unwrap();
-        let store = LogStore::new(temp.path().to_path_buf(), LogPolicy::default()).unwrap();
+        let store = LogStore::new(
+            temp.path().to_path_buf(),
+            LOG_FILE_PREFIX,
+            CURRENT_LOG_FILE,
+            LogPolicy::default(),
+        )
+        .unwrap();
         let mut structured = record(
             "2026-08-09T02:00:00.000Z",
             LogLevel::Error,
@@ -633,6 +674,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = LogStore::new(
             temp.path().to_path_buf(),
+            LOG_FILE_PREFIX,
+            CURRENT_LOG_FILE,
             LogPolicy {
                 max_file_bytes: 1,
                 retention_days: 14,
@@ -651,9 +694,45 @@ mod tests {
     }
 
     #[test]
+    fn supports_custom_file_names_for_other_channels() {
+        let temp = tempdir().unwrap();
+        let store = LogStore::new(
+            temp.path().to_path_buf(),
+            "perf-",
+            "perf-current.jsonl",
+            LogPolicy {
+                max_file_bytes: 1,
+                retention_days: 14,
+                max_archived_files: 5,
+                automatic_cleanup: true,
+            },
+        )
+        .unwrap();
+        let sample = record("2026-08-09T01:00:00.000Z", LogLevel::Info, "perf", "record");
+        store.append(&sample).unwrap();
+        store.append(&sample).unwrap();
+
+        let files = store.log_files().unwrap();
+        let names: Vec<&str> = files
+            .iter()
+            .filter_map(|(path, _, _)| path.file_name().and_then(|name| name.to_str()))
+            .collect();
+        assert!(names.contains(&"perf-current.jsonl"));
+        assert!(names
+            .iter()
+            .any(|name| name.starts_with("perf-") && *name != "perf-current.jsonl"));
+    }
+
+    #[test]
     fn rejects_reversed_time_range() {
         let temp = tempdir().unwrap();
-        let store = LogStore::new(temp.path().to_path_buf(), LogPolicy::default()).unwrap();
+        let store = LogStore::new(
+            temp.path().to_path_buf(),
+            LOG_FILE_PREFIX,
+            CURRENT_LOG_FILE,
+            LogPolicy::default(),
+        )
+        .unwrap();
         let error = store
             .query(LogQuery {
                 since: Some("2026-08-10T00:00:00Z".to_owned()),

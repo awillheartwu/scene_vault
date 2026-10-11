@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{
@@ -22,7 +24,8 @@ use crate::{
     services::{
         archive_manifest_service, capture_archive_service, capture_deletion_service,
         capture_discovery_service, capture_service, file_recycle_service::SystemRecycleBin,
-        log_service, project_file_reconcile_service, thumbnail_service,
+        log_service, perf_log_service, project_file_reconcile_service, thumbnail_service,
+        timing::elapsed_ms,
     },
 };
 
@@ -100,7 +103,7 @@ pub async fn discover_captures(
 ) -> Result<DiscoverCapturesResult, AppError> {
     let session_id = input.session_id.clone();
     let result = capture_discovery_service::discover(&state.pool, Some(&app), input).await?;
-    log_service::record_event(LogRecord {
+    perf_log_service::record_event(LogRecord {
         level: LogLevel::Info,
         module: "capture.discovery".to_owned(),
         message: format!(
@@ -415,6 +418,8 @@ pub async fn archive_capture(
     state: State<'_, AppState>,
     input: CaptureItemIdInput,
 ) -> Result<CaptureItem, AppError> {
+    // The archive service requests the throttled cache cleanup itself so the
+    // background worker path is covered too.
     capture_archive_service::archive(&state.pool, input).await
 }
 
@@ -423,9 +428,31 @@ pub async fn read_capture_image(
     state: State<'_, AppState>,
     input: ReadCaptureImageInput,
 ) -> Result<tauri::ipc::Response, AppError> {
+    let started = Instant::now();
+    let item_started = Instant::now();
     let item = capture_service::get_item(&state.pool, input.capture_item_id.trim()).await?;
-    let path = readable_capture_path(&state.pool, &item, input.variant.trim()).await?;
+    let item_ms = elapsed_ms(item_started);
+    let variant = input.variant.trim();
+    let validate_started = Instant::now();
+    let (path, identity) = readable_capture_path(&state.pool, &item, variant).await?;
+    let validate_ms = elapsed_ms(validate_started);
+    let read_started = Instant::now();
     let bytes = tokio::fs::read(path).await?;
+    let read_ms = elapsed_ms(read_started);
+    let total_ms = elapsed_ms(started);
+    log_image_read_timing(
+        "read_capture_image",
+        &item.id,
+        format!(
+            "variant={variant} kind=full bytes={} total={total_ms:.1} item={item_ms:.1} validate={validate_ms:.1} vstat={:.1} vread={:.1} vhash={:.1} vdb={:.1} read={read_ms:.1}",
+            bytes.len(),
+            identity.stat_ms,
+            identity.read_ms,
+            identity.hash_ms,
+            identity.db_ms,
+        ),
+        total_ms,
+    );
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -437,6 +464,8 @@ pub async fn read_capture_thumbnail(
 ) -> Result<tauri::ipc::Response, AppError> {
     use tauri::Manager;
 
+    let started = Instant::now();
+    let guard_started = Instant::now();
     let _guard =
         crate::services::capture_operation_service::lock(&state.pool, &input.capture_item_id).await;
     crate::services::capture_operation_service::ensure_available(
@@ -444,11 +473,18 @@ pub async fn read_capture_thumbnail(
         &input.capture_item_id,
     )
     .await?;
+    let guard_ms = elapsed_ms(guard_started);
+    let item_started = Instant::now();
     let item = capture_service::get_item(&state.pool, input.capture_item_id.trim()).await?;
+    let item_ms = elapsed_ms(item_started);
     let variant = input.variant.trim();
-    let path = readable_capture_path(&state.pool, &item, variant).await?;
+    let validate_started = Instant::now();
+    let (path, identity) = readable_capture_path(&state.pool, &item, variant).await?;
+    let validate_ms = elapsed_ms(validate_started);
     let cache_root = app.path().app_local_data_dir()?;
+    let settings_started = Instant::now();
     let settings = crate::services::app_settings_service::get(&state.pool).await?;
+    let settings_ms = elapsed_ms(settings_started);
     let limit_bytes = (settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024);
     let generation = thumbnail_service::capture_generation(
         variant,
@@ -456,7 +492,8 @@ pub async fn read_capture_thumbnail(
         item.processed_at.as_deref(),
         item.archived_at.as_deref(),
     );
-    let bytes = thumbnail_service::read_thumbnail_with_generation(
+    let thumbnail_started = Instant::now();
+    let read = thumbnail_service::read_thumbnail_timed(
         &cache_root,
         &item.id,
         variant,
@@ -465,25 +502,62 @@ pub async fn read_capture_thumbnail(
         &generation,
     )
     .await?;
-    Ok(tauri::ipc::Response::new(bytes))
+    let thumbnail_ms = elapsed_ms(thumbnail_started);
+    let total_ms = elapsed_ms(started);
+    let timing = read.timing;
+    log_image_read_timing(
+        "read_capture_thumbnail",
+        &item.id,
+        format!(
+            "variant={variant} kind=thumb bytes={} total={total_ms:.1} guard={guard_ms:.1} item={item_ms:.1} validate={validate_ms:.1} vstat={:.1} vread={:.1} vhash={:.1} vdb={:.1} settings={settings_ms:.1} thumb={thumbnail_ms:.1} permit={:.1} lookup={:.1} decode={:.1} publish={:.1} hit={}",
+            read.bytes.len(),
+            identity.stat_ms,
+            identity.read_ms,
+            identity.hash_ms,
+            identity.db_ms,
+            timing.permit_wait_ms,
+            timing.lookup_ms,
+            timing.decode_ms,
+            timing.publish_ms,
+            timing.cache_hit,
+        ),
+        total_ms,
+    );
+    Ok(tauri::ipc::Response::new(read.bytes))
+}
+
+/// One debug record per successful image read. Aggregate the JSONL log with
+/// scripts/analyze-image-timing.ps1 (see docs/DEVELOPMENT.md).
+fn log_image_read_timing(operation: &str, capture_item_id: &str, message: String, total_ms: f64) {
+    perf_log_service::record_event(LogRecord {
+        level: LogLevel::Debug,
+        module: "capture.image".to_owned(),
+        message,
+        event: Some("read_timing".to_owned()),
+        operation_id: Some(operation.to_owned()),
+        capture_item_id: Some(capture_item_id.to_owned()),
+        duration_ms: Some(total_ms),
+        outcome: Some("ok".to_owned()),
+        ..Default::default()
+    });
 }
 
 async fn readable_capture_path(
     pool: &sqlx::SqlitePool,
     item: &CaptureItem,
     variant: &str,
-) -> Result<std::path::PathBuf, AppError> {
+) -> Result<(std::path::PathBuf, capture_service::SourceIdentityTiming), AppError> {
     if variant == "source" {
-        return capture_service::validate_source_identity(pool, item).await;
+        return capture_service::validate_source_identity_timed(pool, item).await;
     }
     let path = capture_service::image_path(item, variant)?;
     if variant != "destination" {
-        return Ok(path);
+        return Ok((path, capture_service::SourceIdentityTiming::default()));
     }
     match tokio::fs::metadata(&path).await {
         Ok(metadata) if metadata.is_file() => {
             capture_service::note_destination_state(pool, item, "available").await?;
-            Ok(path)
+            Ok((path, capture_service::SourceIdentityTiming::default()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             capture_service::note_destination_state(pool, item, "missing").await?;

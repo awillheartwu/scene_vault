@@ -118,7 +118,9 @@ fn jobs() -> &'static Mutex<HashMap<String, JobHandle>> {
 }
 
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    value.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    value
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Inserts a job and reclaims inactive ones: finished jobs age out, and a
@@ -283,7 +285,10 @@ async fn load(pool: &SqlitePool, id: &str) -> Result<Snapshot, AppError> {
 
 fn eligible(row: &Snapshot) -> Result<(), AppError> {
     if row.classification == "unclassified"
-        || matches!(row.status.as_str(), "queued" | "processing" | "archive_pending")
+        || matches!(
+            row.status.as_str(),
+            "queued" | "processing" | "archive_pending"
+        )
     {
         return Err(conflict("capture is unclassified or busy"));
     }
@@ -333,7 +338,8 @@ fn reason_of(error: &AppError) -> &'static str {
         || message.contains("original source content identity is invalid")
     {
         "source_gone"
-    } else if message.contains("changed since preview") || message.contains("changed before deletion")
+    } else if message.contains("changed since preview")
+        || message.contains("changed before deletion")
     {
         "changed"
     } else if message.contains("does not support recoverable deletion")
@@ -353,7 +359,10 @@ fn reason_of(error: &AppError) -> &'static str {
 
 /// IDs constrain the project and other filters; explicit private IDs bypass only
 /// include_private. No pagination: freezes all matching classified items.
-pub async fn candidates(pool: &SqlitePool, input: &ResetPreviewInput) -> Result<Vec<String>, AppError> {
+pub async fn candidates(
+    pool: &SqlitePool,
+    input: &ResetPreviewInput,
+) -> Result<Vec<String>, AppError> {
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)")
         .bind(&input.project_id)
         .fetch_one(pool)
@@ -537,9 +546,12 @@ pub async fn execute<R: FileRecycler>(
             state.delete_destination_files,
             state.allow_permanent_network_delete,
         ) {
-            if delete != input.delete_destination_files || network != input.allow_permanent_network_delete
+            if delete != input.delete_destination_files
+                || network != input.allow_permanent_network_delete
             {
-                return Err(conflict("reset cleanup choices are immutable for this preview"));
+                return Err(conflict(
+                    "reset cleanup choices are immutable for this preview",
+                ));
             }
         }
         if state.executing {
@@ -593,7 +605,9 @@ pub async fn execute<R: FileRecycler>(
                 continue;
             }
             item.status = "running";
-            item.plan.clone().map(|plan| (plan, item.source_path.clone()))
+            item.plan
+                .clone()
+                .map(|plan| (plan, item.source_path.clone()))
         };
         let Some((plan, source_path)) = run else {
             continue;
@@ -734,7 +748,9 @@ async fn execute_item<R: FileRecycler>(
     resolved.source_path = comparable.source_path.clone();
     comparable.updated_at = snapshot.updated_at.clone();
     if comparable != expected {
-        return Err(conflict("capture changed since reset preview; create a new preview"));
+        return Err(conflict(
+            "capture changed since reset preview; create a new preview",
+        ));
     }
     source_valid(&resolved).await?;
     // The claim only marks the picture as busy. The processing version is
@@ -754,7 +770,16 @@ async fn execute_item<R: FileRecycler>(
         return Err(conflict("capture claim unavailable"));
     }
     let result = clean_and_commit(
-        pool, cache_root, local_root, input, id, &resolved, &plan.files, recycler, canonical, stats,
+        pool,
+        cache_root,
+        local_root,
+        input,
+        id,
+        &resolved,
+        &plan.files,
+        recycler,
+        canonical,
+        stats,
     )
     .await;
     if result.is_err() && input.delete_destination_files {
@@ -778,7 +803,10 @@ async fn execute_item<R: FileRecycler>(
 async fn mark_missing_targets(pool: &SqlitePool, snapshot: &Snapshot) {
     for (path, column) in [
         (&snapshot.destination_path, "destination_file_state"),
-        (&snapshot.destination_avatar_path, "destination_avatar_file_state"),
+        (
+            &snapshot.destination_avatar_path,
+            "destination_avatar_file_state",
+        ),
     ] {
         let Some(path) = path else { continue };
         if tokio::fs::try_exists(path).await.unwrap_or(true) {
@@ -803,11 +831,13 @@ async fn mark_missing_targets(pool: &SqlitePool, snapshot: &Snapshot) {
 }
 
 async fn release_claim(pool: &SqlitePool, id: &str, owner: &str) -> Result<(), AppError> {
-    sqlx::query("UPDATE capture_items SET operation_owner = NULL WHERE id = ? AND operation_owner = ?")
-        .bind(id)
-        .bind(owner)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE capture_items SET operation_owner = NULL WHERE id = ? AND operation_owner = ?",
+    )
+    .bind(id)
+    .bind(owner)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1117,7 +1147,11 @@ fn event(
     detail: Option<String>,
 ) {
     log_service::record_event(LogRecord {
-        level: if failed { LogLevel::Warn } else { LogLevel::Info },
+        level: if failed {
+            LogLevel::Warn
+        } else {
+            LogLevel::Info
+        },
         module: "capture.reset".into(),
         message: detail.map_or_else(|| name.to_owned(), |detail| format!("{name} {detail}")),
         event: Some(name.into()),
@@ -1128,5 +1162,5 @@ fn event(
 }
 
 #[cfg(test)]
-#[path = "capture_reset_service_tests.rs"]
+#[path = "../../tests/unit/capture_reset_service_tests.rs"]
 mod tests;

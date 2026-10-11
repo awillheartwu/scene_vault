@@ -2,6 +2,7 @@ pub mod app_settings_service;
 pub mod archive_manifest_service;
 pub mod archive_naming;
 pub mod archive_naming_settings_service;
+pub mod archive_output_settings_service;
 pub mod asset_service;
 pub mod capture_archive_service;
 pub mod capture_deletion_service;
@@ -11,26 +12,33 @@ pub mod capture_service;
 pub mod capture_worker_service;
 pub mod character_service;
 pub mod data_maintenance_service;
+pub mod engine_detection_service;
+pub mod engine_metadata_service;
 pub mod file_recycle_service;
 pub mod file_relink;
 pub mod font_service;
+pub mod game_launch_service;
 pub mod log_service;
 pub mod log_settings_service;
 pub mod notes_service;
+pub mod perf_log_service;
 pub mod process_resource_service;
 pub mod processing_settings_service;
 pub mod project_file_reconcile_service;
 pub mod project_service;
 pub mod recognition_service;
 pub mod recognition_settings_service;
+pub mod renpy_bridge_service;
 pub mod resource_storage_service;
 pub mod shortcuts;
 pub mod thumbnail_service;
+pub mod timing;
 pub mod vision_engine_service;
 pub mod vision_settings_service;
 pub mod vision_worker_service;
 
 #[cfg(test)]
+#[path = "../../tests/unit/test_support.rs"]
 pub mod test_support;
 
 pub mod capture_operation_service;

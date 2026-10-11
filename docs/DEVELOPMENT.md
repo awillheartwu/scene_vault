@@ -47,6 +47,40 @@ python -m compileall -q python/src python/tests python/sidecar.py
 python scripts/check-utf8.py
 ```
 
+前端测试位于 `tests/`（目录结构与 `src/` 对应）；Rust 的模块级测试文件位于
+`src-tauri/tests/unit/`，通过 `#[path]` 挂到对应 service。
+
+## 图片读取耗时排查
+
+`read_capture_image` / `read_capture_thumbnail` 每次成功读取都写一条性能日志（module `capture.image`，event `read_timing`，
+message 为 `key=value` 分段毫秒值）；前端对应记录上报 module `capture.image`、落库为 `ui.capture.image`（后端统一加 `ui.` 前缀），只有 `durationMs`，即前端观测到的
+读取耗时（invoke 往返，含 IPC 传输；不含 Blob 构建与 img 解码）。两条记录都带 `captureItemId`，可按图精确配对；失败读取不写该记录，仍沿用既有错误日志。
+
+分段含义：
+
+- `guard` / `item` / `settings`：撤销分类互斥锁、条目查询、设置读取的数据库耗时。
+- `validate` 及子项 `vstat`（stat）/`vread`（读文件）/`vhash`（SHA-256）/`vdb`（写回状态）：
+  源文件校验，source 变体每次读取都执行整文件哈希；非 source 变体这四项为 0。
+- `thumb` 及其子项：`permit`（等待生成许可）、`lookup`（缓存指纹与哈希校验）、
+  `decode`（解码原图并编码 JPEG，仅未命中时非零）、`publish`（写缓存与目录维护）。
+- `kind=full` 的原图直读只有 `item` / `validate` / `read`。
+
+性能日志写入独立文件（不进入应用内“历史 → 调试日志”面板，避免刷屏）：
+`%LOCALAPPDATA%\com.scenevault.desktop\logs\perf\perf-*.jsonl`（同样按大小轮转与清理）；
+设置 → 资源与缓存 → 日志策略里的“性能日志写入独立文件”开关可以整体关闭（代码保留，只停写）。
+
+聚合 JSONL（脚本同时读取 logs 主目录和它下面的 perf 子目录，旧数据也能统计）：
+
+```powershell
+pwsh -File scripts\analyze-image-timing.ps1 -Minutes 10
+pwsh -File scripts\analyze-image-timing.ps1 -Csv work\image-timing.csv
+```
+
+脚本按 变体、缓存命中与否输出 count/均值/p50/p90/max。判断口径：`decode` 大或 `hit=false` 占比高
+说明在读图时生成缩略图；`permit` 大是在等生成许可（并发上限为图片处理核心设置，1-4）；`lookup` 大是
+缓存校验慢（网络盘、杀软扫描）；`validate` 大是源文件整文件校验；前端 `durationMs` 明显高于后端 `total`
+时差额来自 IPC 传输。
+
 ## Python AI 引擎
 
 核心截图工作流不要求安装 Python。开发引擎时可创建独立虚拟环境：
@@ -146,5 +180,3 @@ ArcFace 是可选识别器，用户需自行提供兼容的 ONNX 权重；项目
 - [CAPTURE_WORKFLOW.md](CAPTURE_WORKFLOW.md)：当前工作流和 Windows 验收。
 - [BENCHMARK.md](BENCHMARK.md)：识别评测的唯一权威文档。
 - [ROADMAP.md](ROADMAP.md)：真正未完成的工作。
-- [决策记录](decisions/2026-08-05-capture-classification-and-notes.md)：已确认且长期有效的
-  截图分类与快速笔记语义。

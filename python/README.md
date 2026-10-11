@@ -41,8 +41,8 @@ python -m scene_vault_ai health
 
 `request` 从标准输入读取一个 JSON object。标准输出始终只有一行 JSON；日志只写入
 标准错误。成功退出码为 `0`，协议、配置或处理错误的退出码为 `1`。`request` 每次处理
-一个请求后退出；常驻 worker 的分阶段方案见
-[常驻 Python 视觉 Worker 决策](../docs/decisions/2026-08-11-persistent-python-worker.md)。
+一个请求后退出；常驻 `worker` 与 Rust 的集成方式见
+[系统架构](../docs/ARCHITECTURE.md) 的「Python AI 协议」。
 
 ## 常驻 worker
 

@@ -4,7 +4,7 @@
 
 ## 目的与口径
 
-本文建立 Scene Vault 的性能、进程内存、CPU 和磁盘体积口径，为以下决策提供依据：
+本文建立 Scene Vault 的性能、进程内存、CPU 和磁盘体积口径，用来回答以下问题：
 
 - one-shot 与常驻 worker 的长期默认模式；
 - SFace 与 ArcFace 的资源代价；

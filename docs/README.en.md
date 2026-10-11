@@ -124,10 +124,11 @@ Environment setup and one-click Windows scripts are described in the
 
 ```text
 src/                 Vue frontend
+tests/               frontend tests
 src-tauri/           Tauri/Rust backend, SQLite migrations, packaging config
 python/              optional local AI engine (versioned JSON protocol)
 scripts/             development and release scripts
-docs/                product, architecture, decisions, acceptance and dev docs
+docs/                product, architecture, acceptance and dev docs
 AGENTS.md            AI agent working constraints
 ```
 
@@ -141,7 +142,6 @@ AGENTS.md            AI agent working constraints
 - [Resource and storage notes](RESOURCE_USAGE.md)
 - [Development guide](DEVELOPMENT.md)
 - [Roadmap](ROADMAP.md)
-- [Decision records](decisions/)
 - [Python AI protocol](../python/README.md)
 
 ## Data and licensing

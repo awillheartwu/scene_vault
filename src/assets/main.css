@@ -43,6 +43,7 @@
 }
 
 :root {
+  color-scheme: light;
   --radius: 0.625rem;
   --background: #f2e7d3;
   --foreground: #3b3123;
@@ -103,6 +104,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: #10181d;
   --foreground: #e8eef0;
   --card: #182229;
@@ -161,6 +163,15 @@
     font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   }
   button, input, select { font: inherit; }
+  select option,
+  select optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
+  select option:disabled,
+  select optgroup:disabled {
+    color: var(--muted-foreground);
+  }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; }
   :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
@@ -294,13 +305,25 @@
   .start-button:hover:not(:disabled) { filter: brightness(1.06); }
   .session-tools-shelf { display: flex; min-height: 38px; align-items: center; gap: 12px; padding: 5px 18px; border-top: 1px solid color-mix(in srgb, var(--capture-border) 62%, transparent); background: color-mix(in srgb, var(--card) 36%, transparent); }
   .session-tools-shelf.collapsed { justify-content: center; }
-  .session-tools-actions { display: flex; min-width: 0; flex: 1; align-items: center; gap: 6px; }
+  .session-tools-actions { position: relative; display: flex; min-width: 0; flex: 1; align-items: center; gap: 6px; }
   .session-tools-actions button, .session-tools-toggle { display: flex; height: 30px; flex: none; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted-foreground); font-size: 11px; }
   .session-tools-actions button { color: var(--foreground); }
   .session-tools-actions button:hover:not(:disabled), .session-tools-toggle:hover { border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); background: color-mix(in srgb, var(--foreground) 6%, transparent); color: var(--accent); }
   .session-tools-actions .recognition-action { color: var(--accent); }
   .session-tools-hint { min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
   .session-tools-toggle { margin-left: auto; }
+  .engine-uninstall-list { position: absolute; z-index: 40; top: 36px; left: 12px; display: flex; flex-direction: column; gap: 2px; min-width: 320px; max-width: 460px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4); }
+  .engine-uninstall-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 7px; }
+  .engine-uninstall-row:hover { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+  .engine-uninstall-row span { flex: 1; min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .engine-uninstall-row button { flex: none; height: 24px; padding: 0 9px; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border)); border-radius: 6px; background: transparent; color: var(--foreground); font-size: 11px; }
+  .engine-uninstall-row button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+  .game-launch-list { position: absolute; z-index: 40; top: 36px; left: 12px; display: flex; flex-direction: column; gap: 2px; min-width: 320px; max-width: 460px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4); }
+  .game-launch-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 7px; }
+  .game-launch-row:hover { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+  .game-launch-row span { flex: 1; min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .game-launch-row button { flex: none; height: 24px; padding: 0 9px; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border)); border-radius: 6px; background: transparent; color: var(--foreground); font-size: 11px; }
+  .game-launch-row button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
   .capture-alert { display: flex; align-items: center; gap: 9px; padding: 9px 20px; border-bottom: 1px solid color-mix(in srgb, var(--destructive) 45%, var(--border)); background: color-mix(in srgb, var(--destructive) 14%, var(--card)); color: var(--destructive); font-size: 13px; }
   .capture-alert span { flex: 1; }
   .capture-alert button { border: 0; background: transparent; color: inherit; font-size: 20px; }
