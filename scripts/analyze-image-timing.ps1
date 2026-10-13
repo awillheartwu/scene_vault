@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-汇总 Scene Vault 图片读取耗时（module capture.image / ui.capture.image，event read_timing）。
+汇总 Scene Vault 的图片读取、显示、保存、AI 处理和应用资源性能日志。
 
 .DESCRIPTION
 读取 logs\perf 与 logs 目录里的 *.jsonl（性能日志默认写在 perf 子目录，兼容旧的
@@ -9,14 +9,16 @@
   permit/lookup/decode/publish；kind=thumb 表示 320px 缩略图，kind=full 表示原图直读。
 - 前端记录（module ui.capture.image）只有 durationMs，即前端观测到的读取耗时
   （invoke 往返，含 IPC 传输；不含 Blob 构建与 img 解码）。
-脚本按 变体、缓存命中与否分组输出 count、均值、p50、p90、最大值，并可导出 CSV。
+同时读取 load_timing、归档分段、vision.request 与 app.resources 采样。
+按环节、变体、缓存命中、结果分组输出次数、均值、P50、P90、最大值，并可导出 CSV。
+耗时单位为 ms，内存/缓存为 MiB，CPU 为 %，线程/句柄/文件为 count。
 
 怎么读结果：
 - validate 大：每次读图都在做源文件校验（当前会整文件哈希）。
 - decode 大或 hit=false 多：正在生成缩略图，属于首次浏览或缓存失效。
-- permit 大：在等生成许可（并发上限为图片处理核心设置，1-4）。
+- permit 大：在等生成许可（并发上限为后台处理并行度，1–32）。
 - lookup 大：缓存命中路径的指纹与哈希校验偏慢（含网络盘/杀软扫描）。
-- 前端 durationMs 明显大于后端 total：差值来自 IPC 传输与序列化往返。
+- 前端 durationMs 明显大于后端 total：差值包含 IPC 传输、序列化与前端调度等待。
 
 性能日志默认在 %LOCALAPPDATA%\com.scenevault.desktop\logs\perf\perf-*.jsonl，不会出现在
 应用"历史 → 调试日志"面板里；主日志目录仍会被本脚本一并扫描（旧数据）。
@@ -91,10 +93,23 @@ function Format-Ms([double]$value) {
 
 $segments = @('total', 'guard', 'item', 'validate', 'settings', 'thumb', 'permit', 'lookup', 'decode', 'publish', 'read',
     'vstat', 'vread', 'vhash', 'vdb')
-$serverValues = @{}
-$clientValues = @{}
+$samples = @{}
 $fileCount = 0
 $recordCount = 0
+
+function Add-Sample([string]$SampleScope, [string]$Group, [string]$Segment, $Value, [string]$Unit = 'ms', [double]$Scale = 1) {
+    if ($null -eq $Value) { return }
+    $number = if ($Value -is [string]) { ConvertTo-Double $Value } else { [double]$Value }
+    if ($null -eq $number -or [double]::IsNaN($number) -or [double]::IsInfinity($number)) { return }
+    $key = "$SampleScope|$Group|$Segment|$Unit"
+    if (-not $samples.ContainsKey($key)) {
+        $samples[$key] = [pscustomobject]@{
+            Scope = $SampleScope; Group = $Group; Segment = $Segment; Unit = $Unit
+            Values = [System.Collections.Generic.List[double]]::new()
+        }
+    }
+    $samples[$key].Values.Add($number / $Scale)
+}
 
 # The performance records live in a dedicated perf/ subdirectory; the main
 # directory is still scanned so older data keeps working.
@@ -105,7 +120,7 @@ $scanFiles = foreach ($directory in $scanDirectories) {
 foreach ($file in $scanFiles) {
     $fileCount++
     foreach ($line in Get-Content -LiteralPath $file.FullName) {
-        if ($line -notmatch 'read_timing' -or $line -notmatch 'capture\.image') {
+        if ($line -notmatch 'read_timing|load_timing|archive_resize|archive_copy|archive_total|archive_fingerprint_saved|vision\.request|app\.resources') {
             continue
         }
         $record = $null
@@ -114,9 +129,7 @@ foreach ($file in $scanFiles) {
         } catch {
             continue
         }
-        if ($record.event -ne 'read_timing') { continue }
         $module = [string]$record.module
-        if ($module -notlike '*capture.image*') { continue }
         if ($since) {
             $stamp = $null
             try {
@@ -128,31 +141,66 @@ foreach ($file in $scanFiles) {
         }
         $recordCount++
         $values = ConvertTo-Values ([string]$record.message)
-        if ($module -eq 'capture.image') {
+        $variant = if ($values.ContainsKey('variant')) { $values['variant'] } else { 'unknown' }
+        $outcome = if ($record.outcome) { [string]$record.outcome } else { 'unknown' }
+        if ($module -eq 'capture.image' -and $record.event -eq 'read_timing') {
             $kind = 'thumb'
             if ($values.ContainsKey('kind')) { $kind = $values['kind'] }
             $hit = 'n/a'
             if ($values.ContainsKey('hit')) { $hit = $values['hit'] }
-            $group = "$kind hit=$hit"
-            if (-not $serverValues.ContainsKey($group)) { $serverValues[$group] = @{} }
+            $group = "$kind variant=$variant hit=$hit outcome=$outcome"
             foreach ($segment in $segments) {
                 if (-not $values.ContainsKey($segment)) { continue }
-                $number = ConvertTo-Double $values[$segment]
-                if ($null -eq $number) { continue }
-                if (-not $serverValues[$group].ContainsKey($segment)) {
-                    $serverValues[$group][$segment] = [System.Collections.Generic.List[double]]::new()
-                }
-                $serverValues[$group][$segment].Add($number)
+                Add-Sample 'server' $group $segment $values[$segment]
             }
-        } else {
+        } elseif ($module -eq 'ui.capture.image' -and $record.event -eq 'read_timing') {
             $operation = [string]$record.operationId
             if (-not $operation) { $operation = 'ui.capture.image' }
-            if (-not $clientValues.ContainsKey($operation)) {
-                $clientValues[$operation] = [System.Collections.Generic.List[double]]::new()
+            Add-Sample 'client' "$operation variant=$variant outcome=$outcome" 'duration' $record.durationMs
+        } elseif ($module -eq 'ui.capture.image' -and $record.event -eq 'load_timing') {
+            $group = "$($values['kind']) variant=$variant outcome=$outcome"
+            foreach ($segment in $values.Keys) {
+                if ($segment -like '*_ms') { Add-Sample 'client_load' $group $segment $values[$segment] }
             }
-            if ($null -ne $record.durationMs) {
-                $clientValues[$operation].Add([double]$record.durationMs)
+        } elseif ($module -eq 'vision.request') {
+            $group = "mode=$($values['mode']) outcome=$($values['outcome'])"
+            foreach ($segment in $values.Keys) {
+                if ($segment -like '*_ms') { Add-Sample 'vision' $group $segment $values[$segment] }
             }
+        } elseif ($module -eq 'capture.archive') {
+            $group = "$($record.event) kind=$($record.fileKind) policy=$($record.policy) outcome=$outcome"
+            Add-Sample 'archive' $group 'duration' $record.durationMs
+            if ($record.metrics) {
+                foreach ($metric in $record.metrics.PSObject.Properties) {
+                    Add-Sample 'archive' $group $metric.Name $metric.Value
+                }
+            }
+        } elseif ($module -eq 'app.resources' -and $record.event -eq 'process_sample') {
+            $processes = $record.metrics.processes
+            $details = $record.metrics.details
+            $groups = @($processes.groups) + @([pscustomobject]@{
+                role = 'total'; workingSetBytes = $processes.totalWorkingSetBytes
+                privateBytes = $processes.totalPrivateBytes; cpuPercent = $processes.totalCpuPercent
+            })
+            foreach ($group in $groups) {
+                Add-Sample 'resources' $group.role 'working_set' $group.workingSetBytes 'MiB' (1MB)
+                Add-Sample 'resources' $group.role 'private_bytes' $group.privateBytes 'MiB' (1MB)
+                Add-Sample 'resources' $group.role 'cpu' $group.cpuPercent '%'
+                Add-Sample 'resources' $group.role 'processes' $group.processCount 'count'
+            }
+            Add-Sample 'resources' 'rust' 'threads' $details.rustThreads 'count'
+            Add-Sample 'resources' 'rust' 'handles' $details.rustHandles 'count'
+            Add-Sample 'resources' 'rust' 'cpu_seconds' $details.rustCpuSeconds 's'
+            Add-Sample 'resources' 'system' 'free_memory' $details.systemFreePhysicalBytes 'MiB' (1MB)
+            Add-Sample 'resources' 'system' 'total_memory' $details.systemTotalPhysicalBytes 'MiB' (1MB)
+            Add-Sample 'sampler' 'process' 'duration' $record.durationMs
+        } elseif ($module -eq 'app.resources' -and $record.event -eq 'storage_sample') {
+            foreach ($entry in $record.metrics.entries) {
+                $group = "$($entry.kind) complete=$($entry.complete)"
+                Add-Sample 'storage' $group 'bytes' $entry.bytes 'MiB' (1MB)
+                Add-Sample 'storage' $group 'files' $entry.files 'count'
+            }
+            Add-Sample 'sampler' 'storage' 'duration' $record.durationMs
         }
     }
 }
@@ -161,36 +209,20 @@ Write-Output ("日志目录：{0}" -f $LogDirectory)
 Write-Output ("扫描文件：{0} 个；匹配记录：{1} 条" -f $fileCount, $recordCount)
 if ($recordCount -eq 0) {
     Write-Output ''
-    Write-Output '没有匹配记录。先在应用里浏览截图网格，再重跑本脚本；'
-    Write-Output '确认应用版本包含 capture.image / read_timing 打点（日志级别 debug）。'
+    Write-Output '没有匹配记录。确认性能日志开关已开启，并在应用中浏览、处理或归档图片；'
+    Write-Output '应用进程资源每 60 秒采样，缓存和数据库体积每 5 分钟采样。'
     return
 }
 
 $rows = [System.Collections.Generic.List[object]]::new()
-foreach ($group in ($serverValues.Keys | Sort-Object)) {
-    foreach ($segment in $segments) {
-        if (-not $serverValues[$group].ContainsKey($segment)) { continue }
-        $stats = Get-Stats $serverValues[$group][$segment]
-        if (-not $stats) { continue }
-        $rows.Add([pscustomobject]@{
-            Scope   = 'server'
-            Group   = $group
-            Segment = $segment
-            Count   = $stats.Count
-            Mean    = $stats.Mean
-            P50     = $stats.P50
-            P90     = $stats.P90
-            Max     = $stats.Max
-        })
-    }
-}
-foreach ($operation in ($clientValues.Keys | Sort-Object)) {
-    $stats = Get-Stats $clientValues[$operation]
+foreach ($sample in $samples.Values) {
+    $stats = Get-Stats $sample.Values
     if (-not $stats) { continue }
     $rows.Add([pscustomobject]@{
-        Scope   = 'client'
-        Group   = $operation
-        Segment = 'duration'
+        Scope   = $sample.Scope
+        Group   = $sample.Group
+        Segment = $sample.Segment
+        Unit    = $sample.Unit
         Count   = $stats.Count
         Mean    = $stats.Mean
         P50     = $stats.P50
@@ -207,13 +239,13 @@ if ($rows.Count -eq 0) {
 Write-Output ''
 $rows |
     Sort-Object Scope, Group, Segment |
-    Format-Table Scope, Group, Segment, Count,
+    Format-Table Scope, Group, Segment, Unit, Count,
         @{ Label = 'Mean'; Expression = { Format-Ms $_.Mean } },
         @{ Label = 'P50'; Expression = { Format-Ms $_.P50 } },
         @{ Label = 'P90'; Expression = { Format-Ms $_.P90 } },
         @{ Label = 'Max'; Expression = { Format-Ms $_.Max } } -AutoSize
 
-Write-Output '单位：毫秒。server 为 Rust 侧分段，client 为前端观测到的 invoke 往返耗时。'
+Write-Output '单位见 Unit 列。client 为 invoke 往返，client_load 为前端解码/显示就绪；resources/storage 为后台采样。'
 
 if ($Csv) {
     $rows | Sort-Object Scope, Group, Segment | Export-Csv -LiteralPath $Csv -NoTypeInformation -Encoding utf8

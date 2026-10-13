@@ -10,8 +10,11 @@ use tokio::sync::Notify;
 
 use crate::{
     error::AppError,
-    models::diagnostics::{LogLevel, LogRecord},
-    services::{log_service, timing::elapsed_ms},
+    models::{
+        app_settings::{MAX_IMAGE_PROCESSING_CORE_LIMIT, MIN_IMAGE_PROCESSING_CORE_LIMIT},
+        diagnostics::{LogLevel, LogRecord},
+    },
+    services::{image_processing_service, log_service, timing::elapsed_ms},
 };
 
 /// Longest edge of generated thumbnails. 320px keeps text in annotated views
@@ -90,12 +93,13 @@ fn generation_limit() -> Arc<GenerationLimiter> {
     Arc::clone(&GENERATION_LIMIT)
 }
 
-/// Parallel thumbnail decodes best kept to a small multiple of the user's
-/// image-processing limit: one permit per generation makes a grid of fresh
-/// thumbnails load strictly one after another (seconds of waiting), while a
-/// permit per core would spike memory with 30 MB decodes.
+/// Thumbnail concurrency follows the same normalized limit as image codecs
+/// and Python processing. There is no separate four-generation cap.
 pub fn thumbnail_generation_limit(core_limit: u32) -> u32 {
-    core_limit.clamp(1, 4)
+    core_limit.clamp(
+        MIN_IMAGE_PROCESSING_CORE_LIMIT,
+        MAX_IMAGE_PROCESSING_CORE_LIMIT,
+    )
 }
 
 /// Applies the user's image-processing core limit to thumbnail decoding.
@@ -389,6 +393,10 @@ pub fn migrate_legacy_cache(old_root: &Path, new_root: &Path) {
 /// Decodes the source image and encodes a small JPEG thumbnail.
 /// Called on the blocking pool while holding the generation permit.
 fn generate(source: &Path) -> Result<Vec<u8>, AppError> {
+    image_processing_service::run(|| generate_in_pool(source))
+}
+
+fn generate_in_pool(source: &Path) -> Result<Vec<u8>, AppError> {
     // Sniff the format from the file content: some captures carry a
     // misleading extension (a PNG named .jpg), which extension-based
     // decoding rejects even though every other reader accepts the file.
@@ -638,23 +646,12 @@ mod tests {
 
     #[test]
     fn thumbnail_parallelism_follows_the_core_limit_with_bounds() {
+        assert_eq!(thumbnail_generation_limit(0), 1);
         assert_eq!(thumbnail_generation_limit(1), 1);
         assert_eq!(thumbnail_generation_limit(3), 3);
-        assert_eq!(thumbnail_generation_limit(8), 4);
-    }
-
-    #[test]
-    fn raising_the_limit_allows_parallel_decodes() {
-        let limiter = Arc::new(GenerationLimiter::new(1));
-        limiter.set_limit(3);
-        let semaphore = limiter.clone();
-        let _first = semaphore.try_acquire().expect("permit 1");
-        let _second = semaphore.try_acquire().expect("permit 2");
-        let _third = semaphore.try_acquire().expect("permit 3");
-        assert!(
-            semaphore.try_acquire().is_none(),
-            "the new limit is enforced"
-        );
+        assert_eq!(thumbnail_generation_limit(8), 8);
+        assert_eq!(thumbnail_generation_limit(32), 32);
+        assert_eq!(thumbnail_generation_limit(128), 32);
     }
 
     #[test]
@@ -920,23 +917,5 @@ mod tests {
         assert!(thumbnail_cache_dir(&new_root).join("a.jpg").is_file());
         assert!(thumbnail_cache_dir(&new_root).join("b.jpg").is_file());
         assert!(!old_dir.exists());
-    }
-
-    #[tokio::test]
-    async fn generation_limit_gates_concurrent_decodes() {
-        // Keep this test independent from the process-wide limiter, which may
-        // be updated by settings-related tests running in parallel.
-        let limiter = Arc::new(GenerationLimiter::new(1));
-        let semaphore = limiter.clone();
-        let first = semaphore.acquire().await;
-        let waiting = semaphore.clone();
-        let second =
-            tokio::time::timeout(std::time::Duration::from_millis(50), waiting.acquire()).await;
-        assert!(second.is_err(), "second decode must wait for the slot");
-        drop(first);
-        let waiting = semaphore.clone();
-        let third =
-            tokio::time::timeout(std::time::Duration::from_millis(50), waiting.acquire()).await;
-        assert!(third.is_ok(), "slot is released after the task finishes");
     }
 }

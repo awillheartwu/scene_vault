@@ -6,6 +6,8 @@ const { api, pickFile, pickDirectory, openDirectoryExternal, revealPath, leaveGu
   api: {
     getVisionSettings: vi.fn(),
     getAppSettings: vi.fn(),
+    getRenpyScreenshotSettings: vi.fn(),
+    updateRenpyScreenshotSettings: vi.fn(),
     getThumbnailCacheStatus: vi.fn(),
     getArchiveNamingSettings: vi.fn(),
     getArchiveOutputSettings: vi.fn(),
@@ -180,6 +182,8 @@ beforeEach(() => {
   api.runtimeStatus.mockResolvedValue({ engineStatus: "unconfigured", workerStatus: "idle" });
   api.getVisionSettings.mockResolvedValue({ ...visionSettings });
   api.getAppSettings.mockResolvedValue({ ...appSettings });
+  api.getRenpyScreenshotSettings.mockReset().mockResolvedValue({ autoHideUi: false });
+  api.updateRenpyScreenshotSettings.mockReset().mockImplementation(async (settings: { autoHideUi: boolean }) => ({ ...settings }));
   api.getThumbnailCacheStatus.mockResolvedValue({ ...cacheStatus });
   api.getArchiveNamingSettings.mockResolvedValue({ ...namingSettings });
   api.getArchiveOutputSettings.mockResolvedValue({ size: "keep" });
@@ -244,7 +248,7 @@ describe("Settings category navigation", () => {
     ]);
     expect(tabs[0].attributes("aria-selected")).toBe("true");
     expect(page.findAll('[role="tabpanel"]')).toHaveLength(6);
-    expect(page.findAll("form")).toHaveLength(5);
+    expect(page.findAll("form")).toHaveLength(6);
 
     expect(page.get("#classify-shortcut").isVisible()).toBe(true);
     expect(page.get("#naming-template").isVisible()).toBe(false);
@@ -415,6 +419,153 @@ describe("Settings category navigation", () => {
 
     expect(wrapper.text()).toContain("内置引擎（bundled sidecar）已就绪");
     expect(wrapper.text()).toContain("无需配置 Python");
+  });
+});
+
+describe("Settings global Ren'Py screenshot settings", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  it("saves the separate default without saving or clearing another general draft", async () => {
+    const page = mountSettings();
+    await flushPromises();
+    expect((page.get("#renpy-auto-hide-ui").element as HTMLInputElement).checked).toBe(false);
+    expect(page.get(".renpy-screenshot-global").text()).toContain("已有选择保留，可按项目或游戏覆盖");
+    await page.get("#classify-shortcut").setValue("Ctrl+Shift+X");
+    await page.get("#renpy-auto-hide-ui").setValue(true);
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    await flushPromises();
+
+    expect(api.updateRenpyScreenshotSettings).toHaveBeenCalledWith({ autoHideUi: true });
+    expect(api.updateAppSettings).not.toHaveBeenCalled();
+    expect(api.updateProcessingSettings).not.toHaveBeenCalled();
+    expect(page.get(".renpy-screenshot-status").text()).toContain("启用");
+    expect(page.get("#settings-tab-general").text()).toContain("未保存");
+    expect(toast.success).toHaveBeenCalledWith(
+      "全局截图设置已保存；仅跟随全局的项目及其继承游戏会自动应用。",
+    );
+
+    await page.get("#settings-pane-general form:not(.renpy-screenshot-global)").trigger("submit");
+    await flushPromises();
+    expect(page.get("#settings-tab-general").text()).not.toContain("未保存");
+  });
+
+  it("saving general settings leaves the screenshot draft dirty and does not persist it", async () => {
+    const page = mountSettings();
+    await flushPromises();
+    await page.get("#renpy-auto-hide-ui").setValue(true);
+    await page.get("#settings-pane-general form:not(.renpy-screenshot-global)").trigger("submit");
+    await flushPromises();
+    expect(api.updateRenpyScreenshotSettings).not.toHaveBeenCalled();
+    expect(page.get("#settings-tab-general").text()).toContain("未保存");
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    await flushPromises();
+    expect(page.get("#settings-tab-general").text()).not.toContain("未保存");
+  });
+
+  it("blocks edits until the separate load succeeds and retries without blocking other settings", async () => {
+    api.getRenpyScreenshotSettings.mockRejectedValueOnce(new Error("读取失败"));
+    const page = mountSettings();
+    await flushPromises();
+    const form = page.get(".renpy-screenshot-global");
+    expect(page.get("#renpy-auto-hide-ui").attributes("disabled")).toBeDefined();
+    expect(form.get('[role="alert"]').text()).toContain("截图设置加载失败：读取失败");
+    expect(form.get('button[type="submit"]').attributes("disabled")).toBeDefined();
+    expect(page.get("#classify-shortcut").attributes("disabled")).toBeUndefined();
+    expect(page.get("#settings-tab-general").text()).not.toContain("未保存");
+
+    api.getRenpyScreenshotSettings.mockResolvedValueOnce({ autoHideUi: true });
+    await form.get('button[type="button"]').trigger("click");
+    await flushPromises();
+    expect(api.getRenpyScreenshotSettings).toHaveBeenCalledTimes(2);
+    expect(page.get("#renpy-auto-hide-ui").attributes("disabled")).toBeUndefined();
+    expect((page.get("#renpy-auto-hide-ui").element as HTMLInputElement).checked).toBe(true);
+    expect(form.find('[role="alert"]').exists()).toBe(false);
+    expect(page.get("#settings-tab-general").text()).not.toContain("未保存");
+  });
+
+  it("retains the saved value and dirty draft after a failed save, then retries independently", async () => {
+    api.updateRenpyScreenshotSettings.mockRejectedValueOnce(new Error("写入失败"));
+    const page = mountSettings();
+    await flushPromises();
+    await page.get("#renpy-auto-hide-ui").setValue(true);
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    await flushPromises();
+
+    expect(page.get(".renpy-screenshot-global [role=alert]").text()).toContain("写入失败");
+    expect(page.get(".renpy-screenshot-status").text()).toContain("已保存的全局默认：关闭");
+    expect((page.get("#renpy-auto-hide-ui").element as HTMLInputElement).checked).toBe(true);
+    expect(page.get("#settings-tab-general").text()).toContain("未保存");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    expect(leaveGuard.current?.()).toBe(false);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
+
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    await flushPromises();
+    expect(api.updateRenpyScreenshotSettings).toHaveBeenCalledTimes(2);
+    expect(page.find(".renpy-screenshot-global [role=alert]").exists()).toBe(false);
+    expect(page.get(".renpy-screenshot-status").text()).toContain("启用");
+    expect(page.get("#settings-tab-general").text()).not.toContain("未保存");
+    confirm.mockClear();
+    expect(leaveGuard.current?.()).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps the saved baseline when a returned save did not persist the requested choice", async () => {
+    api.updateRenpyScreenshotSettings.mockResolvedValueOnce({ autoHideUi: false });
+    const page = mountSettings();
+    await flushPromises();
+    await page.get("#renpy-auto-hide-ui").setValue(true);
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    await flushPromises();
+    expect(page.get(".renpy-screenshot-global [role=alert]").text()).toContain("未保存");
+    expect(page.get(".renpy-screenshot-status").text()).toContain("关闭");
+    expect(page.get("#settings-tab-general").text()).toContain("未保存");
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("serializes saves, keeps the screenshot draft across categories and protects window close", async () => {
+    const pending = deferred<{ autoHideUi: boolean }>();
+    api.updateRenpyScreenshotSettings.mockReturnValueOnce(pending.promise);
+    const page = mountSettings();
+    await flushPromises();
+    await page.get("#renpy-auto-hide-ui").setValue(true);
+    await page.get("#settings-tab-naming").trigger("click");
+    await page.get("#settings-tab-general").trigger("click");
+    expect((page.get("#renpy-auto-hide-ui").element as HTMLInputElement).checked).toBe(true);
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    expect(api.updateRenpyScreenshotSettings).toHaveBeenCalledTimes(1);
+    expect(page.get("#renpy-auto-hide-ui").attributes("disabled")).toBeDefined();
+    pending.resolve({ autoHideUi: true });
+    await flushPromises();
+    const clean = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+  });
+
+  it.each(["success", "failure"])("ignores a late save %s after unmount", async (outcome) => {
+    const pending = deferred<{ autoHideUi: boolean }>();
+    api.updateRenpyScreenshotSettings.mockReturnValueOnce(pending.promise);
+    const page = mountSettings();
+    await flushPromises();
+    await page.get("#renpy-auto-hide-ui").setValue(true);
+    await page.get(".renpy-screenshot-global").trigger("submit");
+    page.unmount();
+    wrapper = null;
+    if (outcome === "success") pending.resolve({ autoHideUi: true });
+    else pending.reject(new Error("迟到失败"));
+    await flushPromises();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
   });
 });
 

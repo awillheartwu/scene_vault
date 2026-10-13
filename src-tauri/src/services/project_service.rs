@@ -212,6 +212,16 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, AppError> {
 }
 
 pub async fn list_overviews(pool: &SqlitePool) -> Result<Vec<ProjectOverviewSummary>, AppError> {
+    // Version enrichment is optional and bounded, so an offline game folder
+    // cannot hold the project list open indefinitely.
+    if let Ok(Err(error)) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::renpy_bridge_service::refresh_missing_engine_versions(pool),
+    )
+    .await
+    {
+        super::log_service::warn("engine.version", format!("version refresh failed: {error}"));
+    }
     let global = crate::services::archive_output_settings_service::get(pool).await?;
     let summaries = sqlx::query_as::<_, ProjectOverviewSummary>(
         r#"

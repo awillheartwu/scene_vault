@@ -36,7 +36,7 @@ export function destinationFileIssueLabel(
   state?: CaptureDestinationFileState,
 ): string | null {
   if (state === "missing") return "归档图缺失";
-  if (state === "unavailable") return "归档位置不可访问";
+  if (state === "unavailable") return "归档图不可用";
   return null;
 }
 
@@ -44,7 +44,7 @@ export function avatarFileIssueLabel(
   state?: CaptureDestinationFileState,
 ): string | null {
   if (state === "missing") return "头像归档缺失";
-  if (state === "unavailable") return "头像归档不可访问";
+  if (state === "unavailable") return "头像归档不可用";
   return null;
 }
 

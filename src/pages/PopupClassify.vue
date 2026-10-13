@@ -3,6 +3,7 @@ import { isOlderCapture } from "@/lib/capture-api";
 import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
 import CharacterAvatar from '@/components/character/CharacterAvatar.vue';
 import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
+import { useCapturePreview } from '@/composables/useCapturePreview';
 import { parseFaceBox } from "@/lib/face-box";
 import {
   characterMatchesSpeaker,
@@ -11,8 +12,11 @@ import {
 } from "@/lib/speaker-suggestion";
 import { describeError } from "@/lib/vision-errors";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-defineProps<{ embedded?: boolean }>();
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+const props = defineProps<{ embedded?: boolean }>();
+const emit = defineEmits<{
+  "project-context": [context: { projectId: string | null; projectName: string | null }];
+}>();
+import { useTauriEventListeners } from "@/composables/useTauriEventListeners";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -35,7 +39,6 @@ import {
 import {
   captureApi,
   engineApi,
-  pathMimeType,
   type CaptureClassification,
   type CaptureEngineMetadata,
   type CaptureImageFacts,
@@ -46,17 +49,23 @@ import {
 } from "@/lib/capture-api";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CaptureEngineChips from "@/components/capture/CaptureEngineChips.vue";
+import RenpyBadge from "@/components/capture/RenpyBadge.vue";
+import { useProjectEngineBadges } from "@/composables/useProjectEngineBadges";
 
 const ctx = ref<ClassifyPopupContext | null>(null);
+const { engineVersions, refreshEngineBadges } = useProjectEngineBadges();
+watch(() => [ctx.value?.projectId, ctx.value?.projectName], () => {
+  if (ctx.value) emit("project-context", { projectId: ctx.value.projectId, projectName: ctx.value.projectName });
+});
 const currentIndex = ref(0);
 const mode = ref<"choose" | "person">("choose");
 const selectedCharacterId = ref<string | null>(null);
 const engineMetadata = ref<CaptureEngineMetadata | null>(null);
 const imageFacts = ref<CaptureImageFacts | null>(null);
 let engineMetadataRequest = 0;
+let imageFactsRequest = 0;
 const search = ref("");
 const newName = ref("");
-const previewUrl = ref<string | null>(null);
 const busy = ref(false);
 const errorMessage = ref("");
 const autoCloseEmpty = ref(false);
@@ -66,10 +75,16 @@ const pendingVerification = ref<{
   result: VerificationResult;
 } | null>(null);
 let emptyTimer: ReturnType<typeof setTimeout> | null = null;
-let previewRequest = 0;
-const unlisteners: UnlistenFn[] = [];
+const { listen, isActive } = useTauriEventListeners();
+let contextRequest = 0;
+let settingsRequest = 0;
 
 const currentItem = computed(() => ctx.value?.items[currentIndex.value] ?? null);
+const { url: previewUrl, loading: previewLoading, unavailable: previewUnavailable, load: loadPreview } = useCapturePreview(
+  currentItem,
+  () => "source",
+  message => { errorMessage.value = message; },
+);
 // The last detected primary face drives the default framing box, exactly like
 // the capture page.
 const detectedFaceBox = computed(() => parseFaceBox(currentItem.value?.faceBoxJson));
@@ -120,25 +135,37 @@ async function loadEngineMetadata() {
   const item = currentItem.value;
   const token = ++engineMetadataRequest;
   engineMetadata.value = null;
+  if (!item) return;
+  try {
+    const metadata = await engineApi.getCaptureMetadata(item.id);
+    if (token !== engineMetadataRequest || currentItem.value?.id !== item.id) return;
+    engineMetadata.value = metadata;
+  } catch {
+    if (token === engineMetadataRequest && currentItem.value?.id === item.id) {
+      engineMetadata.value = null;
+    }
+  }
+}
+
+async function loadImageFacts() {
+  const item = currentItem.value;
+  const token = ++imageFactsRequest;
   imageFacts.value = null;
   if (!item) return;
   try {
-    const [metadata, facts] = await Promise.allSettled([
-      engineApi.getCaptureMetadata(item.id),
-      Promise.resolve().then(() => captureApi.getCaptureImageFacts(item.id)),
-    ]);
-    if (token !== engineMetadataRequest || currentItem.value?.id !== item.id) return;
-    engineMetadata.value = metadata.status === "fulfilled" ? metadata.value : null;
-    imageFacts.value = facts.status === "fulfilled" ? facts.value : null;
+    const facts = await captureApi.getCaptureImageFacts(item.id);
+    if (token === imageFactsRequest && currentItem.value?.id === item.id) {
+      imageFacts.value = facts;
+    }
   } catch {
-    if (token === engineMetadataRequest) {
-      engineMetadata.value = null;
+    if (token === imageFactsRequest && currentItem.value?.id === item.id) {
       imageFacts.value = null;
     }
   }
 }
 
 watch(() => currentItem.value?.id, () => void loadEngineMetadata(), { immediate: true });
+watch(() => currentItem.value, () => void loadImageFacts(), { immediate: true });
 
 const characters = computed(() => {
   if (!ctx.value) return [];
@@ -149,6 +176,11 @@ const characters = computed(() => {
 });
 
 async function load() {
+  if (!isActive()) return;
+  const request = ++contextRequest;
+  const settingsToken = ++settingsRequest;
+  const isCurrent = () => isActive() && request === contextRequest;
+  cancelAutoClose();
   busy.value = true;
   errorMessage.value = "";
   try {
@@ -156,50 +188,43 @@ async function load() {
       captureApi.classifyPopupContext(),
       captureApi.getAppSettings().catch(() => null),
     ]);
+    if (!isActive()) return;
+    // A queue refresh can supersede this load while its settings read is
+    // still the newest one. Apply the setting to the current queue only.
+    if (settingsToken === settingsRequest) {
+      autoCloseEmpty.value = appSettings?.autoCloseEmptyPopup ?? false;
+      if (!autoCloseEmpty.value) cancelAutoClose();
+    }
+    if (!isCurrent()) {
+      scheduleAutoClose();
+      return;
+    }
     ctx.value = context;
-    autoCloseEmpty.value = appSettings?.autoCloseEmptyPopup ?? false;
     currentIndex.value = 0;
     mode.value = "choose";
     selectedCharacterId.value = null;
     search.value = "";
     if (!ctx.value?.items.length) {
       scheduleAutoClose();
+    } else {
+      cancelAutoClose();
     }
   } catch (error) {
-    errorMessage.value = normalizeError(error);
-    console.error("[popup] load failed:", error);
+    if (isCurrent()) {
+      errorMessage.value = normalizeError(error);
+      console.error("[popup] load failed:", error);
+    }
   } finally {
-    busy.value = false;
-  }
-}
-
-async function loadPreview() {
-  const request = ++previewRequest;
-  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
-  previewUrl.value = null;
-  const item = currentItem.value;
-  if (!item) return;
-  try {
-    const bytes = await captureApi.readImage(item.id, "source");
-    const nextUrl = URL.createObjectURL(
-      new Blob([bytes], { type: pathMimeType(item.sourcePath) }),
-    );
-    if (request !== previewRequest) {
-      URL.revokeObjectURL(nextUrl);
-      return;
-    }
-    previewUrl.value = nextUrl;
-  } catch (error) {
-    if (request !== previewRequest) return;
-    errorMessage.value = normalizeError(error);
+    if (isCurrent()) busy.value = false;
   }
 }
 
 function scheduleAutoClose() {
-  if (!autoCloseEmpty.value) return;
+  if (!isActive() || !autoCloseEmpty.value || ctx.value?.items.length !== 0) return;
   if (emptyTimer) return;
   emptyTimer = setTimeout(() => {
     emptyTimer = null;
+    if (!isActive() || !autoCloseEmpty.value || busy.value || ctx.value?.items.length !== 0) return;
     void close();
   }, 3000);
 }
@@ -222,11 +247,11 @@ function choosePerson() {
 // suggestion remains if the refresh fails.
 async function refreshCurrentSuggestion() {
   const item = currentItem.value;
-  if (!item || busy.value || roiBusy.value || roiBlocked.value) return;
+  if (!isActive() || !item || busy.value || roiBusy.value || roiBlocked.value) return;
   const revision = roiRevision.value;
   try {
     const updated = await captureApi.suggestForCapture(item.id);
-    if (revision !== roiRevision.value || currentItem.value?.id !== item.id) return;
+    if (!isActive() || revision !== roiRevision.value || currentItem.value?.id !== item.id) return;
     const ctxValue = ctx.value;
     if (!ctxValue) return;
     const index = ctxValue.items.findIndex((entry) => entry.id === updated.id);
@@ -278,14 +303,16 @@ function finishAll() {
 
 // Refresh the queue in place when a new screenshot is discovered, without
 // resetting the user's current selection or the character input.
-let refreshRequest = 0;
 async function refreshItems() {
-  const request = ++refreshRequest;
+  if (!isActive()) return;
+  const request = ++contextRequest;
+  const isCurrent = () => isActive() && request === contextRequest;
+  cancelAutoClose();
   busy.value = true;
   errorMessage.value = "";
   try {
     const context = await captureApi.classifyPopupContext();
-    if (request !== refreshRequest) return;
+    if (!isCurrent()) return;
     const selectedId = currentItem.value?.id;
     ctx.value = context;
     const selectedIndex = context.items.findIndex(item => item.id === selectedId);
@@ -299,13 +326,14 @@ async function refreshItems() {
       scheduleAutoClose();
     }
   } catch (error) {
-    errorMessage.value = normalizeError(error);
+    if (isCurrent()) errorMessage.value = normalizeError(error);
   } finally {
-    busy.value = false;
+    if (isCurrent()) busy.value = false;
   }
 }
 
 async function commit(classification: CaptureClassification, characterId: string | null = null) {
+  if (!isActive()) return;
   if (classification === "person" && (roiBusy.value || roiBlocked.value || roiLoading.value)) return;
   const item = currentItem.value;
   if (!item || busy.value) return;
@@ -313,6 +341,7 @@ async function commit(classification: CaptureClassification, characterId: string
   errorMessage.value = "";
   try {
     await captureApi.label(item.id, characterId, classification);
+    if (!isActive()) return;
     removeItem(item.id);
     if (ctx.value?.items.length) {
       // Keep working through the queue: switch to the next capture instead of
@@ -329,6 +358,7 @@ async function commit(classification: CaptureClassification, characterId: string
 }
 
 async function submitCharacter(character: Character) {
+  if (!isActive()) return;
   if (roiBusy.value || roiBlocked.value || roiLoading.value) return;
   const revision = roiRevision.value;
   const item = currentItem.value;
@@ -340,7 +370,7 @@ async function submitCharacter(character: Character) {
       captureItemId: item.id,
       characterId: character.id,
     });
-    if (currentItem.value?.id !== item.id || revision !== roiRevision.value) return;
+    if (!isActive() || currentItem.value?.id !== item.id || revision !== roiRevision.value) return;
     if (result.level === "ok" || result.level === "unverified") {
       busy.value = false;
       await commit("person", character.id);
@@ -406,6 +436,7 @@ async function createAndSubmit() {
   errorMessage.value = "";
   try {
     const character = await captureApi.createCharacter(projectId, name);
+    if (!isActive()) return;
     newName.value = "";
     // Keep the picker fresh: without this the newly created character would
     // only appear after a full context reload, so the next capture's list
@@ -441,6 +472,7 @@ async function createFromSpeakerAndSubmit() {
   errorMessage.value = "";
   try {
     const character = await captureApi.createCharacter(projectId, name);
+    if (!isActive()) return;
     // Only merge into the list the create belonged to; a context reload for
     // another project must not receive a character that is not its own.
     if (ctx.value?.projectId === projectId) {
@@ -464,13 +496,15 @@ async function createFromSpeakerAndSubmit() {
 }
 
 async function close() {
+  if (!isActive()) return;
+  cancelAutoClose();
   try {
     // Hide instead of destroy: a destroyed popup window would leave the
     // manager, so the global shortcut could no longer find it. A hidden
     // window is instantly re-shown on the next shortcut press.
     await getCurrentWindow().hide();
   } catch {
-    window.close();
+    if (isActive()) window.close();
   }
 }
 
@@ -524,95 +558,90 @@ function normalizeError(error: unknown): string {
   return describeError(error);
 }
 
-watch(
-  () => currentItem.value?.id,
-  () => void loadPreview(),
-);
-
 onMounted(async () => {
   // The shared bundle sets body { min-width: 1080px } for the main window;
   // the popup is only ~460px wide, so neutralize it here or content gets
   // pushed off to the right.
   document.body.style.minWidth = "0";
+  if (!props.embedded) void refreshEngineBadges();
   void syncPinState();
   window.addEventListener("keydown", onKeydown);
   try {
-    unlisteners.push(
-      await listen("classify:refresh", () => {
-        void load();
-      }),
-      await listen<CaptureItem>("capture:item-updated", (event) => {
-        const updated = event.payload;
-        if (!updated?.id || !ctx.value) return;
-        const index = ctx.value.items.findIndex((item) => item.id === updated.id);
-        if (index < 0) {
-          if (updated.projectId === ctx.value.projectId && updated.status === 'awaiting_label' && updated.classification === 'unclassified') { ctx.value.items.push(updated); cancelAutoClose(); }
-          return;
-        }
-        if (isOlderCapture(updated, ctx.value.items[index])) return;
-        // Feature/suggestion updates keep the capture in the queue: refresh
-        // it in place so a fresh recommendation shows up. Only a capture
-        // that was actually classified (or reclassified) elsewhere leaves
-        // the queue.
-        if (updated.status === "awaiting_label" && updated.classification === "unclassified") {
-          const items = [...ctx.value.items];
-          items[index] = updated;
-          ctx.value = { ...ctx.value, items };
-          return;
-        }
-        removeItem(updated.id);
-        if (!ctx.value?.items.length) {
-          finishAll();
-        } else {
-          resetSelection();
-          void loadPreview();
-        }
-      }),
-      await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
-        const purgedId = event.payload.captureItemId;
-        if (!ctx.value) return;
-        removeItem(purgedId);
-        if (!ctx.value.items.length) {
-          finishAll();
-        } else {
-          resetSelection();
-          void loadPreview();
-        }
-      }),
-      await listen("capture:item-created", () => {
-        // A new screenshot arrived (Rust discovery event, push-based): make it
-        // appear in the open popup immediately.
-        void refreshItems();
-      }),
-      await listen("capture:face-bank-rebuilt", () => {
-        // Suggestions were refreshed for many captures; reload the queue so
-        // pending recommendations show up without reopening the popup.
-        void refreshItems();
-      }),
-      await listen<{ captureItemId: string }>("capture:engine-metadata-updated", (event) => {
-        // The sidecar can land just after the PNG; the retry pass attaches it
-        // later. Re-read only when this is the capture on screen.
-        if (currentItem.value?.id === event.payload.captureItemId) void loadEngineMetadata();
-      }),
-    );
+    await listen("classify:refresh", () => {
+      if (!props.embedded) void refreshEngineBadges();
+      void load();
+    });
+    await listen<{ projectId: string }>("capture:project-files-updated", (event) => {
+      if (event.payload.projectId === ctx.value?.projectId) void refreshItems();
+    });
+    await listen<CaptureItem>("capture:item-updated", (event) => {
+      const updated = event.payload;
+      if (!updated?.id || !ctx.value) return;
+      const index = ctx.value.items.findIndex((item) => item.id === updated.id);
+      if (index < 0) {
+        if (updated.projectId === ctx.value.projectId && updated.status === 'awaiting_label' && updated.classification === 'unclassified') { ctx.value.items.push(updated); cancelAutoClose(); }
+        return;
+      }
+      if (isOlderCapture(updated, ctx.value.items[index])) return;
+      // Feature/suggestion updates keep the capture in the queue: refresh
+      // it in place so a fresh recommendation shows up. Only a capture
+      // that was actually classified (or reclassified) elsewhere leaves
+      // the queue.
+      if (updated.status === "awaiting_label" && updated.classification === "unclassified") {
+        const items = [...ctx.value.items];
+        items[index] = updated;
+        ctx.value = { ...ctx.value, items };
+        return;
+      }
+      removeItem(updated.id);
+      if (!ctx.value?.items.length) {
+        finishAll();
+      } else {
+        resetSelection();
+        void loadPreview();
+      }
+    });
+    await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
+      const purgedId = event.payload.captureItemId;
+      if (!ctx.value) return;
+      removeItem(purgedId);
+      if (!ctx.value.items.length) {
+        finishAll();
+      } else {
+        resetSelection();
+        void loadPreview();
+      }
+    });
+    await listen("capture:item-created", () => {
+      // A new screenshot arrived (Rust discovery event, push-based): make it
+      // appear in the open popup immediately.
+      void refreshItems();
+    });
+    await listen("capture:face-bank-rebuilt", () => {
+      // Suggestions were refreshed for many captures; reload the queue so
+      // pending recommendations show up without reopening the popup.
+      void refreshItems();
+    });
+    await listen<{ captureItemId: string }>("capture:engine-metadata-updated", (event) => {
+      // The sidecar can land just after the PNG; the retry pass attaches it
+      // later. Re-read only when this is the capture on screen.
+      if (currentItem.value?.id === event.payload.captureItemId) void loadEngineMetadata();
+    });
   } catch {
     // Browser previews do not expose the Tauri event bridge.
     console.error("[popup] event bridge unavailable");
   }
-  await load();
+  if (isActive()) await load();
 });
 
 onBeforeUnmount(() => {
-  refreshRequest++;
-  previewRequest += 1;
-  if (emptyTimer) {
-    clearTimeout(emptyTimer);
-    emptyTimer = null;
-  }
+  engineMetadataRequest++;
+  imageFactsRequest++;
+  contextRequest++;
+  settingsRequest++;
+  cancelAutoClose();
   document.body.style.minWidth = "";
   window.removeEventListener("keydown", onKeydown);
-  unlisteners.forEach((unlisten) => unlisten());
-  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
 });
 </script>
 
@@ -621,10 +650,9 @@ onBeforeUnmount(() => {
     <header v-if="!embedded" class="popup-header" data-tauri-drag-region="deep">
       <div class="popup-title" data-tauri-drag-region="deep">
         <span class="popup-dot" />
-        <strong>{{ ctx?.projectName ?? "Scene Vault" }}</strong>
-        <span v-if="currentItem" class="popup-sub">
-          {{ ctx?.items.length ? `${currentIndex + 1}/${ctx.items.length}` : "待分类截图" }}
-        </span>
+        <strong>Scene Vault</strong>
+        <RenpyBadge v-if="ctx?.projectId && engineVersions[ctx.projectId]" :versions="engineVersions[ctx.projectId]" />
+        <span class="popup-sub" :title="ctx?.projectName ?? undefined">{{ ctx?.projectName ?? "截图分类" }}</span>
       </div>
       <button
         type="button"
@@ -646,16 +674,16 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else-if="currentItem">
-      <div :class="['popup-preview', { compact: mode === 'person' }]">
-        <FaceRoiSelector inline v-if="mode === 'person' && currentItem && currentItem.status === 'awaiting_label' && currentItem.classification === 'unclassified'" v-model:editing="framing" :item-id="currentItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :mode="currentItem.faceDetectionMode === 'normalized' ? 'normalized' : 'auto'" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
-      <img v-else-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
-        <div v-else class="popup-preview-empty"><ImageOff :size="28" /><span>无法加载预览</span></div>
+      <div class="popup-image-heading">
+        <span class="popup-image-label">待分类截图</span>
+        <CaptureEngineChips :engine-metadata="engineMetadata" :image-facts="imageFacts" />
       </div>
-      <CaptureEngineChips
-        class="popup-engine-chips"
-        :engine-metadata="engineMetadata"
-        :image-facts="imageFacts"
-      />
+      <div :class="['popup-preview', { compact: mode === 'person' }]">
+        <FaceRoiSelector inline v-if="mode === 'person' && currentItem && currentItem.status === 'awaiting_label' && currentItem.classification === 'unclassified'" v-model:editing="framing" :item-id="currentItem.id" :image-url="previewUrl" :image-error="previewUnavailable" :model-value="faceRoi" :face-box="detectedFaceBox" :mode="currentItem.faceDetectionMode === 'normalized' ? 'normalized' : 'auto'" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading || previewLoading" :error="roiError" @confirm="saveFaceRoi" />
+      <img v-else-if="previewUrl" :src="previewUrl" alt="待分类截图预览" />
+        <div v-else-if="previewLoading" class="popup-preview-empty" role="status"><LoaderCircle class="animate-spin" :size="28" /><span>正在加载图片…</span></div>
+        <div v-else class="popup-preview-empty"><ImageOff :size="28" /><span>{{ previewUnavailable || '无法加载预览' }}</span></div>
+      </div>
       <CaptureProgress persistent />
 
       <div v-if="ctx && ctx.items.length > 1" class="popup-nav">
@@ -841,10 +869,9 @@ onBeforeUnmount(() => {
 }
 
 .popup-title strong {
-  overflow: hidden;
+  flex: none;
   font-weight: 700;
   letter-spacing: 0.04em;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -858,13 +885,12 @@ onBeforeUnmount(() => {
 }
 
 .popup-sub {
-  flex: none;
-  padding: 2px 8px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--warn) 20%, var(--card));
-  color: var(--warn);
-  font-size: 11px;
-  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .popup-close,
@@ -953,10 +979,23 @@ onBeforeUnmount(() => {
   box-shadow: var(--card-shadow), var(--inner-highlight);
 }
 
-.popup-engine-chips {
+.popup-image-heading {
+  display: flex;
   flex: none;
-  margin: 8px 14px 0;
-  justify-content: flex-start;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.popup-image-label { flex: none; }
+.popup-image-heading :deep(.engine-chips) { min-width: 0; flex: 1; }
+
+@media (max-width: 360px) {
+  .popup-header { height: auto; min-height: 48px; padding-top: 7px; padding-bottom: 7px; }
+  .popup-title { flex-wrap: wrap; gap: 4px 7px; }
+  .popup-sub { flex-basis: 100%; }
 }
 
 .popup-preview.compact {

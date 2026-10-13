@@ -6,6 +6,34 @@ use uuid::Uuid;
 use super::*;
 
 #[test]
+fn performance_snapshot_can_cancel_a_partial_walk_without_deleting_files() {
+    let workspace = tempdir().unwrap();
+    let logs = workspace.path().join("logs");
+    fs::create_dir_all(logs.join("nested")).unwrap();
+    fs::write(logs.join("current.jsonl"), b"current").unwrap();
+    fs::write(logs.join("nested/archive.jsonl"), b"archive").unwrap();
+    let paths = vec![("logs".to_owned(), logs.clone())];
+    let enabled = performance_snapshot(&paths, || true);
+    assert_eq!(enabled["entries"][0]["bytes"], 14);
+    assert_eq!(enabled["entries"][0]["files"], 2);
+    assert_eq!(enabled["entries"][0]["complete"], true);
+    let checks = std::cell::Cell::new(0);
+    let disabled = performance_snapshot(&paths, || {
+        checks.set(checks.get() + 1);
+        checks.get() < 3
+    });
+    assert!(
+        disabled.is_null(),
+        "a disabled monitor must not publish a partial sample"
+    );
+    assert_eq!(fs::read(logs.join("current.jsonl")).unwrap(), b"current");
+    assert_eq!(
+        fs::read(logs.join("nested/archive.jsonl")).unwrap(),
+        b"archive"
+    );
+}
+
+#[test]
 fn scan_counts_files_recursively_and_tolerates_missing_paths() {
     let workspace = tempdir().expect("tempdir");
     let database_path = workspace.path().join("scene-vault.db");

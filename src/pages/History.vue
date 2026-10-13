@@ -5,6 +5,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Archive, ExternalLink, Eye, EyeOff, FileClock, Filter, Image, RefreshCw, Sparkles, Trash2, UserRound } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
+import ProjectSelect from "@/components/project/ProjectSelect.vue";
+import { useProjectEngineBadges } from "@/composables/useProjectEngineBadges";
 import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
 import {
   captureFileIssues,
@@ -20,28 +22,25 @@ import { useContextMenu, type ContextMenuItem } from "@/composables/useContextMe
 import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 import {
   captureApi,
-  engineApi,
   captureStatusLabel,
   pathFileName,
   revealPath,
   type CaptureSession,
   type Character,
   type CaptureHistoryEntry,
-  type CaptureEngineMetadata,
   type Project,
 } from "@/lib/capture-api";
 import {
   describeArchiveImage,
   describeSourceImage,
   formatResolution,
-  renpyBadgeLabel,
-  renpyBadgeTitle,
 } from "@/lib/image-facts";
 
 const { isWideLayout } = useAdaptiveLayout();
 const CURRENT_PROJECT_KEY = "scene-vault.capture.project";
 
 const projects = ref<Project[]>([]);
+const { engineVersions, refreshEngineBadges } = useProjectEngineBadges();
 const sessions = ref<CaptureSession[]>([]);
 const characters = ref<Character[]>([]);
 const projectId = ref("");
@@ -60,6 +59,7 @@ const showPrivate = ref(false);
 const activeView = ref<"captures" | "logs">("captures");
 const entryMenu = useContextMenu();
 const unlisteners: UnlistenFn[] = [];
+let componentActive = true;
 const deleteTarget = ref<CaptureHistoryEntry | null>(null);
 const resetActions = ref<InstanceType<typeof CaptureResetActions> | null>(null);
 const resetSelectedIds = ref<string[]>([]);
@@ -70,35 +70,6 @@ watch([projectId, sessionId, characterId, status, showPrivate], () => { resetSel
 const selected = computed(() => entries.value.find((entry) => entry.id === selectedId.value) ?? entries.value[0] ?? null);
 const filtered = computed(() => entries.value);
 
-// The engine badge needs one extra read for the selected row only; the file
-// facts already arrive with the list entries.
-const selectedEngineMetadata = ref<CaptureEngineMetadata | null>(null);
-let selectedEngineRequest = 0;
-
-async function loadSelectedEngine() {
-  const entry = selected.value;
-  const token = ++selectedEngineRequest;
-  selectedEngineMetadata.value = null;
-  if (!entry) return;
-  try {
-    const view = await engineApi.getCaptureMetadata(entry.id);
-    if (token === selectedEngineRequest && selected.value?.id === entry.id) {
-      selectedEngineMetadata.value = view;
-    }
-  } catch {
-    // Browser previews or test stubs may not provide the engine lookup.
-    if (token === selectedEngineRequest) selectedEngineMetadata.value = null;
-  }
-}
-
-watch(() => selected.value?.id, () => void loadSelectedEngine(), { immediate: true });
-
-const selectedEngineBadge = computed(() =>
-  selectedEngineMetadata.value ? renpyBadgeLabel([selectedEngineMetadata.value.engineVersion]) : null,
-);
-const selectedEngineBadgeTitle = computed(() =>
-  renpyBadgeTitle([selectedEngineMetadata.value?.engineVersion]),
-);
 const selectedSourceLine = computed(() =>
   describeSourceImage(selected.value?.sourceImage ?? null, selected.value?.fileSize ?? null),
 );
@@ -106,19 +77,10 @@ const selectedDestinationLine = computed(() =>
   describeArchiveImage(selected.value?.destinationImage ?? null),
 );
 
-/** Compact list cell: `3840×2160 → 1920×1080` (either side may be missing). */
-function entryResolutionLine(entry: CaptureHistoryEntry): string | null {
-  const source = formatResolution(entry.sourceImage?.width, entry.sourceImage?.height);
-  const destination = formatResolution(
-    entry.destinationImage?.width,
-    entry.destinationImage?.height,
-  );
-  if (source && destination) return `${source} → ${destination}`;
-  return source ?? destination ?? null;
-}
 const resetSelectableIds = computed(() => filtered.value.filter((entry) => entry.classification !== "unclassified").map((entry) => entry.id));
 
 async function initialize() {
+  void refreshEngineBadges();
   projects.value = await captureApi.listProjects();
   const savedProjectId = localStorage.getItem(CURRENT_PROJECT_KEY);
   projectId.value = projects.value.some((project) => project.id === savedProjectId)
@@ -330,22 +292,35 @@ function onEntryDeleted() {
   deleteTarget.value = null;
 }
 
-onMounted(async () => {
-  await initializeSettings();
-  await initialize();
-  try {
-    unlisteners.push(
-      await listen("capture:item-updated", () => { void load(); }),
-      await listen<{ captureItemId: string }>("capture:item-purged", () => {
-        void load();
-      }),
-    );
-  } catch {
-    // Browser previews do not expose the Tauri event bridge.
+async function registerHistoryListeners() {
+  const registrations = await Promise.allSettled([
+    listen("capture:item-updated", () => { void load(); }),
+    listen<{ projectId: string }>("capture:project-files-updated", (event) => {
+      if (componentActive && event.payload.projectId === projectId.value) void load();
+    }),
+    listen<{ captureItemId: string }>("capture:item-purged", () => {
+      void load();
+    }),
+  ]);
+  const listeners = registrations.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  if (componentActive) {
+    unlisteners.push(...listeners);
+  } else {
+    listeners.forEach((unlisten) => unlisten());
   }
+}
+
+onMounted(async () => {
+  void registerHistoryListeners();
+  await initializeSettings();
+  if (!componentActive) return;
+  await initialize();
 });
 
 onBeforeUnmount(() => {
+  componentActive = false;
   loadRequest++;
   unlisteners.forEach((unlisten) => unlisten());
 });
@@ -377,7 +352,7 @@ onBeforeUnmount(() => {
 
       <div class="history-filters" aria-label="历史筛选">
         <Filter :size="17" />
-        <label>项目<select v-model="projectId"><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
+        <div class="history-project-filter"><span>项目</span><ProjectSelect v-model="projectId" :projects="projects" :engine-versions="engineVersions" label="历史项目" @open="refreshEngineBadges" /></div>
         <label>会话<select v-model="sessionId"><option value="">全部会话</option><option v-for="session in sessions" :key="session.id" :value="session.id">{{ new Date(session.startedAt).toLocaleString() }}</option></select></label>
         <label>状态<select v-model="status"><option value="">全部状态</option><option value="awaiting_label">等待标记</option><option value="queued">排队中</option><option value="processing">处理中</option><option value="archive_pending">等待归档</option><option value="completed">已完成</option><option value="failed">失败</option></select></label>
         <label>角色<select v-model="characterId"><option value="">全部角色</option><option v-for="character in characters" :key="character.id" :value="character.id">{{ character.name }}</option></select></label>
@@ -418,17 +393,20 @@ onBeforeUnmount(() => {
               <strong>{{ pathFileName(entry.sourcePath) }}</strong>
               <span>{{ new Date(entry.capturedAt).toLocaleString() }} · {{ entry.projectName }}</span>
             </div>
-            <div class="history-character"><UserRound :size="15" />{{ entry.characterName || "未标记" }}</div>
-            <div v-if="entryResolutionLine(entry)" class="history-media">
-              {{ entryResolutionLine(entry) }}
+            <div class="history-character"><UserRound :size="15" /><span>{{ entry.characterName || "未标记" }}</span></div>
+            <div class="history-media">
+              <span>原图 {{ formatResolution(entry.sourceImage?.width, entry.sourceImage?.height) ?? "—" }}</span>
+              <span>归档 {{ formatResolution(entry.destinationImage?.width, entry.destinationImage?.height) ?? "—" }}</span>
             </div>
-            <span class="status-pill" :data-status="entry.status">{{ captureStatusLabel(entry.status, entry.failureStage) }}</span>
-            <span
-              v-for="issue in captureFileIssues(entry)"
-              :key="issue.kind"
-              class="file-state-chip"
-              :data-state="issue.state"
-            >{{ issue.label }}</span>
+            <div class="history-status">
+              <span class="status-pill" :data-status="entry.status">{{ captureStatusLabel(entry.status, entry.failureStage) }}</span>
+              <span
+                v-for="issue in captureFileIssues(entry)"
+                :key="issue.kind"
+                class="file-state-chip"
+                :data-state="issue.state"
+              >{{ issue.label }}</span>
+            </div>
             </button>
           </div>
           <div v-if="!filtered.length && !loading" class="history-empty">没有符合筛选条件的截图。</div>
@@ -442,8 +420,12 @@ onBeforeUnmount(() => {
           @update:open="detailOpen = $event"
         >
           <div class="history-detail">
-            <span v-if="isWideLayout" class="eyebrow">记录详情</span>
-            <h2 v-if="isWideLayout">{{ pathFileName(selected.sourcePath) }}</h2>
+            <div v-if="isWideLayout" class="history-detail-heading">
+              <div class="history-detail-title">
+                <span class="eyebrow">记录详情</span>
+                <h2>{{ pathFileName(selected.sourcePath) }}</h2>
+              </div>
+            </div>
             <div class="detail-preview">
               <CaptureThumbnail
                 :item="selected"
@@ -463,14 +445,6 @@ onBeforeUnmount(() => {
                 <dd :data-state="issue.state">{{ issue.label }}</dd>
               </div>
               <div><dt>角色</dt><dd>{{ selected.characterName || "未标记" }}</dd></div>
-              <div v-if="selectedEngineBadge">
-                <dt>引擎</dt>
-                <dd>
-                  <span class="detail-engine-badge" :title="selectedEngineBadgeTitle ?? undefined">
-                    {{ selectedEngineBadge }}
-                  </span>
-                </dd>
-              </div>
               <div v-if="selectedSourceLine"><dt>原图</dt><dd>{{ selectedSourceLine }}</dd></div>
               <div v-if="selectedDestinationLine">
                 <dt>归档图</dt>
@@ -528,6 +502,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.history-project-filter { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; }
+.history-project-filter > span { flex: none; }
+.history-project-filter :deep(.project-select-trigger) { width: 260px; max-width: 100%; flex: 1; }
+
 .history-page > :deep(.page-header) {
   flex: none;
 }
@@ -568,6 +546,7 @@ onBeforeUnmount(() => {
 
 .history-list {
   border-right: 0;
+  overflow-x: auto;
 }
 
 .history-detail {
@@ -648,27 +627,84 @@ onBeforeUnmount(() => {
 .history-pagination-row :deep(.pagination) { flex: 1 1 auto; width: auto; min-width: 0; padding: 16px 0 14px 18px; }
 .history-selection { position: absolute; left: 8px; top: 8px; z-index: 2; width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
 
-.history-row { position: relative; }
+.history-row {
+  position: relative;
+  grid-template-columns: 116px minmax(0, 1fr) minmax(60px, 90px) 138px minmax(80px, 110px);
+  gap: 12px;
+}
 .history-row.reset-selected { background: color-mix(in srgb, var(--accent) 12%, var(--card)); box-shadow: inset 3px 0 0 var(--accent); }
 .history-row-select { display: contents; color: inherit; text-align: left; cursor: pointer; }
 .history-row:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .history-media {
+  display: flex;
   min-width: 0;
+  flex-direction: column;
+  gap: 3px;
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 10.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.history-character {
+  min-width: 0;
+}
+
+.history-character svg {
+  flex-shrink: 0;
+}
+
+.history-character span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.detail-engine-badge {
-  display: inline-flex;
-  padding: 1px 8px;
-  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
+.history-status {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.history-status .file-state-chip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  white-space: normal;
+}
+
+.history-detail-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.history-detail-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.history-detail-heading h2 {
+  margin-bottom: 0;
+}
+
+@media (max-width: 900px) {
+  .history-row {
+    min-width: 520px;
+    grid-template-columns: 72px minmax(120px, 1fr) 64px 124px 88px;
+    gap: 8px;
+    padding: 10px 8px;
+  }
+
+  .history-thumb {
+    width: 72px;
+    height: 42px;
+  }
 }
 </style>

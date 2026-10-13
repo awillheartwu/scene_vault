@@ -16,8 +16,8 @@ Design rules:
   * Output is machine-readable JSON on stdout; a human summary goes to
     stderr. The process exits 0 when every gated metric passes, otherwise 1.
 
-Heavy runs must be pinned to CPU 0-3:
-    taskset -c 0-3 python3 scripts/scale-benchmark/benchmark_scale_1_0.py
+Authorized heavy runs must be pinned to CPU 0-9:
+    taskset -c 0-9 python3 scripts/scale-benchmark/benchmark_scale_1_0.py
 
 Thresholds (docs/benchmarks/scale-1.0-report.example.json):
   startup_db_init_ms          < 5000 ms  (ROADMAP: startup < 5 s)

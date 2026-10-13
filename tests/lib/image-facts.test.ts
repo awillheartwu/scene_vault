@@ -83,6 +83,19 @@ describe("image facts formatting", () => {
     });
     expect(lossless?.text).toBe("1920×1080 · WebP 无损 · 488.3 KB");
 
+    const historicalLossyWebp = describeArchiveImage({
+      width: 1920,
+      height: 1080,
+      format: "webp",
+      bytes: 500_000,
+      qualityKind: "quality",
+      quality: 90,
+      sizePolicy: "keep",
+      sizePolicyApplied: true,
+      formatApplied: true,
+    });
+    expect(historicalLossyWebp?.text).toBe("1920×1080 · WebP q90 · 488.3 KB");
+
     const unknown = describeArchiveImage({
       width: 1920,
       height: 1080,

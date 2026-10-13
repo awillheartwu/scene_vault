@@ -9,8 +9,9 @@ in the AI-enabled installer (see `tauri.ai.conf.json`).
 
 - `SmileySans-Oblique.ttf`（得意黑）— SIL Open Font License 1.1, redistributable.
   Official release: <https://github.com/atelier-anchor/smiley-sans/releases>
-  (v2.0.1). The full license text (`OFL.txt`) is included in the official zip;
-  the release script refreshes both the font and the license before building.
+  (v2.0.1). The full license text is tracked alongside the font as `OFL.txt`,
+  copied from the official v2.0.1 `LICENSE` file. Both ship in every installer;
+  the release script rejects a missing license.
 
 ## models (populated by the release script, never committed)
 

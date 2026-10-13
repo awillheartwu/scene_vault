@@ -71,6 +71,9 @@ pub struct LogRecord {
     pub worker_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Performance-only numeric measurements and resource snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -148,8 +151,8 @@ pub struct LogPolicySettings {
     pub max_archived_files: usize,
     #[serde(default = "default_true")]
     pub automatic_cleanup: bool,
-    /// Performance instrumentation (image reads, resizes, scans, AI request
-    /// timings) into its own file; off keeps the call sites but stops writes.
+    /// Performance instrumentation and background resource sampling in the
+    /// independent log. Disabled also stops background resource collection.
     #[serde(default = "default_true")]
     pub performance_logging: bool,
 }

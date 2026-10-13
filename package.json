@@ -1,7 +1,7 @@
 {
   "name": "scene_vault",
   "private": true,
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "Local-first desktop app for organizing screenshots from any game.",
   "type": "module",
   "scripts": {
@@ -9,7 +9,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "pnpm run test:typecheck && vitest run",
+    "test:typecheck": "vue-tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
     "@ckpack/vue-color": "^1.6.0",

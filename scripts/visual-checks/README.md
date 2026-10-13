@@ -1,7 +1,7 @@
 # 可视化检查脚本
 
 jsdom 不计算布局，所以下面这些只在真实浏览器里才能发现的问题用脚本兜住。它们不参与
-CI（需要 dev server 与 Chromium），在改动相关界面后手动跑一次。
+CI（需要 dev server 与 Chromium），仅在版本收尾或用户单独授权时按界面改动选择运行。
 
 ## popup-layout.mjs
 
@@ -16,8 +16,10 @@ CI（需要 dev server 与 Chromium），在改动相关界面后手动跑一次
 准备：先起前端 dev server，并准备 Playwright + Chromium（本机已有的路径如下）。
 
 ```bash
-cd /tmp/sv-ui-check && node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1437 &
+cd <repo_root>
+pnpm dev --host 127.0.0.1 --port 1437
 
+# 另一个终端中执行：
 PLAYWRIGHT_MODULE=/mnt/c/Users/WuHaoli/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs \
 CHROME_PATH=/home/loica/.cache/ms-playwright/chromium-1187/chrome-linux/chrome \
 node scripts/visual-checks/popup-layout.mjs

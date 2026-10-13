@@ -40,11 +40,9 @@ param(
     [string]$BumpVersion = "",
     # Create the annotated release tag (v<Version>) after a successful build.
     [switch]$CreateTag,
-    # CPU 0-3 (P-core threads) only: this build machine is a 13900K that has
-    # shown instability under all-core load, so every child process is pinned
-    # to these four logical CPUs. Change to 0xFF for four full P-cores if the
-    # machine's stability profile allows it.
-    [int]$AffinityMask = 0xF
+    # Local build policy: CPU 0-9 (ten logical CPUs). Child processes inherit
+    # this mask; runtime image-processing threads follow the app setting.
+    [int]$AffinityMask = 0x3FF
     ,
     # Skip CPU pinning entirely (GitHub Actions runners have few vCPUs and no
     # 13900K-style stability constraints).
@@ -188,8 +186,8 @@ if (-not $PnpmJs) {
 $NpmGlobal = ""
 if ($PnpmJs) { $NpmGlobal = Split-Path -Parent (Split-Path -Parent $PnpmJs) }
 $env:Path = "$(Split-Path -Parent $Node);$NpmGlobal;$(Split-Path -Parent $Cargo);" + $env:Path
-# Cargo parallelism is capped to the pinned core count (rustc is sequential
-# per job, and the affinity mask above already limits actual execution).
+# Keep the existing build-job budget for compiler memory stability. Cargo jobs
+# are separate from CPU affinity and from the application's image-thread limit.
 $env:CARGO_BUILD_JOBS = "4"
 # Pin this PowerShell process (and therefore every child it spawns, which
 # inherit the mask) to the allowed CPUs before any heavy work starts.
@@ -203,7 +201,7 @@ if (-not $SkipAffinity) {
 if ($SkipAffinity) {
     Write-Host "[0/6] CPU affinity skipped (-SkipAffinity), CARGO_BUILD_JOBS=4"
 } else {
-    Write-Host "[0/6] CPU affinity 0x$('{0:X}' -f $AffinityMask) (CPU 0-3), CARGO_BUILD_JOBS=4"
+    Write-Host "[0/6] CPU affinity 0x$('{0:X}' -f $AffinityMask), CARGO_BUILD_JOBS=4"
 }
 
 # ---------------------------------------------------------------------------
@@ -224,7 +222,7 @@ Run-Native $Node @("node_modules/vue-tsc/bin/vue-tsc.js", "--noEmit") (Join-Path
 Run-Native $Node @("node_modules/vite/bin/vite.js", "build") (Join-Path $LogDir "vite-build")
 
 # ---------------------------------------------------------------------------
-# 3. Bundled font (shipped in every installer; refresh from the official zip)
+# 3. Bundled font (shipped with its license in every installer)
 # ---------------------------------------------------------------------------
 $FontsDir = Join-Path $RepoRoot "src-tauri/resources/fonts"
 New-Item -ItemType Directory -Force -Path $FontsDir | Out-Null
@@ -239,7 +237,7 @@ if (-not (Test-Path $FontFile)) {
     Remove-Item -Force $Zip
 }
 if (-not (Test-Path (Join-Path $FontsDir "OFL.txt"))) {
-    Write-Host "  WARNING: OFL.txt not found next to the font; copy it from the official zip before release."
+    throw "OFL.txt is missing next to the bundled font; restore the tracked license before release."
 }
 
 # ---------------------------------------------------------------------------

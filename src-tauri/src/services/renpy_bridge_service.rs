@@ -13,13 +13,15 @@ use crate::{
         ProjectEngineIntegration, ProjectEngineIntegrationView, UninstallEngineBridgeInput,
     },
     models::project::AddProjectSourceDirectoryInput,
-    services::{capture_service, engine_detection_service, log_service},
+    services::{
+        capture_service, engine_detection_service, log_service, renpy_screenshot_settings_service,
+    },
 };
 
 pub const BRIDGE_FILE_NAME: &str = "00_scenevault_bridge.rpy";
 pub const BRIDGE_COMPILED_FILE_NAME: &str = "00_scenevault_bridge.rpyc";
 pub const BRIDGE_CONFIG_FILE_NAME: &str = "scenevault_bridge.json";
-pub const BRIDGE_VERSION: &str = "1.1.4";
+pub const BRIDGE_VERSION: &str = "1.1.7";
 
 /// Distinctive string constant inside the compiled bridge; used together with
 /// the verified source hash before the engine-compiled artifact is recorded
@@ -33,7 +35,7 @@ static BRIDGE_MUTATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 
 const INTEGRATION_COLUMNS: &str =
     "id, project_id, engine, engine_root, game_directory, python_major, engine_version, \
-    bridge_version, metadata_directory, manifest_json, installed_at, updated_at";
+    bridge_version, auto_hide_ui, auto_hide_ui_override, metadata_directory, manifest_json, installed_at, updated_at";
 
 /// Installs the bridge into the picked game: writes the `.rpy` glue plus a
 /// small config file and records both hashes so uninstall only removes files
@@ -58,6 +60,7 @@ pub async fn install(
     }
 
     let _guard = BRIDGE_MUTATION_LOCK.lock().await;
+    let _policy_guard = renpy_screenshot_settings_service::lock().await;
 
     let detection = engine_detection_service::detect(Path::new(input.path.trim())).await?;
     let game_directory = PathBuf::from(&detection.game_directory);
@@ -92,6 +95,13 @@ pub async fn install(
         .bind(&detection.game_directory)
         .fetch_optional(pool)
         .await?;
+    let auto_hide_ui_override = input.auto_hide_ui.or_else(|| {
+        existing_same_game
+            .as_ref()
+            .and_then(|integration| integration.auto_hide_ui_override)
+    });
+    let auto_hide_ui =
+        renpy_screenshot_settings_service::resolve(pool, project_id, auto_hide_ui_override).await?;
     let mut previous_manifest: Vec<BridgeFileEntry> = existing_same_game
         .as_ref()
         .map(|integration| serde_json::from_str(&integration.manifest_json))
@@ -117,9 +127,18 @@ pub async fn install(
     tokio::fs::create_dir_all(&metadata_directory).await?;
     let log_file = bridge_cache_directory(app)?.join("bridge.log");
 
+    let integration_id = existing_same_game
+        .as_ref()
+        .map(|integration| integration.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let policy_path = renpy_screenshot_settings_service::policy_path(app)?;
     let config = serde_json::to_vec_pretty(&json!({
         "schemaVersion": 1,
         "bridgeVersion": BRIDGE_VERSION,
+        "autoHideUi": auto_hide_ui,
+        "projectId": project_id,
+        "integrationId": integration_id,
+        "screenshotPolicyFile": capture_service::path_to_string(&policy_path),
         "metadataDirectory": capture_service::path_to_string(&metadata_directory),
         "logFile": capture_service::path_to_string(&log_file),
         "generatedAt": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -174,6 +193,7 @@ pub async fn install(
     // Two-phase write with rollback: keep the previous bytes, then write both
     // files; any failure restores what was there before.
     let backups = snapshot_targets([&bridge_path, &config_path]).await?;
+    let mut transaction = pool.begin().await?;
     if let Err(error) = async {
         write_atomic(&bridge_path, source.as_bytes()).await?;
         write_atomic(&config_path, &config).await
@@ -194,10 +214,7 @@ pub async fn install(
     let manifest_json = serde_json::to_string(&manifest)
         .map_err(|error| AppError::Validation(format!("cannot encode bridge manifest: {error}")))?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    let integration_id = existing_same_game
-        .as_ref()
-        .map(|integration| integration.id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     let persisted = if existing_same_game.is_some() {
         sqlx::query(
             r#"
@@ -207,6 +224,8 @@ pub async fn install(
                 python_major = ?,
                 engine_version = ?,
                 bridge_version = ?,
+                auto_hide_ui = ?,
+                auto_hide_ui_override = ?,
                 metadata_directory = ?,
                 manifest_json = ?,
                 installed_at = ?,
@@ -219,22 +238,24 @@ pub async fn install(
         .bind(detection.python_major)
         .bind(detection.engine_version.as_deref())
         .bind(BRIDGE_VERSION)
+        .bind(auto_hide_ui)
+        .bind(auto_hide_ui_override)
         .bind(capture_service::path_to_string(&metadata_directory))
         .bind(&manifest_json)
         .bind(&now)
         .bind(&now)
         .bind(&integration_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
     } else {
         sqlx::query(
             r#"
             INSERT INTO project_engine_integrations (
                 id, project_id, engine, engine_root, game_directory, python_major,
-                engine_version, bridge_version, metadata_directory, manifest_json,
+                engine_version, bridge_version, auto_hide_ui, auto_hide_ui_override, metadata_directory, manifest_json,
                 installed_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&integration_id)
@@ -245,15 +266,36 @@ pub async fn install(
         .bind(detection.python_major)
         .bind(detection.engine_version.as_deref())
         .bind(BRIDGE_VERSION)
+        .bind(auto_hide_ui)
+        .bind(auto_hide_ui_override)
         .bind(capture_service::path_to_string(&metadata_directory))
         .bind(&manifest_json)
         .bind(&now)
         .bind(&now)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
     };
     if let Err(error) = persisted {
         let failures = restore_backups(&backups).await;
+        return Err(install_failure_with_restore(error.into(), failures));
+    }
+    let policy_backup =
+        match renpy_screenshot_settings_service::stage_snapshot(&mut transaction, &policy_path)
+            .await
+        {
+            Ok(backup) => backup,
+            Err(error) => {
+                let failures = restore_backups(&backups).await;
+                return Err(install_failure_with_restore(error, failures));
+            }
+        };
+    if let Err(error) = transaction.commit().await {
+        let mut failures = restore_backups(&backups).await;
+        if let Err(restore_error) =
+            renpy_screenshot_settings_service::restore_snapshot(policy_backup).await
+        {
+            failures.push(format!("截图设置缓存（{restore_error}）"));
+        }
         return Err(install_failure_with_restore(error.into(), failures));
     }
     if remove_recorded_compiled {
@@ -294,6 +336,7 @@ pub async fn install(
         );
     }
     Ok(ProjectEngineIntegrationView {
+        resolved_auto_hide_ui: auto_hide_ui,
         integration: load_integration_by_id(pool, &integration_id)
             .await?
             .ok_or_else(|| AppError::NotFound("engine integration".to_owned()))?,
@@ -320,6 +363,7 @@ pub async fn uninstall(
         ));
     }
     let _guard = BRIDGE_MUTATION_LOCK.lock().await;
+    let _policy_guard = renpy_screenshot_settings_service::lock().await;
     let integration = match input
         .integration_id
         .as_deref()
@@ -362,6 +406,14 @@ pub async fn uninstall(
             .execute(pool)
             .await?;
         remove_metadata_directory(app, integration.metadata_directory.as_deref());
+        if let Some(app) = app {
+            if let Err(error) = renpy_screenshot_settings_service::publish_locked(pool, app).await {
+                log_service::warn(
+                    "engine.screenshot",
+                    format!("could not refresh screenshot policy after uninstall: {error}"),
+                );
+            }
+        }
     }
     log_service::info(
         "engine.bridge",
@@ -387,8 +439,13 @@ pub async fn status(
     // status can repair the metadata path and record compiled hashes; share
     // the mutation lock so it cannot overwrite a concurrent reinstall.
     let _guard = BRIDGE_MUTATION_LOCK.lock().await;
+    let integrations = load_integrations(pool, project_id).await?;
+    if integrations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let policy = renpy_screenshot_settings_service::project_policy(pool, project_id).await?;
     let mut views = Vec::new();
-    for mut integration in load_integrations(pool, project_id).await? {
+    for mut integration in integrations {
         // Legacy rows may miss the staging root entirely, or still point at
         // the shared root from before installs were isolated. Both get a
         // fresh private subdirectory rather than sharing one again.
@@ -437,6 +494,9 @@ pub async fn status(
             }
         }
         views.push(ProjectEngineIntegrationView {
+            resolved_auto_hide_ui: integration
+                .auto_hide_ui_override
+                .unwrap_or(policy.resolved_auto_hide_ui),
             integration,
             bridge_file_present,
             compiled_file_present,
@@ -463,6 +523,36 @@ pub async fn load_integrations(
     .bind(project_id)
     .fetch_all(pool)
     .await?)
+}
+
+/// Backfills old registrations from the version files without reinstalling
+/// or launching a game. A guarded update cannot recreate an uninstalled row
+/// or overwrite a version recorded by a concurrent reinstall.
+pub(crate) async fn refresh_missing_engine_versions(pool: &SqlitePool) -> Result<(), AppError> {
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT id, engine_root, python_major FROM project_engine_integrations \
+         WHERE engine = 'renpy' AND (engine_version IS NULL OR TRIM(engine_version) = '')",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, root, python_major) in rows {
+        let Some(version) =
+            engine_detection_service::detect_engine_version(Path::new(&root), python_major).await
+        else {
+            continue;
+        };
+        sqlx::query(
+            "UPDATE project_engine_integrations SET engine_version = ? \
+             WHERE id = ? AND engine_root = ? \
+             AND (engine_version IS NULL OR TRIM(engine_version) = '')",
+        )
+        .bind(version)
+        .bind(id)
+        .bind(root)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 pub async fn load_integration_by_id(
@@ -555,7 +645,7 @@ async fn bundled_bridge_source(app: &AppHandle) -> Result<String, AppError> {
     ))
 }
 
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Validation("bridge target has no parent".to_owned()))?;
@@ -565,9 +655,15 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         .and_then(|name| name.to_str())
         .unwrap_or("bridge");
     let temporary = parent.join(format!(".{file_name}.tmp-{}", uuid::Uuid::new_v4()));
-    tokio::fs::write(&temporary, bytes).await?;
-    tokio::fs::rename(&temporary, path).await?;
-    Ok(())
+    let result = async {
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(&temporary, path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result.map_err(AppError::from)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -976,6 +1072,8 @@ mod tests {
             python_major: Some(3),
             engine_version: None,
             bridge_version: BRIDGE_VERSION.to_owned(),
+            auto_hide_ui: false,
+            auto_hide_ui_override: None,
             metadata_directory: None,
             manifest_json: serde_json::to_string(&manifest).unwrap(),
             installed_at: "2026-10-10T00:00:00Z".to_owned(),
@@ -1038,6 +1136,8 @@ mod tests {
             python_major: Some(3),
             engine_version: None,
             bridge_version: BRIDGE_VERSION.to_owned(),
+            auto_hide_ui: false,
+            auto_hide_ui_override: None,
             metadata_directory: None,
             manifest_json: serde_json::to_string(&manifest).unwrap(),
             installed_at: "2026-10-10T00:00:00Z".to_owned(),

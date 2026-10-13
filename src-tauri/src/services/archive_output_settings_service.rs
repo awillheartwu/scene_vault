@@ -272,6 +272,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removal_migration_preserves_other_policy_fields() {
+        let pool = db::test_pool().await;
+        let legacy_project = uuid::Uuid::new_v4().to_string();
+        let jpeg_project = uuid::Uuid::new_v4().to_string();
+        for (id, format) in [(&legacy_project, "webp_lossy"), (&jpeg_project, "jpeg")] {
+            sqlx::query("INSERT INTO projects (id, name, archive_output_size, archive_output_format, archive_output_quality) VALUES (?, 'Migration', 'native', ?, 100)")
+                .bind(id).bind(format).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO settings (key, value_json) VALUES (?, ?)")
+            .bind(SETTINGS_KEY)
+            .bind(r#"{"size":"1440p","format":"webp_lossy","quality":88,"extra":"preserved"}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO settings (key, value_json) VALUES ('unrelated', '{')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0035_remove_lossy_webp_output.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let saved = get(&pool).await.unwrap();
+        assert_eq!(saved.size, "1440p");
+        assert_eq!(saved.format, "webp");
+        assert_eq!(saved.quality, 88);
+        let raw: String = sqlx::query_scalar("SELECT value_json FROM settings WHERE key = ?")
+            .bind(SETTINGS_KEY)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()["extra"],
+            "preserved"
+        );
+        for (id, expected) in [(&legacy_project, "webp"), (&jpeg_project, "jpeg")] {
+            let view = project_policy_view(&pool, id).await.unwrap();
+            assert_eq!(view.project_format, expected);
+            assert_eq!(view.project_size, "native");
+            assert_eq!(view.project_quality, Some(100));
+        }
+        let unrelated: String =
+            sqlx::query_scalar("SELECT value_json FROM settings WHERE key = 'unrelated'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unrelated, "{");
+
+        sqlx::query("UPDATE settings SET value_json = '{' WHERE key = ?")
+            .bind(SETTINGS_KEY)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0035_remove_lossy_webp_output.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let malformed: String = sqlx::query_scalar("SELECT value_json FROM settings WHERE key = ?")
+            .bind(SETTINGS_KEY)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(malformed, "{");
+    }
+
+    #[tokio::test]
     async fn rejects_unknown_values() {
         let pool = db::test_pool().await;
         let error = update(
@@ -284,19 +355,21 @@ mod tests {
         .expect_err("reject size");
         assert!(matches!(error, AppError::Validation(_)));
 
-        let error = update(
-            &pool,
-            UpdateArchiveOutputSettingsInput {
-                settings: ArchiveOutputSettings {
-                    size: "keep".to_owned(),
-                    format: "avif".to_owned(),
-                    quality: 90,
+        for format in ["avif", "webp_lossy"] {
+            let error = update(
+                &pool,
+                UpdateArchiveOutputSettingsInput {
+                    settings: ArchiveOutputSettings {
+                        size: "keep".to_owned(),
+                        format: format.to_owned(),
+                        quality: 90,
+                    },
                 },
-            },
-        )
-        .await
-        .expect_err("reject format");
-        assert!(matches!(error, AppError::Validation(_)));
+            )
+            .await
+            .expect_err("reject format");
+            assert!(matches!(error, AppError::Validation(_)));
+        }
 
         let error = update(
             &pool,

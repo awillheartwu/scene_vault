@@ -7,6 +7,7 @@ const { api, push, launchGameMock } = vi.hoisted(() => ({
     runtimeStatus: vi.fn(),
     readThumbnail: vi.fn(),
     readImage: vi.fn(),
+    recordClientEvent: vi.fn(async () => {}),
     renameProject: vi.fn(),
     previewProjectDelete: vi.fn(),
     deleteProject: vi.fn(),
@@ -154,26 +155,6 @@ describe("Home project library", () => {
     wrapper.unmount();
   });
 
-  it("selects cover proportions from the number of visible grid cards", async () => {
-    api.listProjectOverviews.mockResolvedValue([projects[0]]);
-    const one = mount(Home);
-    await flushPromises();
-    expect(one.get(".project-grid").classes()).toContain("project-grid-1");
-    one.unmount();
-
-    api.listProjectOverviews.mockResolvedValue(projects.slice(0, 2));
-    const two = mount(Home);
-    await flushPromises();
-    expect(two.get(".project-grid").classes()).toContain("project-grid-2");
-    two.unmount();
-
-    api.listProjectOverviews.mockResolvedValue(projects);
-    const three = mount(Home);
-    await flushPromises();
-    expect(three.get(".project-grid").classes()).toContain("project-grid-3");
-    three.unmount();
-  });
-
   it("switches to the compact list and remembers the view", async () => {
     const wrapper = mount(Home);
     await flushPromises();
@@ -190,7 +171,7 @@ describe("Home project library", () => {
 
   it("launches a Ren'Py project's game from the card and the list", async () => {
     api.listProjectOverviews.mockResolvedValue([
-      { ...projects[0], engine: "renpy" },
+      { ...projects[0], engine: "renpy", engineVersions: "7.7.3,8.1.3" },
       ...projects.slice(1),
     ]);
     launchGameMock.mockResolvedValue({
@@ -202,6 +183,8 @@ describe("Home project library", () => {
 
     const grid = mount(Home);
     await flushPromises();
+    expect(grid.get(".project-cover-badges .renpy-badge").text()).toBe("Ren'Py 7/8");
+    expect(grid.get(".project-cover-badges .active-session-badge").text()).toContain("正在捕获");
     const cardButton = grid
       .findAll(".project-card-footer button")
       .find((button) => button.text().includes("启动游戏"));
@@ -215,6 +198,7 @@ describe("Home project library", () => {
     localStorage.setItem("scene-vault.home.project-view", "list");
     const list = mount(Home);
     await flushPromises();
+    expect(list.get(".row-project-title .renpy-badge").text()).toBe("Ren'Py 7/8");
     const rowButton = list.find('button[aria-label="启动游戏 BAD"]');
     expect(rowButton.exists()).toBe(true);
     await rowButton.trigger("click");

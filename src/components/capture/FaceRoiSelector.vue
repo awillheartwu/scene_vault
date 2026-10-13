@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { ScanFace, Check, X, RotateCcw, LoaderCircle, Sparkles } from '@lucide/vue';
+import { ScanFace, Check, X, RotateCcw, LoaderCircle, Sparkles, ImageOff } from '@lucide/vue';
 import type { FaceRoi } from '@/lib/capture-api';
 import { normalizeFaceBox, type FaceBox } from '@/lib/face-box';
-const props = defineProps<{ imageUrl: string | null; itemId: string; modelValue: FaceRoi | null; faceBox?: FaceBox | null; busy?: boolean; loading?: boolean; disabled?: boolean; error?: string; inline?: boolean; mode?: 'auto' | 'normalized' }>();
+const props = defineProps<{ imageUrl: string | null; imageError?: string; itemId: string; modelValue: FaceRoi | null; faceBox?: FaceBox | null; busy?: boolean; loading?: boolean; disabled?: boolean; error?: string; inline?: boolean; mode?: 'auto' | 'normalized' }>();
 const emit = defineEmits<{ confirm: [roi: FaceRoi | null, mode: 'auto' | 'normalized'] }>();
 const effectiveMode = computed<'auto' | 'normalized'>(() => props.mode === 'normalized' ? 'normalized' : 'auto');
+const blocked = computed(() => props.busy || props.loading || props.disabled || !props.imageUrl);
 const editing = defineModel<boolean>('editing', { default: false });
 const trigger = ref<HTMLButtonElement | null>(null);
 const keyboardBox = ref<HTMLElement | null>(null);
@@ -25,6 +26,7 @@ function measure() {
 }
 watch(image, img=>{observer?.disconnect();if(img && typeof ResizeObserver !== 'undefined'){observer=new ResizeObserver(measure);observer.observe(img);}void nextTick(measure);});
 async function toggle() {
+  if (blocked.value) return;
   editing.value = !editing.value;
   draft.value = props.modelValue ? { ...props.modelValue } : defaultDraft();
   measure();
@@ -39,7 +41,7 @@ function defaultDraft(): FaceRoi {
 function cancel() { editing.value = false; start = null; void nextTick(() => trigger.value?.focus()); }
 function key(event: KeyboardEvent) {
   if (event.key === 'Escape') { event.preventDefault(); cancel(); return; }
-  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || props.busy || props.loading || props.disabled) return;
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || blocked.value) return;
   event.preventDefault();
   const box = draft.value ?? { x: .25, y: .25, width: .5, height: .5 };
   const dx = event.key === 'ArrowRight' ? .01 : event.key === 'ArrowLeft' ? -.01 : 0;
@@ -49,6 +51,7 @@ function key(event: KeyboardEvent) {
     : { ...box, x: Math.max(0, Math.min(1 - box.width, box.x + dx)), y: Math.max(0, Math.min(1 - box.height, box.y + dy)) };
 }
 watch(() => props.itemId, () => { editing.value = false; draft.value = null; start = null; });
+watch(() => props.imageUrl, value => { if (!value) { editing.value = false; draft.value = null; start = null; } });
 watch(() => props.modelValue, value => { draft.value = value ? { ...value } : null; });
 const visibleBox=computed(()=>editing.value ? draft.value : props.modelValue);
 const boxStyle = computed(() => visibleBox.value ? {
@@ -64,42 +67,47 @@ function point(event: PointerEvent) {
   return { x: Math.max(0, Math.min(1, (event.clientX - rect.left-b.left) / b.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top-b.top) / b.height)) };
 }
 function down(event: PointerEvent) {
-  if (!editing.value || props.busy || props.loading || props.disabled || event.button !== 0) return;
+  if (!editing.value || blocked.value || event.button !== 0) return;
   start = point(event);
   draft.value = null;
   (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
 }
 function move(event: PointerEvent) {
+  if (blocked.value) return;
   const end = point(event);
   if (!start || !end) return;
   draft.value = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) };
 }
-function submit(value: FaceRoi | null, mode: 'auto' | 'normalized') { emit('confirm', value, mode); cancel(); }
+function submit(value: FaceRoi | null, mode: 'auto' | 'normalized') { if (blocked.value) return; emit('confirm', value, mode); cancel(); }
 onBeforeUnmount(()=>observer?.disconnect());
 </script>
 <template>
   <div class="face-roi-selector" :class="{ inline, editing }" @keydown.stop>
-    <img ref="image" :src="imageUrl || undefined" alt="截图预览，可框选主脸" draggable="false" @load="measure" />
-    <div v-if="editing || modelValue" ref="keyboardBox" class="roi-image" :style="areaStyle" :tabindex="editing ? 0 : -1" role="group" aria-label="主脸选区：方向键移动，Shift 加方向键调整大小" @keydown="key" @pointerdown.prevent="down" @pointermove="move" @pointerup="move($event); start = null" @pointercancel="start = null">
+    <img v-if="imageUrl" ref="image" :src="imageUrl" alt="截图预览，可框选主脸" draggable="false" @load="measure" />
+    <div v-else class="roi-placeholder" :role="imageError ? 'alert' : 'status'">
+      <ImageOff v-if="imageError" :size="32" /><LoaderCircle v-else :size="32" class="animate-spin" />
+      <span>{{ imageError || '正在加载图片…' }}</span>
+    </div>
+    <div v-if="imageUrl && (editing || modelValue)" ref="keyboardBox" class="roi-image" :style="areaStyle" :tabindex="editing ? 0 : -1" role="group" aria-label="主脸选区：方向键移动，Shift 加方向键调整大小" @keydown="key" @pointerdown.prevent="down" @pointermove="move" @pointerup="move($event); start = null" @pointercancel="start = null">
       <span v-if="visibleBox" class="roi-box" :style="boxStyle"><span class="roi-caption">主脸范围</span></span>
     </div>
     <div class="roi-toolbar">
       <span v-if="busy || loading" class="roi-status" role="status"><LoaderCircle :size="14" class="animate-spin" />{{ busy ? '识别中…' : '读取选区…' }}</span>
       <template v-if="editing">
-        <button type="button" class="roi-confirm" :disabled="busy || loading || disabled || !draft || draft.width <= 0 || draft.height <= 0" @click="submit(draft, effectiveMode)"><Check :size="14" />确认主脸</button>
+        <button type="button" class="roi-confirm" :disabled="blocked || !draft || draft.width <= 0 || draft.height <= 0" @click="submit(draft, effectiveMode)"><Check :size="14" />确认主脸</button>
         <button
           type="button"
           class="roi-big-face"
           :class="{ active: effectiveMode === 'normalized' }"
           :aria-pressed="effectiveMode === 'normalized'"
-          :disabled="busy || loading || disabled || !draft || draft.width <= 0 || draft.height <= 0"
+          :disabled="blocked || !draft || draft.width <= 0 || draft.height <= 0"
           title="按整张脸重新检测，适合大特写截图；再次点击关闭"
           @click="submit(draft, effectiveMode === 'normalized' ? 'auto' : 'normalized')"
         ><Sparkles :size="14" />整脸优化</button>
         <button type="button" @click="cancel"><X :size="14" />取消</button>
       </template>
-      <button v-else ref="trigger" type="button" :disabled="busy || loading || disabled || !imageUrl" :aria-expanded="editing" @click="toggle"><ScanFace :size="15" />{{ modelValue ? '重新框选' : '框选主脸' }}</button>
-      <button v-if="modelValue || error" type="button" :disabled="busy || loading || disabled" title="放弃框选，恢复自动选脸" aria-label="放弃框选，恢复自动选脸" @click="submit(null, 'auto')"><RotateCcw :size="14" /></button>
+      <button v-else ref="trigger" type="button" :disabled="blocked" :aria-expanded="editing" @click="toggle"><ScanFace :size="15" />{{ modelValue ? '重新框选' : '框选主脸' }}</button>
+      <button v-if="modelValue || error" type="button" :disabled="blocked" title="放弃框选，恢复自动选脸" aria-label="放弃框选，恢复自动选脸" @click="submit(null, 'auto')"><RotateCcw :size="14" /></button>
     </div>
     <p v-if="editing" class="roi-hint">拖动框选一张脸 · 方向键微调 · Shift 调整大小</p>
     <p v-if="error" role="alert" class="roi-message error">{{ error }}</p>
@@ -109,6 +117,7 @@ onBeforeUnmount(()=>observer?.disconnect());
 .face-roi-selector { position: relative; min-height: 220px; height: 40vh; width: 100%; overflow: hidden; background: var(--background); }
 .face-roi-selector.inline { position: absolute; inset: 0; min-height: 0; width: 100%; height: 100%; background: transparent; }
 .face-roi-selector > img { display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; }
+.roi-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; height: 100%; padding: 24px; box-sizing: border-box; color: var(--muted-foreground); text-align: center; }
 .roi-image { position: absolute; touch-action: none; pointer-events: none; }
 .editing .roi-image { pointer-events: auto; cursor: crosshair; }
 .roi-box { position: absolute; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); box-sizing: border-box; pointer-events: none; }

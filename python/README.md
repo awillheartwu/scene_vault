@@ -327,10 +327,10 @@ python -m unittest discover -s python/tests -v
 python -m compileall -q python/src python/tests python/sidecar.py
 ```
 
-WSL/Linux 下固定 CPU 0–3 运行测试：
+版本收尾获授权后，WSL/Linux 下固定 CPU 0–9 运行测试：
 
 ```bash
-PYTHONPATH=python/src taskset -c 0-3 python -m unittest discover -s python/tests -v
+PYTHONPATH=python/src taskset -c 0-9 python -m unittest discover -s python/tests -v
 ```
 
 `test_face_roi.py` 覆盖 ROI 校验、整图筛选、扩框重检、坐标与 landmarks 平移、

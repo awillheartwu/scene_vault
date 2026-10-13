@@ -1910,6 +1910,10 @@ pub async fn list_unimported_captures(
             if registered != 0 {
                 continue;
             }
+            let content_hash = sha256_file(&path).await?;
+            if is_content_ignored(pool, &session.project_id, &content_hash).await? {
+                continue;
+            }
             candidates.push(UnimportedCapture {
                 file_size: i64::try_from(metadata.len())
                     .map_err(|_| AppError::Validation("capture file is too large".to_owned()))?,
@@ -1925,12 +1929,12 @@ pub async fn list_unimported_captures(
     Ok(candidates)
 }
 
-/// Registers pre-existing images as awaiting-label captures. Baseline rows
-/// are dropped first so the discovery-baseline rejection does not apply, and
-/// the stability wait is skipped because imported files are already static.
+/// Registers pre-existing images as awaiting-label captures. Successful
+/// registrations leave the discovery baseline; the stability wait is skipped
+/// because imported files are already static.
 /// Paths outside the source directory, non-images and empty files are
-/// skipped; already-registered paths are ignored. Returns the number of
-/// newly imported captures.
+/// skipped; already-registered and deliberately ignored content are skipped.
+/// Returns the newly imported captures.
 pub async fn import_directory_captures(
     pool: &SqlitePool,
     input: ImportDirectoryCapturesInput,
@@ -1964,6 +1968,13 @@ pub async fn import_directory_captures(
         if metadata.len() == 0 {
             continue;
         }
+        // Recheck even when the dialog already filtered ignored content:
+        // a capture may have been removed since the list was loaded.
+        let Some((item, created)) =
+            register_eligible_path(pool, session_id, &canonical, true).await?
+        else {
+            continue;
+        };
         let source_path = path_to_string(&canonical);
         sqlx::query(
             "DELETE FROM capture_session_baseline_files WHERE session_id = ? AND source_path = ?",
@@ -1972,7 +1983,6 @@ pub async fn import_directory_captures(
         .bind(&source_path)
         .execute(pool)
         .await?;
-        let (item, created) = register_discovered_path(pool, session_id, &canonical, true).await?;
         if created {
             imported.push(item);
         }
@@ -2421,6 +2431,23 @@ pub(crate) async fn register_discovered_path(
     source_path: &Path,
     recognition_deferred: bool,
 ) -> Result<(CaptureItem, bool), AppError> {
+    register_eligible_path(pool, session_id, source_path, recognition_deferred)
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "capture content was removed from Scene Vault and is ignored".to_owned(),
+            )
+        })
+}
+
+/// None means the user deliberately removed this content from the project.
+/// Batch imports skip that expected exclusion without suppressing real errors.
+async fn register_eligible_path(
+    pool: &SqlitePool,
+    session_id: &str,
+    source_path: &Path,
+    recognition_deferred: bool,
+) -> Result<Option<(CaptureItem, bool)>, AppError> {
     let session = require_active_session(pool, session_id).await?;
     let metadata = tokio::fs::metadata(source_path).await?;
     let file_size = i64::try_from(metadata.len())
@@ -2432,9 +2459,7 @@ pub(crate) async fn register_discovered_path(
     let content_hash = sha256_file(source_path).await?;
 
     if is_content_ignored(pool, &session.project_id, &content_hash).await? {
-        return Err(AppError::Conflict(
-            "capture content was removed from Scene Vault and is ignored".to_owned(),
-        ));
+        return Ok(None);
     }
 
     // Content fingerprint dedup: the same image found in another directory
@@ -2474,7 +2499,7 @@ pub(crate) async fn register_discovered_path(
         .bind(&duplicate_id)
         .fetch_one(pool)
         .await?;
-        return Ok((item, false));
+        return Ok(Some((item, false)));
     }
 
     let result = sqlx::query(
@@ -2546,7 +2571,7 @@ pub(crate) async fn register_discovered_path(
         clear_replaced_source_facts(pool, &session.project_id, &source_path, &item.id).await;
     }
     refresh_source_facts_best_effort(pool, &item.id, &item.source_path).await;
-    Ok((item, created))
+    Ok(Some((item, created)))
 }
 
 pub(crate) async fn is_content_ignored(

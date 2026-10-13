@@ -22,6 +22,7 @@ import {
   TriangleAlert,
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
+import RenpyBadge from "@/components/capture/RenpyBadge.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import { ContextMenu } from "@/components/ui/context-menu";
@@ -33,8 +34,6 @@ import {
   archiveSpecSummary,
   engineVersionList,
   formatBytes,
-  renpyBadgeLabel,
-  renpyBadgeTitle,
 } from "@/lib/image-facts";
 import {
   DropdownMenu,
@@ -432,9 +431,12 @@ function setupLabel(project: ProjectOverviewSummary): string {
               <FolderKanban :size="32" aria-hidden="true" />
               <span>等待第一张截图</span>
             </div>
-            <span v-if="project.activeSessionCount" class="active-session-badge">
-              <span />正在捕获
-            </span>
+            <div v-if="project.engine === 'renpy' || project.activeSessionCount" class="project-cover-badges">
+              <RenpyBadge v-if="project.engine === 'renpy'" :versions="engineVersionList(project.engineVersions)" />
+              <span v-if="project.activeSessionCount" class="active-session-badge">
+                <span />正在捕获
+              </span>
+            </div>
           </div>
           <div class="project-card-body">
             <div class="project-title-row">
@@ -471,12 +473,7 @@ function setupLabel(project: ProjectOverviewSummary): string {
               <CheckCircle2 v-else :size="14" aria-hidden="true" />
               {{ setupLabel(project) }}
             </div>
-            <p class="project-spec" style="display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12px; opacity: 0.85;">
-              <span
-                v-if="project.engine === 'renpy'"
-                :title="renpyBadgeTitle(engineVersionList(project.engineVersions)) ?? undefined"
-                style="display: inline-block; padding: 1px 6px; border-radius: 999px; border: 1px solid rgba(128,128,128,0.5); font-size: 11px;"
-              >{{ renpyBadgeLabel(engineVersionList(project.engineVersions)) }}</span>
+            <p class="project-spec">
               归档规格：{{ archiveSpecSummary(project.archiveOutputSize, project.archiveOutputFormat, project.archiveOutputQuality) }}
             </p>
           </div>
@@ -548,7 +545,10 @@ function setupLabel(project: ProjectOverviewSummary): string {
             <FolderKanban v-else :size="23" aria-hidden="true" />
           </div>
           <div class="row-project-copy">
-            <strong>{{ project.name }}</strong>
+            <div class="row-project-title">
+              <strong :title="project.name">{{ project.name }}</strong>
+              <RenpyBadge v-if="project.engine === 'renpy'" :versions="engineVersionList(project.engineVersions)" />
+            </div>
             <span>{{ setupLabel(project) }}</span>
             <div class="row-counts">
               <span class="pending"><i />{{ project.awaitingCount }} 待分类</span>
@@ -561,11 +561,6 @@ function setupLabel(project: ProjectOverviewSummary): string {
                 {{ project.activeSessionCount ? "捕获中" : `${project.sessionCount} 个会话` }}
               </span>
               <span class="row-spec">
-                <span
-                  v-if="project.engine === 'renpy'"
-                  :title="renpyBadgeTitle(engineVersionList(project.engineVersions)) ?? undefined"
-                  style="display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 999px; border: 1px solid rgba(128,128,128,0.5); font-size: 10px;"
-                >{{ renpyBadgeLabel(engineVersionList(project.engineVersions)) }}</span>
                 归档规格：{{ archiveSpecSummary(project.archiveOutputSize, project.archiveOutputFormat, project.archiveOutputQuality) }}
               </span>
             </div>
@@ -991,11 +986,19 @@ function setupLabel(project: ProjectOverviewSummary): string {
   font-size: 11.5px;
 }
 
-.active-session-badge {
+.project-cover-badges {
   position: absolute;
   z-index: 1;
   top: 12px;
   left: 12px;
+  right: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.active-session-badge {
   display: inline-flex;
   height: 26px;
   align-items: center;
@@ -1018,6 +1021,7 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .project-title-row h2 { margin: 0; font-size: 17px; font-weight: 750; letter-spacing: -.015em; }
 .project-title-row p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 11.5px; }
 .project-description { overflow: hidden; margin: 10px 0 0; color: var(--muted-foreground); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.project-spec { margin: 6px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
 
 .project-statuses { display: flex; min-height: 25px; flex-wrap: wrap; align-items: center; gap: 11px; margin-top: 14px; }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 11.5px; }
@@ -1089,8 +1093,9 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .row-project { display: grid; min-width: 0; grid-template-columns: 90px minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 9px 0 9px 14px; }
 .row-cover { display: grid; width: 90px; height: 62px; flex: none; overflow: hidden; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--muted-foreground); }
 .row-project-copy { min-width: 0; }
-.row-project-copy > strong, .row-project-copy > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-project-copy > strong { font-size: 13.5px; }
+.row-project-title { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.row-project-title > strong, .row-project-copy > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-project-title > strong { min-width: 0; font-size: 13.5px; }
 .row-project-copy > span { margin-top: 5px; color: var(--muted-foreground); font-size: 10.5px; }
 .project-row time { padding-left: 10px; color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
 

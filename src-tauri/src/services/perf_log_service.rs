@@ -1,6 +1,7 @@
 //! Performance instrumentation channel.
 //!
-//! Timing records (image reads, archive resizes, scans, AI requests) go into
+//! Timing records (image reads/display, archive saves, scans, AI requests)
+//! and low-frequency process/cache samples go into
 //! their own rotating JSONL file under `logs/perf` instead of the debug log,
 //! so the main log stays readable and the whole channel can be switched off
 //! with one setting without touching the call sites.

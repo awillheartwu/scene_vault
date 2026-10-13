@@ -10,12 +10,14 @@ use crate::{
         engine::{
             BridgeUninstallResult, CaptureEngineMetadata, DetectEngineInput, EngineDetection,
             InstallEngineBridgeInput, LaunchProjectGameInput, ProjectEngineInput,
-            ProjectEngineIntegrationView, ProjectGameLaunchOption, UninstallEngineBridgeInput,
+            ProjectEngineIntegrationView, ProjectGameLaunchOption, RenpyScreenshotPolicyView,
+            SetInstallationRenpyScreenshotPolicyInput, SetProjectRenpyScreenshotPolicyInput,
+            UninstallEngineBridgeInput,
         },
     },
     services::{
         engine_detection_service, engine_metadata_service, game_launch_service,
-        renpy_bridge_service,
+        renpy_bridge_service, renpy_screenshot_settings_service,
     },
 };
 
@@ -73,4 +75,56 @@ pub async fn launch_project_game(
     input: LaunchProjectGameInput,
 ) -> Result<ProjectGameLaunchOption, AppError> {
     game_launch_service::launch(&state.pool, input).await
+}
+
+#[tauri::command]
+pub async fn get_project_renpy_screenshot_policy(
+    state: State<'_, AppState>,
+    input: ProjectEngineInput,
+) -> Result<RenpyScreenshotPolicyView, AppError> {
+    renpy_screenshot_settings_service::project_policy(&state.pool, &input.project_id).await
+}
+
+#[tauri::command]
+pub async fn set_project_renpy_screenshot_policy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: SetProjectRenpyScreenshotPolicyInput,
+) -> Result<RenpyScreenshotPolicyView, AppError> {
+    renpy_screenshot_settings_service::set_project(
+        &state.pool,
+        &app,
+        &input.project_id,
+        input.auto_hide_ui,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn set_installation_renpy_screenshot_policy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: SetInstallationRenpyScreenshotPolicyInput,
+) -> Result<ProjectEngineIntegrationView, AppError> {
+    let project_id = input.project_id.trim();
+    let integration_id = input.integration_id.trim();
+    renpy_screenshot_settings_service::set_installation(
+        &state.pool,
+        &app,
+        project_id,
+        integration_id,
+        input.auto_hide_ui,
+    )
+    .await?;
+    renpy_bridge_service::status(
+        &state.pool,
+        Some(&app),
+        ProjectEngineInput {
+            project_id: project_id.to_owned(),
+        },
+    )
+    .await?
+    .into_iter()
+    .find(|view| view.integration.id == integration_id)
+    .ok_or_else(|| AppError::NotFound("engine integration".to_owned()))
 }

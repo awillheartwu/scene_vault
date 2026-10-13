@@ -35,8 +35,11 @@ Download from [Releases](https://github.com/awillheartwu/scene_vault/releases):
 
 | Installer | Contents | Size |
 |---|---|---|
-| `scene-vault-1.0.0-ai-setup.exe` | App + bundled AI engine (YuNet/SFace/Chinese annotation font) | ~110 MB |
-| `scene-vault-1.0.0-setup.exe` | App only (AI engine can be enabled later) | ~6 MB |
+| `scene-vault-<version>-ai-setup.exe` | App + bundled AI engine (YuNet/SFace/Chinese annotation font) | ~110 MB |
+| `scene-vault-<version>-setup.exe` | App only (AI engine can be enabled later) | ~6 MB |
+
+See the [release notes](RELEASE_NOTES.md) for current changes and validation.
+Download sizes depend on the actual release artifacts.
 
 **Quick start**: install and launch → create a project → add **screenshot source
 directories** (where the game stores captures) and an **archive directory**
@@ -82,6 +85,11 @@ unclassified/scene/private classifications stay manual.
   characters per project; server-side pagination for item lists
 - **Logging & diagnostics**: structured local logs, resource and engine status
   panels in settings, data inspection and index maintenance
+- **Ren'Py integration**: multiple game installations, speaker suggestions and
+  automatic UI hiding with per-game screenshot settings
+- **Images & performance**: configurable archive size, PNG/JPEG/lossless WebP
+  and JPEG quality; a shared background processing limit for image and face
+  tasks, with optional performance logs for loading, saving and resource samples
 
 ## Building from source
 
@@ -89,7 +97,7 @@ unclassified/scene/private classifications stay manual.
 
 ```powershell
 pnpm install
-npx vitest run          # frontend tests
+pnpm test               # test type check + frontend tests (release wrap-up)
 pnpm build              # type check + production build
 start-tauri-dev.bat     # dev mode (vite + cargo run)
 ```
@@ -112,8 +120,8 @@ python -m scene_vault_ai health
 
 `scripts/release-windows.ps1` builds both NSIS installers in one pass: frontend
 build → PyInstaller sidecar → models/fonts packaging → NSIS. Common flags:
-`-SkipAI` (small package only), `-AffinityMask` (CPU pinning; 0xF recommended on
-13900K-class machines), `-SignCertificatePath` (optional signing). GitHub
+`-SkipAI` (small package only), `-AffinityMask` (local default: 0x3FF, CPU 0–9),
+`-SignCertificatePath` (optional signing). GitHub
 Actions (`.github/workflows/release-windows.yml`) builds automatically on `v*`
 tags and attaches the installers to the Release.
 

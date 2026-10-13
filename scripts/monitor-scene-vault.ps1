@@ -3,6 +3,9 @@
 在 Scene Vault 日常使用期间采样内存占用与缓存体积，输出 CSV 供事后分析。
 
 .DESCRIPTION
+应用已内置同类后台采样，受“性能日志写入独立文件”开关控制，记录在 logs\perf；
+可用 analyze-image-timing.ps1 汇总。本脚本仍提供独立 CSV 采样，用于外部对照，
+需要手动启动/停止，不受应用日志开关控制。
 每个采样间隔写一行 CSV，记录：
 - Scene Vault 主进程（Rust）的 Working Set / Private Bytes / 累计 CPU 时间、线程与句柄数
 - Python 视觉 worker（scene-vault-ai）的进程数与内存合计

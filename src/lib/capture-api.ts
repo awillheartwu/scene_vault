@@ -16,7 +16,7 @@ async function invoke<T>(
           level: "error",
           module: "ipc",
           event: "command_failed",
-          message: `${command} failed`,
+          message: `${command} failed: ${error instanceof Error ? error.message : String(error)}`,
           operationId: command,
           outcome: "failed",
           errorCode: "tauri_invoke_error",
@@ -39,6 +39,7 @@ function reportImageReadTiming(
   variant: string,
   bytes: number,
   durationMs: number,
+  outcome: "ok" | "failed" = "ok",
 ): void {
   void tauriInvoke("record_client_event", {
     input: {
@@ -49,7 +50,7 @@ function reportImageReadTiming(
       operationId: command,
       captureItemId,
       durationMs,
-      outcome: "ok",
+      outcome,
       channel: "perf",
     },
   }).catch(() => undefined);
@@ -758,6 +759,18 @@ export interface AppSettings {
   captureOutputAutoCleanupRetentionDays: number;
 }
 
+/** Global default, stored separately from AppSettings. */
+export interface RenpyScreenshotSettings {
+  autoHideUi: boolean;
+}
+
+export interface RenpyScreenshotPolicyView {
+  /** null inherits the global default. */
+  projectAutoHideUi: boolean | null;
+  globalAutoHideUi: boolean;
+  resolvedAutoHideUi: boolean;
+}
+
 export interface ThumbnailCacheStatus {
   dir: string;
   totalBytes: number;
@@ -1020,6 +1033,7 @@ export const captureApi = {
     event: string;
     message?: string | null;
     operationId?: string | null;
+    captureItemId?: string | null;
     durationMs?: number | null;
     outcome?: string | null;
     errorCode?: string | null;
@@ -1056,6 +1070,12 @@ export const captureApi = {
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   updateAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("update_app_settings", { input: { settings } }),
+  getRenpyScreenshotSettings: () =>
+    invoke<RenpyScreenshotSettings>("get_renpy_screenshot_settings"),
+  updateRenpyScreenshotSettings: (settings: RenpyScreenshotSettings) =>
+    invoke<RenpyScreenshotSettings>("update_renpy_screenshot_settings", {
+      input: { settings },
+    }),
   getArchiveNamingSettings: () =>
     invoke<ArchiveNamingSettings>("get_archive_naming_settings"),
   updateArchiveNamingSettings: (settings: ArchiveNamingSettings) =>
@@ -1153,42 +1173,52 @@ export const captureApi = {
     variant: "source" | "annotated" | "avatar" | "destination",
   ) => {
     const started = performance.now();
-    const bytes = await invoke<ArrayBuffer>(
-      "read_capture_image",
-      { input: { captureItemId, variant } },
-      // Media reads are speculative: cards deliberately fall back to another
-      // variant or an ImageOff placeholder when files were removed outside
-      // Scene Vault. The backend still updates file state, while the caller
-      // decides whether an explicit preview should surface the error.
-      { recordFailure: false },
-    );
-    reportImageReadTiming(
-      "read_capture_image",
-      captureItemId,
-      variant,
-      bytes.byteLength,
-      performance.now() - started,
-    );
-    return bytes;
+    try {
+      const bytes = await invoke<ArrayBuffer>(
+        "read_capture_image",
+        { input: { captureItemId, variant } },
+        // Media reads are speculative: cards deliberately fall back to another
+        // variant or an ImageOff placeholder when files were removed outside
+        // Scene Vault. The backend still updates file state, while the caller
+        // decides whether an explicit preview should surface the error.
+        { recordFailure: false },
+      );
+      reportImageReadTiming(
+        "read_capture_image",
+        captureItemId,
+        variant,
+        bytes.byteLength,
+        performance.now() - started,
+      );
+      return bytes;
+    } catch (error) {
+      reportImageReadTiming("read_capture_image", captureItemId, variant, 0, performance.now() - started, "failed");
+      throw error;
+    }
   },
   readThumbnail: async (
     captureItemId: string,
     variant: "source" | "annotated" | "avatar" | "destination",
   ) => {
     const started = performance.now();
-    const bytes = await invoke<ArrayBuffer>(
-      "read_capture_thumbnail",
-      { input: { captureItemId, variant } },
-      { recordFailure: false },
-    );
-    reportImageReadTiming(
-      "read_capture_thumbnail",
-      captureItemId,
-      variant,
-      bytes.byteLength,
-      performance.now() - started,
-    );
-    return bytes;
+    try {
+      const bytes = await invoke<ArrayBuffer>(
+        "read_capture_thumbnail",
+        { input: { captureItemId, variant } },
+        { recordFailure: false },
+      );
+      reportImageReadTiming(
+        "read_capture_thumbnail",
+        captureItemId,
+        variant,
+        bytes.byteLength,
+        performance.now() - started,
+      );
+      return bytes;
+    } catch (error) {
+      reportImageReadTiming("read_capture_thumbnail", captureItemId, variant, 0, performance.now() - started, "failed");
+      throw error;
+    }
   },
   getThumbnailCacheStatus: () => invoke<ThumbnailCacheStatus>("thumbnail_cache_status"),
 };
@@ -1198,7 +1228,7 @@ export interface EngineDetection {
   engineRoot: string;
   gameDirectory: string;
   pythonMajor: number | null;
-  /** Exact engine version from renpy/vc_version.py, when readable. */
+  /** Exact engine version from the bundled Ren'Py version files. */
   engineVersion: string | null;
   bridgeInstalled: boolean;
 }
@@ -1212,6 +1242,10 @@ export interface ProjectEngineIntegration {
   pythonMajor: number | null;
   engineVersion: string | null;
   bridgeVersion: string;
+  /** Install-time fallback kept for compatibility with earlier bridges. */
+  autoHideUi: boolean;
+  /** null follows the project policy. */
+  autoHideUiOverride: boolean | null;
   manifestJson: string;
   installedAt: string;
   updatedAt: string;
@@ -1222,6 +1256,7 @@ export interface ProjectEngineIntegrationView {
   bridgeFilePresent: boolean;
   compiledFilePresent: boolean;
   bundledBridgeVersion: string;
+  resolvedAutoHideUi: boolean;
   /** Install-time advisory, e.g. a kept compiled artifact we cannot verify. */
   warning: string | null;
 }
@@ -1288,14 +1323,29 @@ export const engineApi = {
     invoke<ProjectEngineIntegrationView[]>("get_project_engine_integration", {
       input: { projectId },
     }),
-  installBridge: (projectId: string, path: string) =>
+  installBridge: (projectId: string, path: string, autoHideUi?: boolean) =>
     invoke<ProjectEngineIntegrationView>("install_project_engine_bridge", {
-      input: { projectId, path },
+      input: { projectId, path, ...(autoHideUi === undefined ? {} : { autoHideUi }) },
     }),
   uninstallBridge: (projectId: string, integrationId?: string) =>
     invoke<BridgeUninstallResult>("uninstall_project_engine_bridge", {
       input: integrationId ? { projectId, integrationId } : { projectId },
     }),
+  getScreenshotPolicy: (projectId: string) =>
+    invoke<RenpyScreenshotPolicyView>("get_project_renpy_screenshot_policy", {
+      input: { projectId },
+    }),
+  setProjectScreenshotPolicy: (projectId: string, autoHideUi: boolean | null) =>
+    invoke<RenpyScreenshotPolicyView>("set_project_renpy_screenshot_policy", {
+      input: { projectId, autoHideUi },
+    }),
+  setInstallationScreenshotPolicy: (
+    projectId: string,
+    integrationId: string,
+    autoHideUi: boolean | null,
+  ) => invoke<ProjectEngineIntegrationView>("set_installation_renpy_screenshot_policy", {
+    input: { projectId, integrationId, autoHideUi },
+  }),
   getCaptureMetadata: (captureItemId: string) =>
     invoke<CaptureEngineMetadata | null>("get_capture_engine_metadata", {
       input: { captureItemId },

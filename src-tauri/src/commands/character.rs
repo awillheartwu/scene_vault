@@ -79,6 +79,9 @@ pub async fn delete_character(
     state: State<'_, AppState>,
     input: DeleteCharacterCapturesInput,
 ) -> Result<CaptureDeletionResult, AppError> {
+    let project_id = character_service::get(&state.pool, input.character_id.trim())
+        .await?
+        .project_id;
     let result = capture_deletion_service::delete_character(
         &state.pool,
         &app.path().app_cache_dir()?,
@@ -88,7 +91,14 @@ pub async fn delete_character(
         input.allow_permanent_network_delete,
         &SystemRecycleBin,
     )
-    .await?;
+    .await;
+    if !matches!(&result, Ok(result) if result.completed) {
+        let _ = app.emit(
+            "capture:project-files-updated",
+            serde_json::json!({ "projectId": project_id }),
+        );
+    }
+    let result = result?;
     if result.completed {
         for id in &result.deleted_capture_item_ids {
             let _ = app.emit(

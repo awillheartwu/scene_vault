@@ -157,6 +157,8 @@ pub async fn health(settings: &VisionSettings) -> Result<VisionHealth, AppError>
     })
 }
 
+// Keep the established processing boundary's paths and optional ROI explicit.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_screenshot_with_roi(
     settings: &VisionSettings,
     input_path: &Path,

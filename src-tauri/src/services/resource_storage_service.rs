@@ -183,6 +183,67 @@ fn disk_usage(path: &Path) -> DiskUsage {
         })
 }
 
+/// Low-frequency diagnostics of app-owned paths only; never follows links.
+pub fn performance_snapshot(
+    paths: &[(String, PathBuf)],
+    should_continue: impl Fn() -> bool,
+) -> serde_json::Value {
+    let mut entries = Vec::new();
+    for (kind, root) in paths {
+        if !should_continue() {
+            return serde_json::Value::Null;
+        }
+        let mut usage = DiskUsage::default();
+        let mut complete = true;
+        let mut pending = vec![root.clone()];
+        while let Some(path) = pending.pop() {
+            if !should_continue() {
+                return serde_json::Value::Null;
+            }
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    complete = false;
+                    continue;
+                }
+            }
+            if metadata.file_type().is_symlink() {
+                complete = false;
+                continue;
+            }
+            if metadata.is_file() {
+                usage.bytes = usage.bytes.saturating_add(metadata.len());
+                usage.files = usage.files.saturating_add(1);
+            } else if metadata.is_dir() {
+                match fs::read_dir(&path) {
+                    Ok(children) => {
+                        for child in children {
+                            match child {
+                                Ok(child) => pending.push(child.path()),
+                                Err(_) => complete = false,
+                            }
+                        }
+                    }
+                    Err(_) => complete = false,
+                }
+            }
+        }
+        entries.push(serde_json::json!({
+            "kind": kind, "bytes": usage.bytes, "files": usage.files, "complete": complete,
+        }));
+    }
+    serde_json::json!({ "entries": entries })
+}
+
 fn clear_directory(root: &Path) -> Result<DiskUsage, AppError> {
     if fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(AppError::Validation(format!(

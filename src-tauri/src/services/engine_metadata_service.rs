@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use sqlx::SqlitePool;
@@ -205,29 +205,32 @@ pub async fn retry_pending(
     // install's metadata directory: a backlog of plain screenshots can never
     // starve an older late JSON out of the retry budget.
     struct InstallFiles {
-        engine_root: String,
-        game_directory: String,
         metadata_directory: String,
         stems: std::collections::HashSet<String>,
+        files: Vec<PathBuf>,
     }
-    let install_rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT project_id, engine_root, game_directory, metadata_directory \
+    let install_rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT project_id, metadata_directory \
          FROM project_engine_integrations ORDER BY installed_at ASC, id ASC",
     )
     .fetch_all(pool)
     .await?;
     let mut by_project: std::collections::HashMap<String, Vec<InstallFiles>> =
         std::collections::HashMap::new();
-    for (project_id, engine_root, game_directory, metadata_directory) in install_rows {
+    for (project_id, metadata_directory) in install_rows {
         let Some(metadata_directory) = metadata_directory else {
             continue;
         };
         let mut stems = std::collections::HashSet::new();
+        let mut files = Vec::new();
         if let Ok(mut entries) = tokio::fs::read_dir(&metadata_directory).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
                 if let Some(stem) = name.strip_suffix(".scenevault.json") {
                     stems.insert(stem.to_owned());
+                    if entry.file_type().await.is_ok_and(|kind| kind.is_file()) {
+                        files.push(entry.path());
+                    }
                 }
             }
         }
@@ -238,10 +241,9 @@ pub async fn retry_pending(
             .entry(project_id)
             .or_default()
             .push(InstallFiles {
-                engine_root,
-                game_directory,
                 metadata_directory,
                 stems,
+                files,
             });
     }
     let mut attached = 0_u32;
@@ -250,16 +252,9 @@ pub async fn retry_pending(
         if processed >= limit {
             break;
         }
-        let rows: Vec<(String, String, Option<String>)> = installs
-            .iter()
-            .map(|install| {
-                (
-                    install.engine_root.clone(),
-                    install.game_directory.clone(),
-                    Some(install.metadata_directory.clone()),
-                )
-            })
-            .collect();
+        // Include installs without sidecars as well: a nested game still
+        // owns its paths even while its metadata directory is empty.
+        let rows = project_install_rows(pool, &project_id).await?;
         // Newest first: a sidecar lands seconds after its PNG, so the retry
         // pass only guarantees the recent window; sidecar-driven filtering
         // keeps plain screenshots from spending the budget.
@@ -315,8 +310,156 @@ pub async fn retry_pending(
                 ),
             }
         }
+        if processed >= limit {
+            continue;
+        }
+        let directories: Vec<String> = sqlx::query_scalar(
+            "SELECT directory FROM project_source_directories WHERE project_id = ? AND enabled = 1",
+        )
+        .bind(&project_id)
+        .fetch_all(pool)
+        .await?;
+        let mut source_directories = Vec::new();
+        for directory in directories {
+            if let Ok(path) = tokio::fs::canonicalize(directory).await {
+                source_directories.push(path);
+            }
+        }
+        for install in installs {
+            for file in install.files {
+                if processed >= limit {
+                    break;
+                }
+                if !tokio::fs::try_exists(&file).await.unwrap_or(false) {
+                    continue;
+                }
+                processed = processed.saturating_add(1);
+                if let Err(error) =
+                    discard_redundant_metadata(pool, &project_id, &file, &rows, &source_directories)
+                        .await
+                {
+                    log_service::warn(
+                        "engine.metadata",
+                        format!(
+                            "failed to clean redundant metadata {}: {error}",
+                            file.display()
+                        ),
+                    );
+                }
+            }
+        }
     }
     Ok(attached)
+}
+
+/// A duplicate has no row at its new filename, so the ordinary attachment
+/// retry cannot consume it. Only discard a sidecar after its own install and
+/// a unique, unchanged source prove the content was already indexed/ignored.
+/// Unregistered new images, ambiguous paths and future schemas stay pending.
+async fn discard_redundant_metadata(
+    pool: &SqlitePool,
+    project_id: &str,
+    file: &Path,
+    installs: &[(String, String, Option<String>)],
+    source_directories: &[PathBuf],
+) -> Result<bool, AppError> {
+    let raw = match tokio::fs::read_to_string(file).await {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(false);
+    };
+    if payload
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_i64)
+        != Some(SUPPORTED_SCHEMA_VERSION)
+    {
+        return Ok(false);
+    }
+    let Some(filename) = payload
+        .get("screenshot")
+        .and_then(|screenshot| screenshot.get("file"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    if filename.contains(['/', '\\'])
+        || !capture_service::is_supported_image(Path::new(filename))
+        || !file.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .eq_ignore_ascii_case(&metadata_file_name_for(Path::new(filename)))
+        })
+    {
+        return Ok(false);
+    }
+    let metadata_directory = file.parent().unwrap_or_else(|| Path::new(""));
+    let mut sources = std::collections::HashSet::new();
+    for directory in source_directories {
+        let Ok(source) = tokio::fs::canonicalize(directory.join(filename)).await else {
+            continue;
+        };
+        if !capture_service::path_is_within(&source, directory) {
+            continue;
+        }
+        let source_path = capture_service::path_to_string(&source);
+        if resolve_directory_from_rows(installs, &source_path).is_some_and(|resolved| {
+            normalized_path(&resolved)
+                == normalized_path(&capture_service::path_to_string(metadata_directory))
+        }) {
+            sources.insert(source);
+        }
+    }
+    if sources.len() != 1 {
+        return Ok(false);
+    }
+    let source = sources.into_iter().next().expect("one metadata source");
+    let before = tokio::fs::metadata(&source).await?;
+    if !before.is_file() || before.len() == 0 {
+        return Ok(false);
+    }
+    let hash = capture_service::sha256_file(&source).await?;
+    let source_path = capture_service::path_to_string(&source);
+    let original: Option<(String, bool)> = sqlx::query_as(
+        r#"
+        SELECT ci.source_path,
+               EXISTS(SELECT 1 FROM capture_engine_metadata cem WHERE cem.capture_item_id = ci.id)
+        FROM capture_items ci
+        WHERE ci.project_id = ? AND ci.content_hash = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(project_id)
+    .bind(&hash)
+    .fetch_optional(pool)
+    .await?;
+    if original.as_ref().is_some_and(|(path, has_metadata)| {
+        !*has_metadata && normalized_path(path) == normalized_path(&source_path)
+    }) || (original.is_none()
+        && !capture_service::is_content_ignored(pool, project_id, &hash).await?)
+    {
+        return Ok(false);
+    }
+    let after = tokio::fs::metadata(&source).await?;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || capture_service::sha256_file(&source).await? != hash
+        || tokio::fs::read_to_string(file).await? != raw
+    {
+        return Ok(false);
+    }
+    match tokio::fs::remove_file(file).await {
+        Ok(()) => {
+            log_service::debug(
+                "engine.metadata",
+                format!("removed redundant screenshot metadata {}", file.display()),
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub async fn get_capture_metadata(
@@ -554,65 +697,6 @@ mod tests {
             .expect("re-attach"));
     }
 
-    #[tokio::test]
-    async fn legacy_asset_fields_are_ignored() {
-        let fixture = fixture("legacy").await;
-        let item = register_capture(&fixture, "screenshot0002", 0).await;
-        write_metadata(
-            &fixture,
-            "screenshot0002",
-            &serde_json::json!({
-                "schemaVersion": 1,
-                "bridgeVersion": "1.0.0",
-                "assetsDirectory": "C:/elsewhere",
-                "sourceAssets": [{
-                    "path": "images/bg.png",
-                    "staged": "abc.png",
-                    "sha256": "0".repeat(64),
-                    "bytes": 1
-                }],
-                "speaker": "Ashley",
-                "errors": []
-            }),
-        );
-        assert!(try_attach(&fixture.pool, &item.id).await.expect("attach"));
-        assert!(get_capture_metadata(&fixture.pool, &item.id)
-            .await
-            .expect("metadata")
-            .is_some());
-    }
-
-    #[tokio::test]
-    async fn retry_skips_captures_without_metadata_files() {
-        let fixture = fixture("retry").await;
-        let older = register_capture(&fixture, "screenshot0001", 0).await;
-        write_metadata(
-            &fixture,
-            "screenshot0001",
-            &serde_json::json!({
-                "schemaVersion": 1,
-                "bridgeVersion": "1.1.0",
-                "speaker": "Ashley",
-                "errors": []
-            }),
-        );
-        // Newer capture without a metadata file (third-party screenshot tool).
-        let newer = register_capture(&fixture, "screenshot0002", 1).await;
-
-        let attached = retry_pending(&fixture.pool, None, 200)
-            .await
-            .expect("retry");
-        assert!(attached >= 1);
-        assert!(get_capture_metadata(&fixture.pool, &older.id)
-            .await
-            .expect("metadata")
-            .is_some());
-        assert!(get_capture_metadata(&fixture.pool, &newer.id)
-            .await
-            .expect("metadata")
-            .is_none());
-    }
-
     async fn register_capture_in(
         fixture: &Fixture,
         directory: &Path,
@@ -758,5 +842,315 @@ mod tests {
             .await
             .expect("metadata")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn retry_discards_duplicate_sidecar_without_changing_original_metadata() {
+        let fixture = fixture("duplicate-metadata").await;
+        let original = register_capture(&fixture, "screenshot0140", 0).await;
+        write_metadata(
+            &fixture,
+            "screenshot0140",
+            &serde_json::json!({ "schemaVersion": 1, "speaker": "Original" }),
+        );
+        assert!(try_attach(&fixture.pool, &original.id).await.unwrap());
+        let duplicate = fixture.source_directory.join("screenshot0217.png");
+        tokio::fs::copy(&original.source_path, &duplicate)
+            .await
+            .unwrap();
+        write_metadata(
+            &fixture,
+            "screenshot0217",
+            &serde_json::json!({
+                "schemaVersion": 1, "speaker": "Duplicate",
+                "screenshot": { "file": "screenshot0217.png" }
+            }),
+        );
+        let (item, inserted) = capture_service::register_discovered_path(
+            &fixture.pool,
+            &fixture.session_id,
+            &duplicate,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!inserted);
+        assert_eq!(item.id, original.id);
+
+        assert_eq!(retry_pending(&fixture.pool, None, 200).await.unwrap(), 0);
+        assert!(!fixture
+            .metadata_directory
+            .join("screenshot0217.scenevault.json")
+            .exists());
+        assert!(duplicate.exists(), "cleanup never removes the screenshot");
+        let metadata = get_capture_metadata(&fixture.pool, &original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.speaker_raw.as_deref(), Some("Original"));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capture_items")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn retry_discards_late_duplicate_after_session_stops_without_attaching_to_original() {
+        let fixture = fixture("late-duplicate").await;
+        let original = register_capture(&fixture, "screenshot0140", 0).await;
+        let duplicate = fixture.source_directory.join("screenshot0217.png");
+        tokio::fs::copy(&original.source_path, &duplicate)
+            .await
+            .unwrap();
+        let (_, inserted) = capture_service::register_discovered_path(
+            &fixture.pool,
+            &fixture.session_id,
+            &duplicate,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!inserted);
+        assert_eq!(retry_pending(&fixture.pool, None, 200).await.unwrap(), 0);
+        sqlx::query("UPDATE capture_sessions SET status = 'completed' WHERE id = ?")
+            .bind(&fixture.session_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        write_metadata(
+            &fixture,
+            "screenshot0217",
+            &serde_json::json!({
+                "schemaVersion": 1, "speaker": "Late duplicate",
+                "screenshot": { "file": "screenshot0217.png" }
+            }),
+        );
+
+        assert_eq!(retry_pending(&fixture.pool, None, 200).await.unwrap(), 0);
+        assert!(!fixture
+            .metadata_directory
+            .join("screenshot0217.scenevault.json")
+            .exists());
+        assert!(get_capture_metadata(&fixture.pool, &original.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_keeps_unregistered_metadata_even_when_another_project_has_the_image() {
+        let fixture = fixture("pending-metadata").await;
+        let other = test_support::project_with_directories(&fixture.pool, "Other project")
+            .await
+            .unwrap();
+        let other_session = test_support::start_session(&fixture.pool, &other.project_id)
+            .await
+            .unwrap();
+        let screenshot = fixture.source_directory.join("screenshot0001.png");
+        let other_screenshot = other.source_directory.join("screenshot0001.png");
+        tokio::fs::write(&screenshot, png_bytes(320, 180))
+            .await
+            .unwrap();
+        tokio::fs::copy(&screenshot, &other_screenshot)
+            .await
+            .unwrap();
+        capture_service::register_discovered_path(
+            &fixture.pool,
+            &other_session.id,
+            &other_screenshot,
+            true,
+        )
+        .await
+        .unwrap();
+        write_metadata(
+            &fixture,
+            "screenshot0001",
+            &serde_json::json!({
+                "schemaVersion": 1, "speaker": "Pending",
+                "screenshot": { "file": "screenshot0001.png" }
+            }),
+        );
+        assert_eq!(retry_pending(&fixture.pool, None, 200).await.unwrap(), 0);
+        assert!(fixture
+            .metadata_directory
+            .join("screenshot0001.scenevault.json")
+            .exists());
+
+        // Starting the other project ended this project's earlier session.
+        let session = test_support::start_session(&fixture.pool, &fixture.project_id)
+            .await
+            .unwrap();
+        let (item, inserted) = capture_service::register_discovered_path(
+            &fixture.pool,
+            &session.id,
+            &screenshot,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(inserted);
+        assert_eq!(retry_pending(&fixture.pool, None, 200).await.unwrap(), 1);
+        let metadata = get_capture_metadata(&fixture.pool, &item.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.speaker_raw.as_deref(), Some("Pending"));
+    }
+
+    #[tokio::test]
+    async fn retry_discards_metadata_for_explicitly_ignored_content() {
+        let fixture = fixture("ignored-metadata").await;
+        let original = register_capture(&fixture, "screenshot0001", 0).await;
+        sqlx::query(
+            "INSERT INTO ignored_capture_contents (project_id, content_hash, source_path) VALUES (?, ?, ?)",
+        )
+        .bind(&fixture.project_id)
+        .bind(&original.content_hash)
+        .bind(&original.source_path)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM capture_items WHERE id = ?")
+            .bind(&original.id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        write_metadata(
+            &fixture,
+            "screenshot0001",
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "screenshot": { "file": "screenshot0001.png" }
+            }),
+        );
+
+        assert_eq!(retry_pending(&fixture.pool, None, 200).await.unwrap(), 0);
+        assert!(!fixture
+            .metadata_directory
+            .join("screenshot0001.scenevault.json")
+            .exists());
+        assert!(Path::new(&original.source_path).exists());
+    }
+
+    #[tokio::test]
+    async fn duplicate_cleanup_respects_nested_installs_with_same_named_screenshots() {
+        let fixture = fixture("nested-install-cleanup").await;
+        let original = register_capture(&fixture, "screenshot0000", 0).await;
+        let nested = fixture.source_directory.join("nested");
+        let nested_metadata = fixture._workspace.path().join("nested-metadata");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::create_dir_all(&nested_metadata).await.unwrap();
+        sqlx::query(
+            "INSERT INTO project_source_directories (id, project_id, directory) VALUES (?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&fixture.project_id)
+        .bind(capture_service::path_to_string(&nested))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO project_engine_integrations (id, project_id, engine, engine_root, game_directory, python_major, bridge_version, metadata_directory, manifest_json, installed_at, updated_at) VALUES (?, ?, 'renpy', ?, ?, 3, '1.1.7', ?, '[]', datetime('now'), datetime('now'))",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&fixture.project_id)
+        .bind(capture_service::path_to_string(&nested))
+        .bind(capture_service::path_to_string(&nested.join("game")))
+        .bind(capture_service::path_to_string(&nested_metadata))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let nested_screenshot = nested.join("screenshot0001.png");
+        tokio::fs::copy(&original.source_path, &nested_screenshot)
+            .await
+            .unwrap();
+        write_metadata(
+            &fixture,
+            "screenshot0001",
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "screenshot": { "file": "screenshot0001.png" }
+            }),
+        );
+        retry_pending(&fixture.pool, None, 200).await.unwrap();
+        let parent_sidecar = fixture
+            .metadata_directory
+            .join("screenshot0001.scenevault.json");
+        assert!(
+            parent_sidecar.exists(),
+            "an empty nested install still owns its paths"
+        );
+
+        tokio::fs::copy(
+            &original.source_path,
+            fixture.source_directory.join("screenshot0001.png"),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(&nested_screenshot, png_bytes(640, 360))
+            .await
+            .unwrap();
+        let nested_sidecar = nested_metadata.join("screenshot0001.scenevault.json");
+        tokio::fs::write(
+            &nested_sidecar,
+            tokio::fs::read(&parent_sidecar).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        retry_pending(&fixture.pool, None, 200).await.unwrap();
+        assert!(!parent_sidecar.exists());
+        assert!(
+            nested_sidecar.exists(),
+            "the other game's new metadata stays pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_cleanup_keeps_ambiguous_sources_and_unsupported_metadata() {
+        let fixture = fixture("guarded-cleanup").await;
+        let original = register_capture(&fixture, "screenshot0000", 0).await;
+        let duplicate = fixture.source_directory.join("screenshot0001.png");
+        tokio::fs::copy(&original.source_path, &duplicate)
+            .await
+            .unwrap();
+        for document in [
+            serde_json::json!({ "schemaVersion": 2, "screenshot": { "file": "screenshot0001.png" } }),
+            serde_json::json!({ "schemaVersion": 1, "screenshot": { "file": "../screenshot0001.png" } }),
+            serde_json::json!({ "schemaVersion": 1, "screenshot": { "file": "screenshot0000.png" } }),
+        ] {
+            write_metadata(&fixture, "screenshot0001", &document);
+            retry_pending(&fixture.pool, None, 200).await.unwrap();
+            assert!(fixture
+                .metadata_directory
+                .join("screenshot0001.scenevault.json")
+                .exists());
+        }
+        let additional = fixture.source_directory.join("additional");
+        tokio::fs::create_dir_all(&additional).await.unwrap();
+        tokio::fs::copy(&duplicate, additional.join("screenshot0001.png"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO project_source_directories (id, project_id, directory) VALUES (?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&fixture.project_id)
+        .bind(capture_service::path_to_string(&additional))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        write_metadata(
+            &fixture,
+            "screenshot0001",
+            &serde_json::json!({
+                "schemaVersion": 1, "screenshot": { "file": "screenshot0001.png" }
+            }),
+        );
+        retry_pending(&fixture.pool, None, 200).await.unwrap();
+        assert!(fixture
+            .metadata_directory
+            .join("screenshot0001.scenevault.json")
+            .exists());
     }
 }

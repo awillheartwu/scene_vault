@@ -596,21 +596,8 @@ async fn archive_and_emit(
     app: &AppHandle,
     item: &CaptureItem,
 ) -> Result<(), AppError> {
-    // Validate again immediately before archive. This protects both direct
-    // source archives and derived outputs from same-name source replacement.
-    match capture_service::validate_source_identity(pool, item).await {
-        Ok(_) => {}
-        Err(AppError::NotFound(_)) => {
-            purge_capture_and_emit(app, pool, item, "source_missing").await?;
-            return Ok(());
-        }
-        Err(error) => {
-            let scheduled =
-                capture_service::schedule_archive_retry(pool, &item.id, &error.to_string()).await?;
-            emit_item(app, &scheduled);
-            return Ok(());
-        }
-    }
+    // The shared archive service validates the source under its operation
+    // lock; the worker handles recovery without hashing the same input twice.
     capture_log(
         item,
         LogLevel::Info,
@@ -637,6 +624,9 @@ async fn archive_and_emit(
                 None,
             );
             emit_item(app, &completed);
+        }
+        Err(AppError::NotFound(ref kind)) if kind == "capture source image" => {
+            purge_capture_and_emit(app, pool, item, "source_missing").await?;
         }
         Err(error) => {
             let scheduled =
@@ -674,6 +664,10 @@ async fn purge_capture_and_emit(
             Some(error_code),
         );
         let _ = app.emit("capture:item-purged", json!({ "captureItemId": item.id }));
+    } else if let Ok(current) = capture_service::get_item(pool, &item.id).await {
+        // Archived history is retained by the guarded purge, but its newly
+        // invalid source state still needs to reach every open view.
+        emit_item(app, &current);
     }
     Ok(())
 }

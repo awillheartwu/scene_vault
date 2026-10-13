@@ -6,7 +6,7 @@ const props = defineProps<{ menu: ContextMenuController }>();
 
 const root = ref<HTMLElement | null>(null);
 const itemEls = ref<(HTMLElement | null)[]>([]);
-const focusedIndex = ref(0);
+const focusedIndex = ref(-1);
 const GAP = 8;
 const MIN_HEIGHT = 120;
 
@@ -48,20 +48,38 @@ function lastEnabledIndex(): number {
 
 function nextEnabled(from: number, direction: 1 | -1): number {
   const count = props.menu.state.items.length;
+  // Nothing focused yet: Down starts at the first row and Up at the last one.
+  const start = from < 0 ? (direction === 1 ? -1 : 0) : from;
   for (let step = 1; step <= count; step++) {
-    const index = (from + direction * step + count) % count;
+    const index = (start + direction * step + count) % count;
     if (!props.menu.state.items[index].disabled) return index;
   }
   return -1;
 }
 
 function focusItemAt(index: number) {
+  focusedIndex.value = index;
   if (index < 0) {
     root.value?.focus();
     return;
   }
-  focusedIndex.value = index;
   itemEls.value[index]?.focus();
+}
+
+// Match Reka: mouse movement focuses an enabled row; leaving it returns
+// focus to the menu so keyboard navigation follows the same highlight.
+function onItemPointerMove(event: PointerEvent, index: number) {
+  if (event.pointerType !== "mouse") return;
+  const item = props.menu.state.items[index];
+  const el = itemEls.value[index];
+  if (!item || item.disabled || !el || document.activeElement === el) return;
+  focusedIndex.value = index;
+  el.focus({ preventScroll: true });
+}
+
+function onItemPointerLeave(event: PointerEvent, index: number) {
+  if (event.pointerType !== "mouse" || focusedIndex.value !== index) return;
+  focusItemAt(-1);
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -178,6 +196,9 @@ onBeforeUnmount(() => {
           :class="{ 'context-menu-danger': item.danger, 'context-menu-disabled': item.disabled }"
           :disabled="item.disabled"
           @click="menu.select(item)"
+          @focus="focusedIndex = index"
+          @pointermove="onItemPointerMove($event, index)"
+          @pointerleave="onItemPointerLeave($event, index)"
         >
           <component
             :is="item.icon"
@@ -208,7 +229,8 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-.context-menu-item:focus-visible {
+/* Hover and keyboard share one focused row; disabled rows never highlight. */
+.context-menu-item:not(:disabled):focus {
   background: var(--accent);
   color: var(--accent-foreground);
 }
@@ -222,9 +244,13 @@ onBeforeUnmount(() => {
   color: var(--destructive);
 }
 
-.context-menu-item.context-menu-danger:focus-visible {
-  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+.context-menu-item.context-menu-danger:not(:disabled):focus {
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
   color: var(--destructive);
+}
+
+:global(.dark .context-menu-item.context-menu-danger:not(:disabled):focus) {
+  background: color-mix(in oklab, var(--destructive) 20%, transparent);
 }
 
 .context-menu-item.context-menu-danger .context-menu-icon {
@@ -236,6 +262,10 @@ onBeforeUnmount(() => {
   width: 1rem;
   height: 1rem;
   color: var(--muted-foreground);
+}
+
+.context-menu-item:not(:disabled):focus .context-menu-icon {
+  color: inherit;
 }
 
 .context-menu-separator {

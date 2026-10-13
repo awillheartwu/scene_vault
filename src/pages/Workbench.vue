@@ -24,6 +24,8 @@ import {
   X,
 } from "@lucide/vue";
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
+import ProjectSelect from "@/components/project/ProjectSelect.vue";
+import { useProjectEngineBadges } from "@/composables/useProjectEngineBadges";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
 import CaptureResetActions from "@/components/capture/CaptureResetActions.vue";
@@ -41,6 +43,7 @@ import PageHeader from "@/components/layout/PageHeader.vue";
 import ResponsiveDetailPanel from "@/components/layout/ResponsiveDetailPanel.vue";
 import { ContextMenu } from "@/components/ui/context-menu";
 import { useContextMenu, type ContextMenuItem } from "@/composables/useContextMenu";
+import { useAdaptiveLayout } from "@/composables/useAdaptiveLayout";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,12 +59,10 @@ import {
 } from "@/components/ui/dialog";
 import {
   captureApi,
-  engineApi,
   captureStatusLabel,
   pathFileName,
   revealPath,
   type CaptureItem,
-  type CaptureEngineMetadata,
   type CaptureImageFacts,
   type Character,
   type CharacterSummary,
@@ -74,17 +75,17 @@ import { describeError } from "@/lib/vision-errors";
 import {
   describeArchiveImage,
   describeSourceImage,
-  renpyBadgeLabel,
-  renpyBadgeTitle,
 } from "@/lib/image-facts";
 import {
   readWorkbenchSnapshot,
   writeWorkbenchSnapshot,
 } from "@/lib/workbench-cache";
 
+const { isWideLayout } = useAdaptiveLayout();
 const persistedProjectId = localStorage.getItem("scene-vault.capture.project");
 const cachedWorkbench = readWorkbenchSnapshot(persistedProjectId);
 const projects = ref<Project[]>(cachedWorkbench?.projects ?? []);
+const { engineVersions, refreshEngineBadges } = useProjectEngineBadges();
 const summaries = ref<CharacterSummary[]>(cachedWorkbench?.summaries ?? []);
 const characters = ref<Character[]>(cachedWorkbench?.characters ?? []);
 const projectId = ref(cachedWorkbench?.projectId ?? persistedProjectId ?? "");
@@ -446,45 +447,28 @@ const selectedItem = computed(
   () => items.value.find((item) => item.id === selectedItemId.value) ?? null,
 );
 
-// Per-capture facts for the detail panel: engine version and the two file
-// summaries. Both are read-only lookups and may legitimately be empty.
-const detailEngineMetadata = ref<CaptureEngineMetadata | null>(null);
+// Per-capture file summaries may legitimately be empty.
 const detailImageFacts = ref<CaptureImageFacts | null>(null);
 let detailFactsRequest = 0;
 
 async function loadDetailFacts() {
   const item = selectedItem.value;
   const token = ++detailFactsRequest;
-  detailEngineMetadata.value = null;
   detailImageFacts.value = null;
   if (!item) return;
   try {
-    const [metadata, facts] = await Promise.allSettled([
-      engineApi.getCaptureMetadata(item.id),
-      Promise.resolve().then(() => captureApi.getCaptureImageFacts(item.id)),
-    ]);
+    const facts = await captureApi.getCaptureImageFacts(item.id);
     if (token !== detailFactsRequest || selectedItem.value?.id !== item.id) return;
-    detailEngineMetadata.value = metadata.status === "fulfilled" ? metadata.value : null;
-    detailImageFacts.value = facts.status === "fulfilled" ? facts.value : null;
+    detailImageFacts.value = facts;
   } catch {
     // Browser previews or test stubs may not provide these lookups.
-    if (token === detailFactsRequest) {
-      detailEngineMetadata.value = null;
+    if (token === detailFactsRequest && selectedItem.value?.id === item.id) {
       detailImageFacts.value = null;
     }
   }
 }
 
-watch(() => selectedItem.value?.id, () => void loadDetailFacts(), { immediate: true });
-
-const detailEngineBadge = computed(() =>
-  detailEngineMetadata.value
-    ? renpyBadgeLabel([detailEngineMetadata.value.engineVersion])
-    : null,
-);
-const detailEngineBadgeTitle = computed(() =>
-  renpyBadgeTitle([detailEngineMetadata.value?.engineVersion]),
-);
+watch(selectedItem, () => void loadDetailFacts(), { immediate: true });
 const sourceImageLine = computed(() =>
   describeSourceImage(detailImageFacts.value?.source, selectedItem.value?.fileSize ?? null),
 );
@@ -649,6 +633,7 @@ function canReprocess(item: CaptureItem): boolean {
 }
 
 async function initialize() {
+  void refreshEngineBadges();
   const initialProjectId = projectId.value;
   if (!cachedWorkbench) loading.value = true;
   try {
@@ -1188,10 +1173,13 @@ function onCharacterDeleted() {
 
 async function registerWorkbenchListeners() {
   // Listener registration crosses the Tauri bridge. It must never delay the
-  // first data request, and all three registrations can run concurrently.
+  // first data request, and the registrations can run concurrently.
   const registrations = await Promise.allSettled([
     listen("capture:item-updated", () => {
       if (initialized) void loadCharacterData();
+    }),
+    listen<{ projectId: string }>("capture:project-files-updated", (event) => {
+      if (componentActive && initialized && event.payload.projectId === projectId.value) void loadCharacterData();
     }),
     listen("capture:item-purged", () => {
       schedulePurgeReload();
@@ -1229,6 +1217,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   componentActive = false;
+  detailFactsRequest++;
   if (purgeReloadTimer !== null) {
     window.clearTimeout(purgeReloadTimer);
     purgeReloadTimer = null;
@@ -1246,14 +1235,10 @@ onBeforeUnmount(() => {
       description="按角色复查截图与识别建议；改判后自动重新处理并替换归档。"
     >
       <template #actions>
-        <label class="workbench-project">
-          项目
-          <select v-model="projectId" :disabled="loading">
-            <option v-for="project in projects" :key="project.id" :value="project.id">
-              {{ project.name }}
-            </option>
-          </select>
-        </label>
+        <div class="workbench-project">
+          <span>项目</span>
+          <ProjectSelect v-model="projectId" :projects="projects" :engine-versions="engineVersions" :disabled="loading" label="工作台项目" @open="refreshEngineBadges" />
+        </div>
         <button type="button" class="secondary-action" :disabled="loading" @click="loadCharacterData()">
           <RefreshCw :size="17" :class="{ 'animate-spin': loading }" />刷新
         </button>
@@ -1631,6 +1616,9 @@ onBeforeUnmount(() => {
         :description="pathFileName(selectedItem.sourcePath)"
         panel-class="workbench-detail"
       >
+        <div v-if="isWideLayout" class="workbench-detail-heading">
+          <h2>截图详情</h2>
+        </div>
         <section
           v-if="view === 'characters' && selectedCharacter"
           class="sample-summary-bar"
@@ -1722,14 +1710,6 @@ onBeforeUnmount(() => {
             </div>
             <div><dt>当前角色</dt><dd>{{ characterName(selectedItem.characterId) || "未标记" }}</dd></div>
             <div><dt>分类</dt><dd>{{ classificationLabel(selectedItem.classification) }}</dd></div>
-            <div v-if="detailEngineBadge">
-              <dt>引擎</dt>
-              <dd>
-                <span class="detail-engine-badge" :title="detailEngineBadgeTitle ?? undefined">
-                  {{ detailEngineBadge }}
-                </span>
-              </dd>
-            </div>
             <div><dt>捕获时间</dt><dd>{{ new Date(selectedItem.capturedAt).toLocaleString() }}</dd></div>
             <div v-if="selectedItem.processingWarningsJson !== '[]'">
               <dt>处理提示</dt><dd>{{ selectedItem.processingWarningsJson }}</dd>
@@ -1875,32 +1855,35 @@ onBeforeUnmount(() => {
             <span class="action-card-title">定位文件</span>
             <div class="action-card-body path-card-body">
               <div class="path-entry">
+                <span class="path-entry-label"><Image :size="14" aria-hidden="true" />原图</span>
+                <small class="path-entry-info">{{ sourceImageLine ?? "—" }}</small>
                 <button
                   type="button"
                   class="path-button"
+                  aria-label="定位原图"
                   :disabled="captureVariantReadReason(selectedItem, 'source') !== null"
                   :title="captureVariantReadReason(selectedItem, 'source') ?? '在文件管理器中定位原图'"
                   @click="reveal(selectedItem.sourcePath)"
                 >
-                  <Image :size="15" />原图<ExternalLink :size="12" />
+                  定位<ExternalLink :size="12" />
                 </button>
-                <small v-if="sourceImageLine" class="path-entry-info">{{ sourceImageLine }}</small>
               </div>
-              <div v-if="selectedItem.destinationPath" class="path-entry">
+              <div class="path-entry">
+                <span class="path-entry-label"><Archive :size="14" aria-hidden="true" />归档图</span>
+                <small
+                  class="path-entry-info"
+                  :title="destinationImageLine?.tooltip ?? undefined"
+                >{{ destinationImageLine?.text ?? "—" }}</small>
                 <button
                   type="button"
                   class="path-button"
+                  aria-label="定位归档图"
                   :disabled="captureVariantReadReason(selectedItem, 'destination') !== null"
                   :title="captureVariantReadReason(selectedItem, 'destination') ?? '在文件管理器中定位归档图'"
                   @click="reveal(selectedItem.destinationPath)"
                 >
-                  <Archive :size="15" />归档图<ExternalLink :size="12" />
+                  定位<ExternalLink :size="12" />
                 </button>
-                <small
-                  v-if="destinationImageLine"
-                  class="path-entry-info"
-                  :title="destinationImageLine.tooltip ?? undefined"
-                >{{ destinationImageLine.text }}</small>
               </div>
               <button
                 v-if="selectedItem.destinationAvatarPath"
@@ -2083,30 +2066,59 @@ onBeforeUnmount(() => {
 }
 
 .path-card-body {
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
 }
 
 .path-entry {
-  display: flex;
+  display: grid;
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
+  grid-template-columns: 62px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.path-entry-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.path-card-body .path-button {
+  width: auto;
+  justify-self: start;
+  white-space: nowrap;
 }
 
 .path-entry-info {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  line-height: 1.5;
 }
 
-.detail-engine-badge {
-  display: inline-flex;
-  padding: 1px 8px;
-  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
+.workbench-detail-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
 }
+
+.workbench-detail-heading h2 {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* The selector's parent follows the capture page's responsive width token.
+   Let the action row wrap below the title when the window cannot fit both. */
+:deep(.page-header) { flex-wrap: wrap; }
+:deep(.page-header-actions) { min-width: 0; max-width: 100%; }
 
 .character-card.reset-selected { outline: 2px solid var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
 .character-reset-selection { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; font-size: 12px; }

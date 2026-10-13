@@ -81,7 +81,7 @@ async function relocateFromPickedArchiveDirectory() {
         {{ result.destinationMissingCount }} 个归档/头像目标文件缺失
       </li>
       <li v-if="result.destinationUnavailableCount">
-        {{ result.destinationUnavailableCount }} 个归档/头像目标当前不可访问
+        {{ result.destinationUnavailableCount }} 个归档/头像目标当前不可用（无法访问或内容校验未通过）
       </li>
       <li v-if="result.destinationRelocatedCount">
         已找回 {{ result.destinationRelocatedCount }} 个归档/头像目标文件；文件仍在原位置，只更新数据库指向
@@ -90,7 +90,7 @@ async function relocateFromPickedArchiveDirectory() {
         {{ result.destinationAmbiguousCount }} 个归档目标存在多个同标识候选，未自动改写
       </li>
       <li v-if="result.destinationContentMismatchCount" class="task-warning">
-        {{ result.destinationContentMismatchCount }} 个归档目标存在同标识但内容不同的文件，未改写
+        {{ result.destinationContentMismatchCount }} 个归档/头像目标与记录的内容不符，未改写文件
       </li>
       <li v-if="result.sourceUnavailableDirectoryCount" class="task-warning">
         {{ result.sourceUnavailableDirectoryCount }} 个来源目录不可访问；为避免误判，未批量改写其缺失状态

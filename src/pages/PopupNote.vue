@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useTauriEventListeners } from "@/composables/useTauriEventListeners";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { marked } from "marked";
 import createDOMPurify from "dompurify";
@@ -34,7 +34,7 @@ const opened = ref(false);
 const lastSavedAt = ref<string | null>(null);
 const previewMode = ref(false);
 const autoSaveNotes = ref(true);
-const unlisteners: UnlistenFn[] = [];
+const { listen, isActive } = useTauriEventListeners();
 
 const syncLabel = computed(() => {
   if (!note.value) return "";
@@ -53,6 +53,7 @@ function resolveProjectId(): string | null {
 }
 
 async function load() {
+  if (!isActive()) return;
   const projectId = resolveProjectId();
   if (!projectId) {
     note.value = null;
@@ -68,15 +69,16 @@ async function load() {
       captureApi.listProjects(),
       captureApi.getAppSettings(),
     ]);
+    if (!isActive()) return;
     note.value = loaded;
     draft.value = loaded.content;
     autoSaveNotes.value = appSettings.autoSaveNotes;
     projectName.value =
       projects.find((project) => project.id === projectId)?.name ?? "当前项目";
   } catch (error) {
-    errorMessage.value = noteErrorText(error);
+    if (isActive()) errorMessage.value = noteErrorText(error);
   } finally {
-    busy.value = false;
+    if (isActive()) busy.value = false;
   }
 }
 
@@ -247,23 +249,20 @@ onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("blur", onWindowBlur);
   try {
-    unlisteners.push(
-      await listen("note:refresh", () => void load()),
-      await listen<unknown>("note:updated", () => {
-        if (!document.hasFocus()) void load();
-      }),
-    );
+    await listen("note:refresh", () => void load());
+    await listen<unknown>("note:updated", () => {
+      if (!document.hasFocus()) void load();
+    });
   } catch {
     // Browser previews do not expose the Tauri event bridge.
   }
-  await load();
+  if (isActive()) await load();
 });
 
 onBeforeUnmount(() => {
   document.body.style.minWidth = "";
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("blur", onWindowBlur);
-  unlisteners.forEach((unlisten) => unlisten());
 });
 
 // Expose save so the workbench container can auto-save when switching tabs.

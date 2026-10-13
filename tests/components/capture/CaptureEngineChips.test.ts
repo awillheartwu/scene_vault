@@ -27,7 +27,7 @@ function metadata(overrides: Partial<CaptureEngineMetadata> = {}): CaptureEngine
 }
 
 describe("CaptureEngineChips", () => {
-  it("renders the engine badge, speaker and both resolutions", () => {
+  it("renders the speaker and both resolutions without dialogue", () => {
     const wrapper = mount(CaptureEngineChips, {
       props: {
         engineMetadata: metadata(),
@@ -38,7 +38,6 @@ describe("CaptureEngineChips", () => {
       },
     });
     const text = wrapper.text();
-    expect(text).toContain("Ren'Py 8");
     expect(text).toContain("说话人 Ethan");
     expect(text).toContain("引擎 1920×1080");
     expect(text).toContain("截图 3840×2160");
@@ -47,7 +46,7 @@ describe("CaptureEngineChips", () => {
     wrapper.unmount();
   });
 
-  it("falls back to a plain badge and hides unknown values", () => {
+  it("hides the information row when all values are unknown", () => {
     const wrapper = mount(CaptureEngineChips, {
       props: {
         engineMetadata: metadata({
@@ -59,16 +58,22 @@ describe("CaptureEngineChips", () => {
         imageFacts: null,
       },
     });
-    const text = wrapper.text();
-    expect(text).toContain("Ren'Py");
-    expect(text).not.toContain("Ren'Py 8");
-    expect(text).not.toContain("说话人");
-    expect(text).not.toContain("引擎");
-    expect(text).not.toContain("截图");
+    expect(wrapper.find(".engine-chips").exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("renders nothing without engine metadata", () => {
+  it("shows an ordinary screenshot's resolution without engine metadata", () => {
+    const wrapper = mount(CaptureEngineChips, {
+      props: {
+        engineMetadata: null,
+        imageFacts: { source: { width: 3840, height: 2160, format: "png" }, destination: null },
+      },
+    });
+    expect(wrapper.text()).toBe("截图 3840×2160");
+    wrapper.unmount();
+  });
+
+  it("renders nothing without any image information", () => {
     const wrapper = mount(CaptureEngineChips, { props: { engineMetadata: null } });
     expect(wrapper.find(".engine-chips").exists()).toBe(false);
     wrapper.unmount();

@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 const api = vi.hoisted(() => ({
   readThumbnail: vi.fn(),
   readImage: vi.fn(),
+  recordClientEvent: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/capture-api", () => ({

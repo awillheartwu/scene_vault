@@ -394,8 +394,8 @@ mod tests {
 
         let sidecar = install.path().join("scene-vault-ai.exe");
         std::fs::write(&sidecar, b"exe").expect("sidecar");
-        let models = install.path().join("resources/models");
-        let fonts = install.path().join("resources/fonts");
+        let models = install.path().join("resources").join("models");
+        let fonts = install.path().join("resources").join("fonts");
         std::fs::create_dir_all(&models).expect("models dir");
         std::fs::create_dir_all(&fonts).expect("fonts dir");
         let yunet = models.join("face_detection_yunet_2023mar.onnx");
