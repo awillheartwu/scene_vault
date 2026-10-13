@@ -186,9 +186,18 @@ library_roots ──< assets（路径归属；后续可增加显式 root_id）
 - `projects.archive_output_format` 与 `projects.archive_output_quality`：项目级归档
   格式（inherit/keep/png/jpeg/webp）与 JPEG 质量（空表示继承全局）；`inherit` 时分别
   使用全局设置中的同名字段。
-- `project_engine_integrations.engine_version`：安装时从 `renpy/vc_version.py` 读取的
+- `project_engine_integrations.auto_hide_ui`：迁移 0032 添加，保存安装时写入配置的回退值。
+- 迁移 0033 添加 `projects.renpy_auto_hide_ui` 和
+  `project_engine_integrations.auto_hide_ui_override`；`NULL` 分别表示跟随全局和跟随项目，
+  `0/1` 为显式关闭/启用。0033 保留旧安装选择，0034 将未改动且一致的旧选择提升为同值
+  项目覆盖，不一致或后来改过的选择保留。已应用迁移不再修改，不改既有截图。
+  全局默认保存于 `settings['renpy.screenshot']` 的 `autoHideUi`，
+  默认关闭；有效策略还以版本化 JSON 写入应用本地缓存供桥读取，不把主数据库交给 Python。
+  插件 1.1.6 支持截图时读取最新策略；重装未传旧 `autoHideUi` 参数时保留安装覆盖。
+- `project_engine_integrations.engine_version`：安装时从 Ren'Py 版本文件读取的
   精确引擎版本；`capture_engine_metadata.engine_version` 是 bridge 1.1.4 起随截图上报
   的运行中版本，两者都可能为空（旧安装/旧截图）。
+  旧引擎支持 `__init__.py` 的版本 tuple + `vc_version.py` 修订号；首页会限时补全空版本。
 - `capture_image_facts`：每张截图一行（`capture_item_id` 主键，随截图级联删除），
   `source_json` 记录原图的宽高与格式，`destination_json` 记录归档图的宽高、格式、字节
   数、实际质量（`qualityKind` 为 lossless/quality/unknown）、请求的尺寸规格与是否应用。

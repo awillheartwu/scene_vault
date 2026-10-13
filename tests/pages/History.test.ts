@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { api, eventHandlers, listenMock } = vi.hoisted(() => {
+const { api, engineApi, eventHandlers, listenMock } = vi.hoisted(() => {
   const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
   return {
     api: {
@@ -11,12 +11,14 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
     previewCaptureReset: vi.fn(),
     discardCaptureReset: vi.fn(async () => {}),
     listProjects: vi.fn(),
+    listProjectOverviews: vi.fn(),
     listSessions: vi.fn(),
     listCharacters: vi.fn(),
     listHistory: vi.fn(),
     getAppSettings: vi.fn(),
     readThumbnail: vi.fn(),
     readImage: vi.fn(),
+    recordClientEvent: vi.fn(async () => {}),
     retry: vi.fn(),
     previewCaptureDeletion: vi.fn(),
     deleteCaptureItem: vi.fn(),
@@ -24,6 +26,7 @@ const { api, eventHandlers, listenMock } = vi.hoisted(() => {
     listDebugLogs: vi.fn(),
     getLogStatus: vi.fn(),
     },
+    engineApi: { getCaptureMetadata: vi.fn() },
     eventHandlers,
     listenMock: vi.fn(
       async (name: string, handler: (event: { payload: unknown }) => void) => {
@@ -42,6 +45,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
+  engineApi,
   captureStatusLabel: (status: string) => status,
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
@@ -49,12 +53,14 @@ vi.mock("@/lib/capture-api", () => ({
 }));
 
 import History from "@/pages/History.vue";
+import ProjectSelect from "@/components/project/ProjectSelect.vue";
 
 const project = {
   id: "project-1",
   name: "P",
   description: null,
   coverAssetId: null,
+  coverCaptureItemId: null,
   lastSourceDirectory: null,
   lastDestinationDirectory: null,
   destinationDirectory: "D:\\Archive",
@@ -109,6 +115,7 @@ function entry(id: string, capturedAt: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  engineApi.getCaptureMetadata.mockReset().mockResolvedValue(null);
   eventHandlers.clear();
   listenMock.mockImplementation(
     async (name: string, handler: (event: { payload: unknown }) => void) => {
@@ -120,6 +127,7 @@ beforeEach(() => {
   );
   localStorage.clear();
   api.listProjects.mockResolvedValue([project]);
+  api.listProjectOverviews.mockReset().mockResolvedValue([]);
   api.listSessions.mockResolvedValue([session]);
   api.listCharacters.mockResolvedValue([]);
   api.getAppSettings.mockResolvedValue({ showPrivateByDefault: false });
@@ -144,10 +152,8 @@ describe("History project continuity", () => {
     const wrapper = mount(History);
     await flushPromises();
 
-    expect(wrapper.get(".history-filters select").element).toHaveProperty(
-      "value",
-      otherProject.id,
-    );
+    expect(wrapper.getComponent(ProjectSelect).props("modelValue")).toBe(otherProject.id);
+    expect(wrapper.get(".project-select-trigger .project-select-name").text()).toBe(otherProject.name);
     expect(api.listSessions).toHaveBeenCalledWith(otherProject.id);
     expect(api.listCharacters).toHaveBeenCalledWith(otherProject.id);
     expect(api.listHistory).toHaveBeenCalledWith(
@@ -187,22 +193,14 @@ describe("History capture toolbar", () => {
     expect(row.classes()).toContain("reset-selected");
     expect((row.get("input").element as HTMLInputElement).checked).toBe(true);
     expect(actions.text()).toContain("结束多选");
+    expect(row.get(".history-row-select").element.children).toHaveLength(5);
+    expect(row.findAll(".history-media span").map((line) => line.text())).toEqual(["原图 —", "归档 —"]);
 
     await actions.findAll("button").find((button) => button.text() === "取消")!.trigger("click");
     expect(wrapper.find("input.history-selection").exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("keeps reset management on the left of the pagination row", async () => {
-    const wrapper = mount(History);
-    await flushPromises();
-
-    const row = wrapper.get(".history-pagination-row");
-    expect(row.find(".history-reset-actions").exists()).toBe(true);
-    expect(row.find('[role="navigation"][aria-label="分页"]').exists()).toBe(true);
-    expect(row.element.firstElementChild?.classList.contains("history-reset-actions")).toBe(true);
-    wrapper.unmount();
-  });
 });
 
 describe("History content tabs", () => {
@@ -436,6 +434,123 @@ describe("History responsive detail", () => {
     } finally {
       wrapper.unmount();
     }
+  });
+});
+
+describe("History file specs and project badges", () => {
+  it("keeps resolutions and all file issues within five row cells", async () => {
+    api.listHistory.mockResolvedValue({
+      entries: [{
+        ...entry("1", "2026-08-01T00:00:00Z"),
+        fileSize: 2048,
+        sourceImage: { width: 3840, height: 2160, format: "png" },
+        sourceFileState: "missing",
+        destinationPath: "D:\\archive\\1.jpg",
+        destinationFileState: "unavailable",
+        destinationImage: {
+          width: 1920, height: 1080, format: "jpeg", bytes: 1024,
+          qualityKind: "quality", quality: 90, sizePolicy: "1080p",
+          sizePolicyApplied: true, formatApplied: true,
+        },
+      }],
+      total: 1,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+    const row = wrapper.get(".history-row-select");
+    expect([...row.element.children].map((cell) => cell.className)).toEqual([
+      "history-thumb", "history-main", "history-character", "history-media", "history-status",
+    ]);
+    expect(row.findAll(".history-media span").map((line) => line.text())).toEqual(["原图 3840×2160", "归档 1920×1080"]);
+    expect(row.findAll(".history-status .file-state-chip").map((chip) => chip.text())).toEqual(["原图缺失", "归档图不可用"]);
+    expect(wrapper.get(".history-detail dl").text()).toContain("3840×2160 · PNG · 2.0 KB");
+    expect(wrapper.get(".history-detail dl").text()).toContain("1920×1080 · JPEG q90 · 1.0 KB");
+    wrapper.unmount();
+  });
+
+  it("uses project overview badges independently of row selection and refreshes them on menu open", async () => {
+    api.listProjects.mockResolvedValue([project, otherProject]);
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "8.4.1" },
+      { projectId: otherProject.id, engine: null, engineVersions: "8.0" },
+    ]);
+    api.listHistory.mockResolvedValue({
+      entries: [entry("1", "2026-08-01T00:00:00Z"), entry("2", "2026-08-02T00:00:00Z")],
+      total: 2,
+    });
+    const wrapper = mount(History);
+    await flushPromises();
+    const select = wrapper.getComponent(ProjectSelect);
+    expect(select.props("engineVersions")).toEqual({ [project.id]: ["8.4.1"] });
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 8");
+    expect(wrapper.find(".history-detail .renpy-badge").exists()).toBe(false);
+    expect(engineApi.getCaptureMetadata).not.toHaveBeenCalled();
+    expect(eventHandlers.has("capture:engine-metadata-updated")).toBe(false);
+    const overviewCalls = api.listProjectOverviews.mock.calls.length;
+    const historyCalls = api.listHistory.mock.calls.length;
+    await wrapper.findAll(".history-row")[1].trigger("click");
+    await flushPromises();
+    expect(api.listProjectOverviews).toHaveBeenCalledTimes(overviewCalls);
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 8");
+
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "7.8.6, 8.4.1" },
+    ]);
+    select.vm.$emit("open");
+    await flushPromises();
+    expect(api.listProjectOverviews).toHaveBeenCalledTimes(overviewCalls + 1);
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 7/8");
+    expect(select.get(".project-select-trigger .renpy-badge").attributes("title")).toBe("7.8.6、8.4.1");
+    expect(api.listHistory).toHaveBeenCalledTimes(historyCalls);
+
+    select.vm.$emit("update:modelValue", otherProject.id);
+    await flushPromises();
+    expect(select.props("modelValue")).toBe(otherProject.id);
+    expect(select.find(".project-select-trigger .renpy-badge").exists()).toBe(false);
+    expect(api.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ projectId: otherProject.id }));
+    expect(localStorage.getItem("scene-vault.capture.project")).toBe(otherProject.id);
+    expect(engineApi.getCaptureMetadata).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("discards an older project overview reply after refreshing the menu", async () => {
+    const older = [{ projectId: project.id, engine: "renpy", engineVersions: "8.4.1" }];
+    let resolveOlder!: (value: typeof older) => void;
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "7.8.6" },
+    ]).mockReturnValueOnce(new Promise<typeof older>((resolve) => { resolveOlder = resolve; }));
+    const wrapper = mount(History);
+    try {
+      await flushPromises();
+      const select = wrapper.getComponent(ProjectSelect);
+      expect(select.find(".renpy-badge").exists()).toBe(false);
+      select.vm.$emit("open");
+      await flushPromises();
+      expect(select.get(".project-select-trigger .renpy-badge").attributes("title")).toBe("7.8.6");
+      resolveOlder(older);
+      await flushPromises();
+      expect(select.get(".project-select-trigger .renpy-badge").attributes("title")).toBe("7.8.6");
+    } finally {
+      resolveOlder(older);
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps the last project badge when an optional overview refresh fails", async () => {
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: null },
+    ]);
+    const wrapper = mount(History);
+    await flushPromises();
+    const select = wrapper.getComponent(ProjectSelect);
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py");
+    expect(select.get(".project-select-trigger .renpy-badge").attributes("title")).toBeUndefined();
+    api.listProjectOverviews.mockRejectedValueOnce(new Error("overview unavailable"));
+    select.vm.$emit("open");
+    await flushPromises();
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py");
+    expect(wrapper.get(".history-row").text()).toContain("1.png");
+    wrapper.unmount();
   });
 });
 

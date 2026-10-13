@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useTauriEventListeners } from "@/composables/useTauriEventListeners";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronsLeft, ChevronsRight, Pin, PinOff, X } from "@lucide/vue";
 import { captureApi } from "@/lib/capture-api";
+import RenpyBadge from "@/components/capture/RenpyBadge.vue";
+import { useProjectEngineBadges } from "@/composables/useProjectEngineBadges";
 import PopupClassify from "./PopupClassify.vue";
 import PopupNote from "./PopupNote.vue";
 
@@ -20,11 +22,19 @@ const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
 const noteRef = ref<NoteComponent | null>(null);
 const projectTitle = ref("截图分类 · 快速笔记");
+const titleProjectId = ref<string | null>(null);
+const { engineVersions, refreshEngineBadges } = useProjectEngineBadges();
+let titleRequest = 0;
+let classifyContextReceived = false;
+let componentActive = true;
 const windowLabel = ref<string | null>(null);
 const pinned = ref(false);
-const unlisteners: UnlistenFn[] = [];
+const { listen, isActive } = useTauriEventListeners();
+let paneRequest = 0;
 
 async function syncPane() {
+  if (!isActive()) return;
+  const request = ++paneRequest;
   let split = false;
   try {
     split = (await captureApi.getAppSettings()).splitPopupWindows;
@@ -32,6 +42,7 @@ async function syncPane() {
     // Browser previews have no Tauri bridge; keep the combined layout.
     return;
   }
+  if (!isActive() || request !== paneRequest) return;
   if (!split) {
     pane.value = "both";
   } else if (windowLabel.value === "note-popup") {
@@ -42,18 +53,32 @@ async function syncPane() {
 }
 
 async function syncProjectTitle() {
+  // The classify pane knows the actual queue project, which can differ from
+  // the project selected in the main window while a session is active.
+  if (pane.value !== "note" && classifyContextReceived) return;
+  const token = ++titleRequest;
   const projectId = localStorage.getItem("scene-vault.capture.project");
+  titleProjectId.value = projectId;
+  projectTitle.value = "截图分类 · 快速笔记";
   if (!projectId) {
     projectTitle.value = "截图分类 · 快速笔记";
     return;
   }
   try {
     const projects = await captureApi.listProjects();
+    if (!componentActive || token !== titleRequest) return;
     const project = projects.find((value) => value.id === projectId);
     projectTitle.value = project?.name ?? "截图分类 · 快速笔记";
   } catch {
     // Keep the default subtitle when the bridge is unavailable.
   }
+}
+
+function syncClassifyProject(context: { projectId: string | null; projectName: string | null }) {
+  titleRequest += 1;
+  classifyContextReceived = true;
+  titleProjectId.value = context.projectId;
+  projectTitle.value = context.projectName ?? "截图分类 · 快速笔记";
 }
 
 async function closeWindow() {
@@ -112,20 +137,26 @@ onMounted(async () => {
     // Browser preview.
   }
   void syncPinState();
+  void refreshEngineBadges();
   await syncPane();
+  if (!isActive()) return;
   void syncProjectTitle();
   try {
-    unlisteners.push(
-      await listen("popup:configure", () => void syncPane()),
-      await listen("note:refresh", () => void syncProjectTitle()),
-    );
+    await listen("popup:configure", () => void syncPane());
+    await listen("note:refresh", () => {
+      void syncProjectTitle();
+      void refreshEngineBadges();
+    });
+    await listen("classify:refresh", () => void refreshEngineBadges());
   } catch {
     // Event bridge unavailable in browser previews.
   }
 });
 
 onBeforeUnmount(() => {
-  unlisteners.forEach((unlisten) => unlisten());
+  componentActive = false;
+  titleRequest += 1;
+  paneRequest += 1;
 });
 </script>
 
@@ -135,7 +166,8 @@ onBeforeUnmount(() => {
       <div class="workbench-title" data-tauri-drag-region="deep">
         <span class="workbench-dot" />
         <strong>Scene Vault</strong>
-        <span class="workbench-sub">{{ projectTitle }}</span>
+        <RenpyBadge v-if="titleProjectId && engineVersions[titleProjectId]" :versions="engineVersions[titleProjectId]" />
+        <span class="workbench-sub" :title="projectTitle">{{ projectTitle }}</span>
       </div>
       <button
         type="button"
@@ -153,14 +185,14 @@ onBeforeUnmount(() => {
     </header>
 
     <div v-if="pane === 'classify'" class="workbench-single">
-      <PopupClassify embedded />
+      <PopupClassify embedded @project-context="syncClassifyProject" />
     </div>
     <div v-else-if="pane === 'note'" class="workbench-single">
       <PopupNote embedded />
     </div>
     <div v-else class="workbench-split">
       <div class="panel" :class="{ collapsed: leftCollapsed }">
-        <PopupClassify embedded />
+        <PopupClassify embedded @project-context="syncClassifyProject" />
       </div>
 
       <div class="splitter">
@@ -236,11 +268,18 @@ onBeforeUnmount(() => {
 }
 
 .workbench-sub {
+  min-width: 0;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 360px) {
+  .workbench-header { height: auto; min-height: 48px; padding-top: 7px; padding-bottom: 7px; }
+  .workbench-title { flex-wrap: wrap; gap: 4px 7px; }
+  .workbench-sub { flex-basis: 100%; }
 }
 
 .workbench-dot {

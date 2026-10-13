@@ -47,7 +47,7 @@ from typing import Any
 
 # Limit BLAS/OpenMP threading before any heavy import; the default keeps the
 # machine responsive (a benchmark run must not freeze the desktop).
-_THREAD_LIMIT = int(os.environ.get("SCENE_VAULT_BENCH_THREADS", "8"))
+_THREAD_LIMIT = int(os.environ.get("SCENE_VAULT_BENCH_THREADS", "10"))
 if _THREAD_LIMIT > 0:
     os.environ["OMP_NUM_THREADS"] = str(_THREAD_LIMIT)
     os.environ["OPENBLAS_NUM_THREADS"] = str(_THREAD_LIMIT)
@@ -76,8 +76,8 @@ SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def limit_cpu(threads: int) -> None:
-    """Binds the process to `threads` logical CPUs (the lowest ids, which are
-    the P-cores on hybrid Intel parts) and caps OpenCV's internal thread
+    """Binds the process to `threads` logical CPUs (the lowest available ids)
+    and caps OpenCV's internal thread
     pool. A no-op on failure; `threads <= 0` leaves the machine untouched."""
     if threads <= 0:
         return
@@ -440,7 +440,7 @@ def main() -> int:
         type=int,
         default=_THREAD_LIMIT,
         help="cap CPU usage to this many logical CPUs (0 = unlimited); "
-        "defaults to the SCENE_VAULT_BENCH_THREADS env var or 8",
+        "defaults to the SCENE_VAULT_BENCH_THREADS env var or 10",
     )
     parser.add_argument("--yunet-model", required=True, help="YuNet ONNX path")
     parser.add_argument("--sface-model", required=True, help="SFace ONNX path")

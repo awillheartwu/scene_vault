@@ -16,19 +16,28 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 import { captureApi, engineApi } from "@/lib/capture-api";
 
 beforeEach(() => {
-  tauri.invoke.mockReset();
+  tauri.invoke.mockReset().mockResolvedValue(undefined);
 });
 
-it("does not report speculative media read failures as IPC errors", async () => {
+it("records failed media latency in the perf channel without an IPC error", async () => {
   tauri.invoke.mockRejectedValueOnce("not found: capture source image");
 
   await expect(captureApi.readThumbnail("capture-1", "source")).rejects.toBe(
     "not found: capture source image",
   );
 
-  expect(tauri.invoke).toHaveBeenCalledTimes(1);
-  expect(tauri.invoke).toHaveBeenCalledWith("read_capture_thumbnail", {
+  expect(tauri.invoke).toHaveBeenCalledTimes(2);
+  expect(tauri.invoke).toHaveBeenNthCalledWith(1, "read_capture_thumbnail", {
     input: { captureItemId: "capture-1", variant: "source" },
+  });
+  expect(tauri.invoke).toHaveBeenNthCalledWith(2, "record_client_event", {
+    input: expect.objectContaining({
+      event: "read_timing",
+      captureItemId: "capture-1",
+      channel: "perf",
+      outcome: "failed",
+      durationMs: expect.any(Number),
+    }),
   });
 });
 

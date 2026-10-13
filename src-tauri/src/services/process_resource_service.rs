@@ -2,13 +2,46 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::models::resource::{ProcessResourceGroup, ProcessResourceStatus};
 
+/// The dev launcher pins its build tools. Only the application restores the
+/// system mask before spawning runtime threads or WebView/Python children.
+pub fn restore_dev_runtime_affinity() -> std::io::Result<Option<(usize, usize)>> {
+    if std::env::var("SCENE_VAULT_DEV_RESTORE_AFFINITY").as_deref() != Ok("1") {
+        return Ok(None);
+    }
+    std::env::remove_var("SCENE_VAULT_DEV_RESTORE_AFFINITY");
+    #[cfg(windows)]
+    {
+        platform::restore_runtime_affinity()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
 pub fn sample() -> ProcessResourceStatus {
     platform::sample()
+}
+
+pub fn sample_for_monitor() -> ProcessResourceStatus {
+    platform::sample_for_monitor()
+}
+
+pub fn monitor_details() -> serde_json::Value {
+    platform::monitor_details()
 }
 
 #[cfg(not(windows))]
 mod platform {
     use super::*;
+
+    pub fn sample_for_monitor() -> ProcessResourceStatus {
+        sample()
+    }
+
+    pub fn monitor_details() -> serde_json::Value {
+        serde_json::json!({ "supported": false })
+    }
 
     pub fn sample() -> ProcessResourceStatus {
         ProcessResourceStatus {
@@ -52,7 +85,11 @@ mod platform {
             ProcessStatus::{
                 GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
             },
-            Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+            Threading::{
+                GetCurrentProcess, GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes,
+                OpenProcess, SetProcessAffinityMask, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+            },
         },
     };
 
@@ -63,6 +100,7 @@ mod platform {
         pid: u32,
         parent_pid: u32,
         name: String,
+        threads: u32,
     }
 
     #[derive(Clone, Copy)]
@@ -83,8 +121,42 @@ mod platform {
     }
 
     static CPU_SAMPLES: OnceLock<Mutex<HashMap<u32, CpuSample>>> = OnceLock::new();
+    static MONITOR_CPU_SAMPLES: OnceLock<Mutex<HashMap<u32, CpuSample>>> = OnceLock::new();
+
+    pub fn restore_runtime_affinity() -> std::io::Result<Option<(usize, usize)>> {
+        unsafe {
+            let handle = GetCurrentProcess();
+            let mut inherited = 0;
+            let mut available = 0;
+            if GetProcessAffinityMask(handle, &mut inherited, &mut available) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if available == 0 {
+                return Err(std::io::Error::other(
+                    "cannot determine the dev application's available CPUs",
+                ));
+            }
+            if inherited == available {
+                return Ok(None);
+            }
+            if SetProcessAffinityMask(handle, available) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Some((inherited, available)))
+        }
+    }
 
     pub fn sample() -> ProcessResourceStatus {
+        sample_with(&CPU_SAMPLES)
+    }
+
+    pub fn sample_for_monitor() -> ProcessResourceStatus {
+        sample_with(&MONITOR_CPU_SAMPLES)
+    }
+
+    fn sample_with(
+        cpu_samples: &OnceLock<Mutex<HashMap<u32, CpuSample>>>,
+    ) -> ProcessResourceStatus {
         let logical = std::thread::available_parallelism()
             .map(|value| value.get() as u32)
             .unwrap_or(1);
@@ -95,6 +167,7 @@ mod platform {
                 pid: own_pid,
                 parent_pid: 0,
                 name: "scene_vault.exe".to_owned(),
+                threads: 0,
             });
         }
         let mut included = HashSet::from([own_pid]);
@@ -111,7 +184,7 @@ mod platform {
         }
 
         let now = Instant::now();
-        let samples = CPU_SAMPLES.get_or_init(|| Mutex::new(HashMap::new()));
+        let samples = cpu_samples.get_or_init(|| Mutex::new(HashMap::new()));
         let mut previous = samples
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -172,6 +245,35 @@ mod platform {
         }
     }
 
+    pub fn monitor_details() -> serde_json::Value {
+        let threads = enumerate_processes()
+            .into_iter()
+            .find(|entry| entry.pid == std::process::id())
+            .map(|entry| entry.threads);
+        unsafe {
+            let handle = GetCurrentProcess();
+            let mut handles = 0;
+            let handles = (GetProcessHandleCount(handle, &mut handles) != 0).then_some(handles);
+            let mut memory: MEMORYSTATUSEX = zeroed();
+            memory.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+            let memory_ok = GlobalMemoryStatusEx(&mut memory) != 0;
+            let mut creation: FILETIME = zeroed();
+            let mut exit: FILETIME = zeroed();
+            let mut kernel: FILETIME = zeroed();
+            let mut user: FILETIME = zeroed();
+            let time_ok =
+                GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
+            serde_json::json!({
+                "supported": true,
+                "rustThreads": threads,
+                "rustHandles": handles,
+                "rustCpuSeconds": time_ok.then(|| (filetime_ticks(kernel) + filetime_ticks(user)) as f64 / 10_000_000.0),
+                "systemFreePhysicalBytes": memory_ok.then_some(memory.ullAvailPhys),
+                "systemTotalPhysicalBytes": memory_ok.then_some(memory.ullTotalPhys),
+            })
+        }
+    }
+
     fn classify(entry: &ProcessEntry, own_pid: u32) -> &'static str {
         if entry.pid == own_pid {
             return "rust";
@@ -209,6 +311,7 @@ mod platform {
                     pid: entry.th32ProcessID,
                     parent_pid: entry.th32ParentProcessID,
                     name: String::from_utf16_lossy(&entry.szExeFile[..length]),
+                    threads: entry.cntThreads,
                 });
                 ok = Process32NextW(snapshot, &mut entry) != 0;
             }

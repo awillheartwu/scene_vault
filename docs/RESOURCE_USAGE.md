@@ -14,7 +14,9 @@
 
 当前数据是单机 Windows 11 快照，不代表最低配置或所有图片。Working Set 包含共享页，
 不能直接等同于私有内存；短时峰值仍可能被轮询漏掉。后续正式验收必须在固定电源计划、
-相同模型、相同图片集合和 4 个 P 核约束下重跑。
+相同模型、相同图片集合下重跑，并记录应用“后台处理并行度”和实际进程亲和性；本机
+构建工具仍使用 CPU 0–9，dev 应用启动时恢复系统范围，与 release 的后台处理规则一致。
+下文 2026-08-11 的历史实测仍保留当时的 4 个 P 核口径，不与新口径直接比较。
 
 ## 当前进程结构
 
@@ -28,8 +30,14 @@ SceneVault.exe（Tauri / Rust）
 ```
 
 Rust 已通过 Toolhelp32 构造当前应用的子进程树，并按 Rust、WebView2、Python 和辅助
-进程分组向前端暴露 CPU、Working Set、Peak Working Set 与 Private Bytes。采样只在
-Settings 的“资源与存储”分类实际挂载且窗口可见时运行。
+进程分组向前端暴露 CPU、Working Set、Peak Working Set 与 Private Bytes。资源页的
+实时采样只在 Settings 的“资源与存储”分类实际挂载且窗口可见时运行。
+
+2026-10-13 补充：性能日志开启时，应用另有独立后台采样，每 60 秒记录进程树 CPU、
+内存、进程数、主进程线程/句柄、累计 CPU 与系统物理内存，每 5 分钟核对应用缓存、
+日志、WebView2 数据、主库/WAL/SHM 的体积与文件数。日志位于 `logs/perf`，不需要
+保持资源页打开，也不依赖 PowerShell。关闭性能日志停止后台采样；资源页的实时显示
+规则保持原样。CPU 基线分开保存，无法测量的指标为 null，不完整目录扫描显式标记。
 
 ## 视觉模式实测
 
@@ -179,6 +187,11 @@ NAS 断线、重试和恢复
 `%LOCALAPPDATA%\com.scenevault.desktop\diagnostics`；同目录 `.meta.json` 记录应用路径与
 版本，`note.txt` 可标注当时在做什么。脚本只读，不修改应用、数据库或缓存；
 本地发布构建会把同一份脚本复制到 `dist-release`，便于和安装包一起分发。
+
+应用内置采样覆盖上述主要资源指标；`analyze-image-timing.ps1` 可以同时汇总图片加载、
+处理、保存和应用资源日志，并输出带单位的统计表/CSV。`monitor-scene-vault.ps1`
+保留为独立的外部对照工具，需要手动启动/停止，不受应用内日志开关控制。后续 release
+基线、长期资源趋势与优化计划统一见 [ROADMAP.md](ROADMAP.md)。
 
 ## “资源与存储”页面方案
 

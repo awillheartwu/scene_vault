@@ -27,8 +27,10 @@ Tauri 2、Rust、Vue 3 与 SQLite 构建。可选的本地 Python 视觉引擎�
 
 | 安装包 | 内容 | 体积 |
 |---|---|---|
-| `scene-vault-1.0.0-ai-setup.exe` | 应用 + 内置 AI 引擎（YuNet/SFace/中文标注字体） | ~110 MB |
-| `scene-vault-1.0.0-setup.exe` | 仅应用（AI 引擎按需另行启用） | ~6 MB |
+| `scene-vault-<version>-ai-setup.exe` | 应用 + 内置 AI 引擎（YuNet/SFace/中文标注字体） | ~110 MB |
+| `scene-vault-<version>-setup.exe` | 仅应用（AI 引擎按需另行启用） | ~6 MB |
+
+当前版本变更和收尾结果见[发布说明](docs/RELEASE_NOTES.md)，体积以实际下载文件为准。
 
 **快速开始**：安装并启动 → 新建项目 → 添加**截图源目录**（游戏截图存放处）与
 **归档目录**（本地文件夹或 NAS `\\...` 共享）→ 开始会话 → 截图自动发现与登记；
@@ -65,6 +67,9 @@ Tauri 2、Rust、Vue 3 与 SQLite 构建。可选的本地 Python 视觉引擎�
   数据库打不开时的最小恢复界面、迁移前自动备份
 - **规模**：1.0 守门为单项目 1 万张截图 / 1 万文件源目录 / 100 角色；列表服务端分页
 - **日志与诊断**：结构化本地日志、设置页资源与引擎状态面板、数据体检与索引维护
+- **Ren'Py 适配**：多游戏安装、说话人建议和按游戏覆盖的自动隐藏 UI 截图设置
+- **图片与性能**：可配置归档尺寸、PNG/JPEG/无损 WebP 和 JPEG 质量；后台处理并行度
+  统一控制图片与人脸任务，加载、保存和资源采样写入可关闭的独立性能日志
 
 ## 从源码构建
 
@@ -72,7 +77,7 @@ Tauri 2、Rust、Vue 3 与 SQLite 构建。可选的本地 Python 视觉引擎�
 
 ```powershell
 pnpm install
-npx vitest run          # 前端测试
+pnpm test               # 测试类型检查 + 前端测试（版本收尾时）
 pnpm build              # 类型检查 + 生产构建
 start-tauri-dev.bat     # 开发模式（vite + cargo run）
 ```
@@ -95,7 +100,7 @@ python -m scene_vault_ai health
 
 `scripts/release-windows.ps1` 一键构建两个 NSIS 安装包：前端构建 → PyInstaller
 sidecar → 模型/字体打包 → NSIS 出包。常用参数：`-SkipAI`（只出小包）、
-`-AffinityMask`（限核，13900K 等机器建议 0xF）、`-SignCertificatePath`（可选签名）。
+`-AffinityMask`（本机默认 0x3FF，即 CPU 0–9）、`-SignCertificatePath`（可选签名）。
 GitHub Actions（`.github/workflows/release-windows.yml`）在推送 `v*` 标签时自动
 构建并把安装包挂到 Release。
 

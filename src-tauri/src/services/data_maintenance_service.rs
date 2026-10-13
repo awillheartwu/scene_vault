@@ -29,7 +29,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
-    ConnectOptions, Row, SqliteConnection,
+    ConnectOptions, Connection, Row, SqliteConnection,
 };
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
@@ -82,41 +82,47 @@ impl DataMaintenanceService {
         self.require_existing_database()?;
         let mut conn = self.open_connection_at(&self.db_path, true).await?;
 
-        let quick_check = quick_check_rows(&mut conn).await?;
-        let foreign_key_issues = foreign_key_issues(&mut conn).await?;
-        let schema_version = schema_version(&mut conn).await?;
-        let sqlite_version = sqlite_version(&mut conn).await?;
-        let journal_mode = journal_mode(&mut conn).await?;
-        let mut migration_issues = migration_issues(&mut conn).await?;
+        let result = async {
+            let quick_check = quick_check_rows(&mut conn).await?;
+            let foreign_key_issues = foreign_key_issues(&mut conn).await?;
+            let schema_version = schema_version(&mut conn).await?;
+            let sqlite_version = sqlite_version(&mut conn).await?;
+            let journal_mode = journal_mode(&mut conn).await?;
+            let mut migration_issues = migration_issues(&mut conn).await?;
 
-        if let Some(schema_version) = schema_version {
-            if schema_version > self.max_supported_schema_version {
-                migration_issues.push(format!(
-                    "database schema version {schema_version} is newer than the supported maximum {}",
-                    self.max_supported_schema_version
-                ));
+            if let Some(schema_version) = schema_version {
+                if schema_version > self.max_supported_schema_version {
+                    migration_issues.push(format!(
+                        "database schema version {schema_version} is newer than the supported maximum {}",
+                        self.max_supported_schema_version
+                    ));
+                }
             }
-        }
 
-        let database_size_bytes = self.db_path.metadata().map(|m| m.len()).unwrap_or(0);
-        let wal_size_bytes = self.wal_path().metadata().map(|m| m.len()).unwrap_or(0);
-        let ok = quick_check.iter().all(|row| row == "ok")
-            && foreign_key_issues.is_empty()
-            && migration_issues.is_empty();
+            let database_size_bytes = self.db_path.metadata().map(|m| m.len()).unwrap_or(0);
+            let wal_size_bytes = self.wal_path().metadata().map(|m| m.len()).unwrap_or(0);
+            let ok = quick_check.iter().all(|row| row == "ok")
+                && foreign_key_issues.is_empty()
+                && migration_issues.is_empty();
 
-        Ok(PreflightReport {
-            ok,
-            database_path: self.db_path.display().to_string(),
-            quick_check,
-            foreign_key_issues,
-            migration_issues,
-            schema_version,
-            sqlite_version,
-            journal_mode,
-            database_size_bytes,
-            wal_size_bytes,
-            checked_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-        })
+            Ok(PreflightReport {
+                ok,
+                database_path: self.db_path.display().to_string(),
+                quick_check,
+                foreign_key_issues,
+                migration_issues,
+                schema_version,
+                sqlite_version,
+                journal_mode,
+                database_size_bytes,
+                wal_size_bytes,
+                checked_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            })
+        }.await;
+        // Drop alone only requests shutdown; Windows file operations need
+        // the SQLite worker to release its handle before continuing.
+        conn.close().await?;
+        result
     }
 
     /// Creates a WAL-consistent single-file backup with `VACUUM INTO` and
@@ -137,7 +143,9 @@ impl DataMaintenanceService {
 
         let sqlite_version = {
             let mut conn = self.open_connection_at(&self.db_path, false).await?;
-            sqlite_version(&mut conn).await?
+            let version = sqlite_version(&mut conn).await;
+            conn.close().await?;
+            version?
         };
         if !sqlite_version_at_least(&sqlite_version, SQLITE_VACUUM_INTO_MIN_VERSION) {
             return Err(DataMaintenanceError::UnsupportedSqliteVersion(
@@ -147,10 +155,11 @@ impl DataMaintenanceService {
 
         let pool = self.open_pool_at(&self.db_path, 1, false).await?;
         let escaped = destination.to_string_lossy().replace('\'', "''");
-        sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+        let backup = sqlx::query(&format!("VACUUM INTO '{escaped}'"))
             .execute(&pool)
-            .await?;
-        drop(pool);
+            .await;
+        pool.close().await;
+        backup?;
 
         let manifest = match self.collect_manifest(&destination).await {
             Ok(manifest) => manifest,
@@ -242,40 +251,47 @@ impl DataMaintenanceService {
                     backup_path.display()
                 ))
             })?;
-        let quick_check = quick_check_rows(&mut conn).await?;
-        if !quick_check.iter().all(|row| row == "ok") {
-            return Err(DataMaintenanceError::Validation(format!(
-                "backup failed quick_check: {quick_check:?}"
-            )));
-        }
-        let foreign_key_issues = foreign_key_issues(&mut conn).await?;
-        if !foreign_key_issues.is_empty() {
-            return Err(DataMaintenanceError::Validation(format!(
-                "backup failed foreign_key_check: {foreign_key_issues:?}"
-            )));
-        }
-        let schema_version = schema_version(&mut conn).await?;
-        if schema_version != manifest.schema_version {
-            return Err(DataMaintenanceError::Validation(format!(
-                "backup schema version mismatch: manifest={:?} database={:?}",
-                manifest.schema_version, schema_version
-            )));
-        }
-        if let Some(schema_version) = schema_version {
-            if schema_version > self.max_supported_schema_version {
+        let result = async {
+            let quick_check = quick_check_rows(&mut conn).await?;
+            if !quick_check.iter().all(|row| row == "ok") {
                 return Err(DataMaintenanceError::Validation(format!(
+                    "backup failed quick_check: {quick_check:?}"
+                )));
+            }
+            let foreign_key_issues = foreign_key_issues(&mut conn).await?;
+            if !foreign_key_issues.is_empty() {
+                return Err(DataMaintenanceError::Validation(format!(
+                    "backup failed foreign_key_check: {foreign_key_issues:?}"
+                )));
+            }
+            let schema_version = schema_version(&mut conn).await?;
+            if schema_version != manifest.schema_version {
+                return Err(DataMaintenanceError::Validation(format!(
+                    "backup schema version mismatch: manifest={:?} database={:?}",
+                    manifest.schema_version, schema_version
+                )));
+            }
+            if let Some(schema_version) = schema_version {
+                if schema_version > self.max_supported_schema_version {
+                    return Err(DataMaintenanceError::Validation(format!(
                     "backup schema version {schema_version} is newer than the supported maximum {}",
                     self.max_supported_schema_version
                 )));
+                }
             }
+            let table_counts = table_counts(&mut conn).await?;
+            if table_counts != manifest.table_counts {
+                return Err(DataMaintenanceError::Validation(format!(
+                    "backup table counts mismatch: {table_counts:?}"
+                )));
+            }
+            Ok(manifest)
         }
-        let table_counts = table_counts(&mut conn).await?;
-        if table_counts != manifest.table_counts {
-            return Err(DataMaintenanceError::Validation(format!(
-                "backup table counts mismatch: {table_counts:?}"
-            )));
-        }
-        Ok(manifest)
+        .await;
+        // Drop alone only requests shutdown; Windows file operations need
+        // the SQLite worker to release its handle before continuing.
+        conn.close().await?;
+        result
     }
 
     /// Stages a validated backup for the next startup restore. The live
@@ -438,8 +454,15 @@ impl DataMaintenanceService {
         let _ = tokio::fs::remove_file(&marker_path).await;
 
         let mut conn = self.open_connection_at(&self.db_path, true).await?;
-        let schema_version = schema_version(&mut conn).await?;
-        let sqlite_version = sqlite_version(&mut conn).await?;
+        let versions: Result<_, DataMaintenanceError> = async {
+            Ok((
+                schema_version(&mut conn).await?,
+                sqlite_version(&mut conn).await?,
+            ))
+        }
+        .await;
+        conn.close().await?;
+        let (schema_version, sqlite_version) = versions?;
 
         Ok(RestoreOutcome {
             applied_from: request.staged_path,
@@ -568,35 +591,42 @@ impl DataMaintenanceService {
                     backup_path.display()
                 ))
             })?;
-        let quick_check = quick_check_rows(&mut conn).await?;
-        if !quick_check.iter().all(|row| row == "ok") {
-            return Err(DataMaintenanceError::Validation(format!(
-                "backup failed quick_check: {quick_check:?}"
-            )));
-        }
-        let foreign_key_issues = foreign_key_issues(&mut conn).await?;
-        if !foreign_key_issues.is_empty() {
-            return Err(DataMaintenanceError::Validation(format!(
-                "backup failed foreign_key_check: {foreign_key_issues:?}"
-            )));
-        }
-        let schema_version = schema_version(&mut conn).await?;
-        let sqlite_version = sqlite_version(&mut conn).await?;
-        let table_counts = table_counts(&mut conn).await?;
+        let result = async {
+            let quick_check = quick_check_rows(&mut conn).await?;
+            if !quick_check.iter().all(|row| row == "ok") {
+                return Err(DataMaintenanceError::Validation(format!(
+                    "backup failed quick_check: {quick_check:?}"
+                )));
+            }
+            let foreign_key_issues = foreign_key_issues(&mut conn).await?;
+            if !foreign_key_issues.is_empty() {
+                return Err(DataMaintenanceError::Validation(format!(
+                    "backup failed foreign_key_check: {foreign_key_issues:?}"
+                )));
+            }
+            let schema_version = schema_version(&mut conn).await?;
+            let sqlite_version = sqlite_version(&mut conn).await?;
+            let table_counts = table_counts(&mut conn).await?;
 
-        Ok(BackupManifest {
-            engine: BACKUP_ENGINE.to_owned(),
-            content_scope: BACKUP_CONTENT_SCOPE.to_owned(),
-            excludes_source_images: true,
-            backup_file: backup_file_name(backup_path),
-            app_version: self.app_version.clone(),
-            schema_version,
-            sqlite_version,
-            created_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            sha256,
-            file_size,
-            table_counts,
-        })
+            Ok(BackupManifest {
+                engine: BACKUP_ENGINE.to_owned(),
+                content_scope: BACKUP_CONTENT_SCOPE.to_owned(),
+                excludes_source_images: true,
+                backup_file: backup_file_name(backup_path),
+                app_version: self.app_version.clone(),
+                schema_version,
+                sqlite_version,
+                created_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                sha256,
+                file_size,
+                table_counts,
+            })
+        }
+        .await;
+        // Drop alone only requests shutdown; Windows file operations need
+        // the SQLite worker to release its handle before continuing.
+        conn.close().await?;
+        result
     }
 
     async fn snapshot_live_database(
@@ -624,20 +654,27 @@ impl DataMaintenanceService {
             return Ok(false);
         }
         let mut conn = self.open_connection_at(&self.db_path, true).await?;
-        let quick_check = quick_check_rows(&mut conn).await?;
-        if !quick_check.iter().all(|row| row == "ok") {
-            return Ok(false);
-        }
-        let foreign_key_issues = foreign_key_issues(&mut conn).await?;
-        if !foreign_key_issues.is_empty() {
-            return Ok(false);
-        }
-        if let Some(version) = schema_version(&mut conn).await? {
-            if version > self.max_supported_schema_version {
+        let result = async {
+            let quick_check = quick_check_rows(&mut conn).await?;
+            if !quick_check.iter().all(|row| row == "ok") {
                 return Ok(false);
             }
+            let foreign_key_issues = foreign_key_issues(&mut conn).await?;
+            if !foreign_key_issues.is_empty() {
+                return Ok(false);
+            }
+            if let Some(version) = schema_version(&mut conn).await? {
+                if version > self.max_supported_schema_version {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
-        Ok(true)
+        .await;
+        // Drop alone only requests shutdown; Windows file operations need
+        // the SQLite worker to release its handle before continuing.
+        conn.close().await?;
+        result
     }
 
     async fn rollback(&self, recovery_dir: &Path) -> Result<(), DataMaintenanceError> {
@@ -853,7 +890,15 @@ async fn replace_file(source: &Path, destination: &Path) -> Result<(), DataMaint
             let _ = tokio::fs::remove_file(source).await;
             Ok(())
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(std::io::Error::new(
+            error.kind(),
+            format!(
+                "cannot replace {} with {}: {error}",
+                destination.display(),
+                source.display()
+            ),
+        )
+        .into()),
     }
 }
 

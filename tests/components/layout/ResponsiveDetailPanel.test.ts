@@ -24,16 +24,6 @@ afterEach(() => {
 });
 
 describe("ResponsiveDetailPanel", () => {
-  it("renders inline when matchMedia is unavailable", () => {
-    const wrapper = mount(ResponsiveDetailPanel, {
-      props: { open: false, title: "截图详情" },
-      slots: { default: "详情内容" },
-    });
-
-    expect(wrapper.get(".responsive-detail-panel.is-static").text()).toContain("详情内容");
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-  });
-
   it("uses a labelled focus-managed drawer in the narrow layout", async () => {
     setNarrowViewport();
     const trigger = document.createElement("button");

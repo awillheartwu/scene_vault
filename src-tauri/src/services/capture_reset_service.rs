@@ -724,6 +724,8 @@ fn path_file_name(path: &str) -> String {
 /// Claims the picture, cleans its files and commits the classification reset.
 /// The claim is always released afterwards, with or without success, so a
 /// failure never locks a picture out of labeling or recognition.
+// One attempt carries its frozen plan, filesystem roots and shared job stats.
+#[allow(clippy::too_many_arguments)]
 async fn execute_item<R: FileRecycler>(
     pool: &SqlitePool,
     cache_root: &Path,
@@ -841,6 +843,8 @@ async fn release_claim(pool: &SqlitePool, id: &str, owner: &str) -> Result<(), A
     Ok(())
 }
 
+// Preserve the explicit ownership snapshot and cleanup/commit dependencies.
+#[allow(clippy::too_many_arguments)]
 async fn clean_and_commit<R: FileRecycler>(
     pool: &SqlitePool,
     cache_root: &Path,

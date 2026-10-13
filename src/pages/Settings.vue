@@ -40,6 +40,7 @@ import {
   type ModelRecognitionProfile,
   type ProcessingSettings,
   type RecognitionSettings,
+  type RenpyScreenshotSettings,
   type ResolvedRecognitionProfile,
   type ThumbnailCacheStatus,
   type VisionHealth,
@@ -109,6 +110,18 @@ const appSettings = ref<AppSettings>({
 const cacheStatus = ref<ThumbnailCacheStatus | null>(null);
 const busy = ref(false);
 const appBusy = ref(false);
+const renpyScreenshotSettings = ref<RenpyScreenshotSettings>({ autoHideUi: false });
+const renpyScreenshotBaseline = ref<RenpyScreenshotSettings | null>(null);
+const renpyScreenshotLoading = ref(true);
+const renpyScreenshotSaving = ref(false);
+const renpyScreenshotLoadError = ref<string | null>(null);
+const renpyScreenshotSaveError = ref<string | null>(null);
+let renpyScreenshotRequest = 0;
+let renpyScreenshotDisposed = false;
+const renpyScreenshotDirty = computed(() =>
+  renpyScreenshotBaseline.value !== null
+    && renpyScreenshotSettings.value.autoHideUi !== renpyScreenshotBaseline.value.autoHideUi,
+);
 const namingSettings = ref<ArchiveNamingSettings>({
   template: DEFAULT_NAMING_TEMPLATE,
   separator: " - ",
@@ -275,7 +288,7 @@ const visionDirty = computed(() =>
   baseline.value ? !deepEqual(settings.value, baseline.value.vision) : false,
 );
 const dirtyByCategory = computed<Record<SettingsCategoryKey, boolean>>(() => ({
-  general: generalDirty.value,
+  general: generalDirty.value || renpyScreenshotDirty.value,
   naming: namingDirty.value,
   recognition: recognitionDirty.value,
   processing: processingDirty.value,
@@ -474,6 +487,51 @@ async function saveAppSettings() {
     toast.error(normalizeError(error));
   } finally {
     appBusy.value = false;
+  }
+}
+
+async function loadRenpyScreenshotSettings() {
+  if (renpyScreenshotSaving.value) return;
+  const token = ++renpyScreenshotRequest;
+  const isCurrent = () => !renpyScreenshotDisposed && token === renpyScreenshotRequest;
+  renpyScreenshotLoading.value = true;
+  renpyScreenshotLoadError.value = null;
+  try {
+    const loaded = await captureApi.getRenpyScreenshotSettings();
+    if (!isCurrent()) return;
+    renpyScreenshotSettings.value = { ...loaded };
+    renpyScreenshotBaseline.value = { ...loaded };
+    renpyScreenshotSaveError.value = null;
+  } catch (error) {
+    if (isCurrent()) renpyScreenshotLoadError.value = normalizeError(error);
+  } finally {
+    if (isCurrent()) renpyScreenshotLoading.value = false;
+  }
+}
+
+async function saveRenpyScreenshotSettings() {
+  if (renpyScreenshotLoading.value || renpyScreenshotSaving.value
+    || renpyScreenshotLoadError.value || !renpyScreenshotBaseline.value || !renpyScreenshotDirty.value) return;
+  const token = ++renpyScreenshotRequest;
+  const isCurrent = () => !renpyScreenshotDisposed && token === renpyScreenshotRequest;
+  renpyScreenshotSaving.value = true;
+  renpyScreenshotSaveError.value = null;
+  try {
+    const draft = { ...renpyScreenshotSettings.value };
+    const saved = await captureApi.updateRenpyScreenshotSettings(draft);
+    if (!isCurrent()) return;
+    if (saved.autoHideUi !== draft.autoHideUi) {
+      renpyScreenshotSaveError.value = "截图设置未保存，请重试。";
+      return;
+    }
+    renpyScreenshotSettings.value = { ...saved };
+    renpyScreenshotBaseline.value = { ...saved };
+    toast.success("全局截图设置已保存；仅跟随全局的项目及其继承游戏会自动应用。");
+  } catch (error) {
+    // Preserve the draft and the last saved baseline so retry and leave protection remain accurate.
+    if (isCurrent()) renpyScreenshotSaveError.value = normalizeError(error);
+  } finally {
+    if (isCurrent()) renpyScreenshotSaving.value = false;
   }
 }
 
@@ -858,9 +916,12 @@ function onNavKeydown(event: KeyboardEvent) {
 onMounted(() => {
   window.addEventListener("beforeunload", onBeforeUnload);
   void initialize();
+  void loadRenpyScreenshotSettings();
 });
 
 onBeforeUnmount(() => {
+  renpyScreenshotDisposed = true;
+  renpyScreenshotRequest += 1;
   window.removeEventListener("beforeunload", onBeforeUnload);
 });
 </script>
@@ -1013,10 +1074,11 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="settings-field">
-        <label for="image-processing-core-limit">限制图片处理时的核心数</label>
+        <label for="image-processing-core-limit">后台处理并行度</label>
         <p>
-          限制单张人物图片进行人脸检测和识别时可使用的 CPU 线程数。处理队列和缩略图仍然
-          一张一张执行；修改后从下一次视觉处理开始生效。
+          统一控制人脸检测与识别、缩略图生成、图片缩放与编码的 CPU 线程数和并发数。
+          数值越大，可同时使用的处理线程和缩略图任务越多。截图处理队列仍逐张执行；
+          保存后从新任务开始生效，已开始的任务会继续完成。
         </p>
         <div>
           <input
@@ -1035,6 +1097,50 @@ onBeforeUnmount(() => {
           <LoaderCircle v-if="appBusy" class="animate-spin" :size="17" /><Save :size="17" />保存通用设置
         </button>
       </div>
+          </form>
+
+          <form class="settings-card renpy-screenshot-global" @submit.prevent="saveRenpyScreenshotSettings">
+            <div class="settings-card-title">
+              <span class="eyebrow">Ren'Py · 可选</span>
+              <h2>截图设置（全局默认）</h2>
+            </div>
+            <div class="settings-field toggle-row">
+              <div class="toggle-text">
+                <label for="renpy-auto-hide-ui">截图时自动隐藏 UI</label>
+                <p>默认关闭。项目与游戏可以跟随此默认，也可以单独启用或关闭；已有选择保留，可按项目或游戏覆盖。</p>
+                <p>请先更新游戏插件并重启游戏一次；之后修改会在下一次截图时应用。启用后按原截图键（通常为 S）隐藏标准剧情 UI，特殊界面请先按 H 隐藏 UI 再截图。</p>
+              </div>
+              <label class="toggle">
+                <input
+                  id="renpy-auto-hide-ui"
+                  v-model="renpyScreenshotSettings.autoHideUi"
+                  type="checkbox"
+                  :disabled="renpyScreenshotLoading || renpyScreenshotSaving || !!renpyScreenshotLoadError || !renpyScreenshotBaseline"
+                />
+                <span class="toggle-track" />
+              </label>
+            </div>
+            <p v-if="renpyScreenshotLoading" class="renpy-screenshot-status" role="status">正在读取截图设置…</p>
+            <div v-if="renpyScreenshotLoadError" class="renpy-screenshot-error">
+              <span role="alert">截图设置加载失败：{{ renpyScreenshotLoadError }}。请重试读取后再修改。</span>
+              <button type="button" class="secondary-action" :disabled="renpyScreenshotLoading" @click="loadRenpyScreenshotSettings">重试加载截图设置</button>
+            </div>
+            <p v-if="renpyScreenshotBaseline" class="renpy-screenshot-status">
+              已保存的全局默认：{{ renpyScreenshotBaseline.autoHideUi ? "启用" : "关闭" }}
+            </p>
+            <p v-if="renpyScreenshotSaveError" class="renpy-screenshot-error" role="alert">
+              截图设置保存失败：{{ renpyScreenshotSaveError }}。上次保存值仍保留，可重试保存当前选择。
+            </p>
+            <div class="settings-actions">
+              <button
+                type="submit"
+                class="primary-action"
+                :disabled="renpyScreenshotLoading || renpyScreenshotSaving || !!renpyScreenshotLoadError || !renpyScreenshotBaseline || !renpyScreenshotDirty"
+              >
+                <LoaderCircle v-if="renpyScreenshotSaving" class="animate-spin" :size="17" />
+                <Save v-else :size="17" />{{ renpyScreenshotSaveError ? "重试保存截图设置" : "保存截图设置" }}
+              </button>
+            </div>
           </form>
         </div>
 
@@ -1075,7 +1181,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="settings-field">
         <label for="archive-output-format">归档输出格式（全局默认）</label>
-        <p>归档时可转换图片格式；WebP 为无损编码，保留原格式时不重新编码。单个项目可在捕获页覆盖。</p>
+        <p>归档时可转换为 PNG、JPEG 或无损 WebP。原尺寸与原格式均保留时直接复制；JPEG 使用下方质量设置。单个项目可在捕获页覆盖。</p>
         <div>
           <select id="archive-output-format" v-model="archiveOutputSettings.format">
             <option value="keep">保持原格式</option>
@@ -1087,7 +1193,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="settings-field">
         <label for="archive-output-quality">JPEG 质量（全局默认）</label>
-        <p>仅对 JPEG 生效（PNG 与无损 WebP 不受影响）；实际使用的参数会记录在每张截图上。</p>
+        <p>对 JPEG 生效，PNG 与无损 WebP 不受影响。实际参数会记录在每张截图上。</p>
         <div class="archive-quality-row">
           <input
             id="archive-output-quality"
@@ -1551,6 +1657,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.renpy-screenshot-global > .settings-field,
+.renpy-screenshot-status,
+.renpy-screenshot-error { grid-column: 1 / -1; }
+.renpy-screenshot-status { margin: 0; padding: 12px 20px 0; color: var(--muted-foreground); font-size: 12px; }
+.renpy-screenshot-error { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0; padding: 12px 20px; color: var(--destructive); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.renpy-screenshot-error span { flex: 1; }
+.renpy-screenshot-global button:disabled { cursor: not-allowed; opacity: .55; }
+
 .archive-quality-row {
   display: flex;
   align-items: center;

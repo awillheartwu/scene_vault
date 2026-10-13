@@ -81,7 +81,13 @@ async fn open_and_prepare_database(
         env!("CARGO_PKG_VERSION"),
         latest,
     );
-    let report = maintenance.preflight().await?;
+    let report = match maintenance.preflight().await {
+        Ok(report) => report,
+        Err(error) => {
+            pool.close().await;
+            return Err(error.into());
+        }
+    };
     if !report.ok {
         pool.close().await;
         return Err(error::AppError::Conflict(format!(
@@ -95,7 +101,13 @@ async fn open_and_prepare_database(
                 .join("; ")
         )));
     }
-    let recovered = services::capture_service::recover_interrupted_processing(&pool).await?;
+    let recovered = match services::capture_service::recover_interrupted_processing(&pool).await {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            pool.close().await;
+            return Err(error);
+        }
+    };
     Ok((pool, recovered))
 }
 
@@ -170,6 +182,7 @@ async fn initialize_database_startup(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let dev_affinity = services::process_resource_service::restore_dev_runtime_affinity();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -190,13 +203,26 @@ pub fn run() {
                 }
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             let log_directory = app.path().app_log_dir()?;
             if let Err(error) = services::log_service::initialize(log_directory.clone()) {
                 eprintln!("[ERROR] [app.startup] could not initialize logging: {error}");
             }
             if let Err(error) = services::perf_log_service::initialize(log_directory) {
                 eprintln!("[ERROR] [app.startup] could not initialize perf logging: {error}");
+            }
+            match dev_affinity {
+                Ok(Some((inherited, available))) => services::log_service::info(
+                    "app.startup",
+                    format!(
+                        "dev application CPU affinity restored from build mask 0x{inherited:X} to system mask 0x{available:X}"
+                    ),
+                ),
+                Err(error) => services::log_service::warn(
+                    "app.startup",
+                    format!("could not restore dev application CPU affinity: {error}"),
+                ),
+                Ok(None) => {},
             }
             services::log_service::info(
                 "app.startup",
@@ -280,9 +306,15 @@ pub fn run() {
                 let app_settings =
                     tauri::async_runtime::block_on(services::app_settings_service::get(&pool))?;
                 services::shortcuts::register(app.handle(), &app_settings)?;
-                services::vision_worker_service::set_image_processing_core_limit(
-                    app_settings.image_processing_core_limit,
-                );
+                services::app_settings_service::apply_runtime(&app_settings);
+                if let Err(error) = tauri::async_runtime::block_on(
+                    services::renpy_screenshot_settings_service::publish(&pool, app.handle()),
+                ) {
+                    services::log_service::warn(
+                        "engine.screenshot",
+                        format!("could not publish screenshot policy: {error}"),
+                    );
+                }
             }
             {
                 // Caches live in the Local app directory; earlier builds kept
@@ -297,9 +329,6 @@ pub fn run() {
                 services::thumbnail_service::enforce_cache_limit(
                     &services::thumbnail_service::thumbnail_cache_dir(&cache_root),
                     (app_settings.thumbnail_cache_size_mb as u64).saturating_mul(1024 * 1024),
-                );
-                services::thumbnail_service::set_processing_parallelism(
-                    app_settings.image_processing_core_limit,
                 );
             }
             {
@@ -325,6 +354,12 @@ pub fn run() {
                 ),
             );
             services::notes_service::run_background(pool.clone());
+            if let Err(error) = services::performance_monitor_service::start(app.handle()) {
+                services::log_service::warn(
+                    "app.resources",
+                    format!("performance monitor unavailable: {error}"),
+                );
+            }
             services::archive_manifest_service::run_background(pool.clone());
             tauri::async_runtime::spawn(services::capture_worker_service::run(
                 pool, app_handle, cache_root,
@@ -425,6 +460,11 @@ pub fn run() {
             commands::vision::check_vision_engine,
             commands::vision::get_capture_runtime_status,
             commands::vision::list_bundled_fonts,
+            commands::settings::get_renpy_screenshot_settings,
+            commands::settings::update_renpy_screenshot_settings,
+            commands::engine::get_project_renpy_screenshot_policy,
+            commands::engine::set_project_renpy_screenshot_policy,
+            commands::engine::set_installation_renpy_screenshot_policy,
             commands::settings::get_app_settings,
             commands::settings::update_app_settings,
             commands::settings::get_archive_naming_settings,
@@ -466,6 +506,7 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            services::performance_monitor_service::shutdown();
             tauri::async_runtime::block_on(services::vision_worker_service::shutdown());
         }
     });

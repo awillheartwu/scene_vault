@@ -1,7 +1,7 @@
 use std::{
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
         OnceLock,
     },
     time::{Duration, Instant},
@@ -19,8 +19,8 @@ use crate::{
     error::AppError,
     models::vision::{VisionProcessData, VisionSettings},
     services::{
-        log_service, perf_log_service, vision_engine_service::EngineResponse,
-        vision_settings_service,
+        image_processing_service, log_service, perf_log_service,
+        vision_engine_service::EngineResponse, vision_settings_service,
     },
 };
 
@@ -36,7 +36,6 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 static WORKER_MANAGER: OnceLock<Mutex<VisionWorkerManager>> = OnceLock::new();
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-static IMAGE_PROCESSING_CORE_LIMIT: AtomicU32 = AtomicU32::new(4);
 static SHUTDOWN_NOTIFY: OnceLock<Notify> = OnceLock::new();
 
 #[derive(Debug)]
@@ -123,12 +122,8 @@ pub(super) fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
-pub fn set_image_processing_core_limit(limit: u32) {
-    IMAGE_PROCESSING_CORE_LIMIT.store(limit.clamp(1, 32), Ordering::SeqCst);
-}
-
 fn image_processing_core_limit() -> u32 {
-    IMAGE_PROCESSING_CORE_LIMIT.load(Ordering::SeqCst)
+    image_processing_service::core_limit()
 }
 
 pub(super) fn apply_image_processing_core_limit(command: &mut Command) {

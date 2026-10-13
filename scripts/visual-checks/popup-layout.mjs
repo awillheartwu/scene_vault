@@ -13,7 +13,8 @@
  *       CHROME_PATH=/path/to/chrome-linux/chrome \
  *       node scripts/visual-checks/popup-layout.mjs
  *
- * Run it after touching PopupClassify.vue layout rules or the framing state.
+ * Run it during version closing (or when explicitly requested) if changes
+ * affect PopupClassify.vue layout rules or the framing state.
  */
 import process from 'node:process';
 

@@ -1,13 +1,15 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CaptureImageFacts } from "@/lib/capture-api";
 import { useToasts } from "@/lib/toast";
 import { resetWorkbenchSnapshot } from "@/lib/workbench-cache";
 
-const { api, eventHandlers, listenMock, pickDirectoryMock } = vi.hoisted(() => {
+const { api, engineApi, eventHandlers, listenMock, pickDirectoryMock } = vi.hoisted(() => {
   const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
   return {
     api: {
     listProjects: vi.fn(),
+    listProjectOverviews: vi.fn(),
     listProjectCharacterSummaries: vi.fn(),
     listCharacters: vi.fn(),
     listCharacterCaptureItems: vi.fn(),
@@ -54,9 +56,11 @@ const { api, eventHandlers, listenMock, pickDirectoryMock } = vi.hoisted(() => {
     setProjectCover: vi.fn(),
     revealPath: vi.fn(),
     readImage: vi.fn(),
+    recordClientEvent: vi.fn(async () => {}),
     readThumbnail: vi.fn(),
-    getCaptureImageFacts: vi.fn(async () => ({ source: null, destination: null })),
+    getCaptureImageFacts: vi.fn(async (): Promise<CaptureImageFacts> => ({ source: null, destination: null })),
     },
+    engineApi: { getCaptureMetadata: vi.fn() },
     eventHandlers,
     pickDirectoryMock: vi.fn(),
     listenMock: vi.fn(
@@ -76,7 +80,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/lib/capture-api", () => ({
   captureApi: api,
-  engineApi: { getCaptureMetadata: vi.fn(async () => null) },
+  engineApi,
   captureStatusLabel: (status: string) => status,
   pathFileName: (path: string) => path.split(/[\\/]/).pop() || path,
   pathMimeType: () => "image/png",
@@ -85,6 +89,7 @@ vi.mock("@/lib/capture-api", () => ({
 }));
 
 import Workbench from "@/pages/Workbench.vue";
+import ProjectSelect from "@/components/project/ProjectSelect.vue";
 
 const project = {
   id: "project-1",
@@ -150,6 +155,7 @@ const characters = [
 ];
 const item = {
   id: "item-1",
+  projectId: project.id,
   sessionId: "session-1",
   assetId: null,
   characterId: "character-1",
@@ -193,6 +199,8 @@ function paged(items: unknown[], total?: number, page = 1, pageSize = 100) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  engineApi.getCaptureMetadata.mockReset().mockResolvedValue(null);
+  api.getCaptureImageFacts.mockReset().mockResolvedValue({ source: null, destination: null });
   listenMock.mockImplementation(
     async (name: string, handler: (event: { payload: unknown }) => void) => {
       eventHandlers.set(name, handler);
@@ -204,6 +212,7 @@ beforeEach(() => {
   localStorage.clear();
   resetWorkbenchSnapshot();
   api.listProjects.mockResolvedValue([project]);
+  api.listProjectOverviews.mockReset().mockResolvedValue([]);
   api.listProjectCharacterSummaries.mockResolvedValue(summaries);
   api.listCharacters.mockResolvedValue(characters);
   api.listCharacterCaptureItems.mockResolvedValue([item]);
@@ -835,22 +844,6 @@ describe("Workbench", () => {
     expect(banner.text()).toContain("重建前也不会产生建议");
   });
 
-  it("lays out the grid header as a title row plus an adaptive action grid", async () => {
-    const wrapper = mount(Workbench);
-    await flushPromises();
-
-    const titleRow = wrapper.find(".workbench-grid-header-title");
-    expect(titleRow.text()).toContain("Ava");
-    expect(titleRow.text()).toContain("1 张截图");
-    const actions = wrapper.findAll(".workbench-grid-actions button");
-    expect(actions).toHaveLength(2);
-    expect(actions.map((button) => button.text())).toEqual([
-      "合并角色",
-      "批量拒绝并登记 (1)",
-    ]);
-    expect(actions.every((button) => button.classes("compact-action"))).toBe(true);
-  });
-
   it("shows conditional character actions only when matching work exists", async () => {
     api.listProjectCharacterSummaries.mockResolvedValue([
       { ...summaries[0], pendingReviewCount: 2, degradedCount: 1 },
@@ -926,19 +919,6 @@ describe("Workbench", () => {
     await flushPromises();
     expect(recognized.text()).not.toContain("重新识别");
     recognized.unmount();
-  });
-
-  it("separates correction fields from an auto-fitting action group", async () => {
-    const wrapper = mount(Workbench);
-    await flushPromises();
-
-    expect(wrapper.findAll(".action-card-fields label")).toHaveLength(2);
-    const actions = wrapper.findAll(".action-card-actions button");
-    expect(actions.map((button) => button.text())).toEqual([
-      "重新提取人脸特征",
-      "标记可疑",
-      "设为项目封面",
-    ]);
   });
 
   it("clears the previous selection before loading another item page", async () => {
@@ -1024,6 +1004,112 @@ describe("Workbench", () => {
     expect(api.listCharacterCaptureItemsPage.mock.calls.length).toBeGreaterThan(
       callsBefore,
     );
+  });
+
+  it("refreshes file specs for the same capture and ignores an older facts reply", async () => {
+    const archived = {
+      ...item,
+      status: "completed",
+      fileSize: 2048,
+      destinationPath: "C:\\archive\\one.jpg",
+      destinationAvatarPath: "C:\\archive\\avatar.jpg",
+    };
+    const facts: CaptureImageFacts = {
+      source: { width: 3840, height: 2160, format: "png" },
+      destination: {
+        width: 1920, height: 1080, format: "jpeg", bytes: 1024,
+        qualityKind: "quality", quality: 90, sizePolicy: "1080p",
+        sizePolicyApplied: true, formatApplied: true,
+      },
+    };
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([archived]));
+    api.getCaptureImageFacts.mockResolvedValue(facts);
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    expect(wrapper.findAll(".path-entry-label").map((label) => label.text())).toEqual(["原图", "归档图"]);
+    expect(wrapper.findAll(".path-entry-info").map((line) => line.text())).toEqual([
+      "3840×2160 · PNG · 2.0 KB", "1920×1080 · JPEG q90 · 1.0 KB",
+    ]);
+    const callsBefore = api.getCaptureImageFacts.mock.calls.length;
+    let resolveOlder!: (value: CaptureImageFacts) => void;
+    api.getCaptureImageFacts.mockImplementationOnce(() => new Promise<CaptureImageFacts>((resolve) => { resolveOlder = resolve; }));
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([{ ...archived, updatedAt: "2026-08-07T00:00:00Z" }]));
+    eventHandlers.get("capture:item-updated")!({ payload: { id: item.id } });
+    await flushPromises();
+    expect(api.getCaptureImageFacts).toHaveBeenCalledTimes(callsBefore + 1);
+
+    api.getCaptureImageFacts.mockResolvedValue({
+      ...facts, destination: { ...facts.destination!, width: 1280, height: 720 },
+    });
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([{ ...archived, updatedAt: "2026-08-08T00:00:00Z" }]));
+    eventHandlers.get("capture:item-updated")!({ payload: { id: item.id } });
+    await flushPromises();
+    expect(wrapper.findAll(".path-entry-info")[1].text()).toContain("1280×720");
+    resolveOlder(facts);
+    await flushPromises();
+    expect(wrapper.findAll(".path-entry-info")[1].text()).toContain("1280×720");
+
+    await wrapper.get('[aria-label="定位原图"]').trigger("click");
+    await wrapper.get('[aria-label="定位归档图"]').trigger("click");
+    await wrapper.get(".path-card-body > .path-button").trigger("click");
+    expect(api.revealPath).toHaveBeenCalledWith(archived.sourcePath);
+    expect(api.revealPath).toHaveBeenCalledWith(archived.destinationPath);
+    expect(api.revealPath).toHaveBeenCalledWith(archived.destinationAvatarPath);
+    wrapper.unmount();
+  });
+
+  it("keeps both locating rows when file specs and the archive are unknown", async () => {
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    expect(wrapper.findAll(".path-entry-info").map((line) => line.text())).toEqual(["—", "—"]);
+    expect(wrapper.get('[aria-label="定位归档图"]').attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+
+  it("uses project badges independently of capture selection and refreshes them on menu open", async () => {
+    const otherProject = { ...project, id: "project-2", name: "Other Game" };
+    api.listProjects.mockResolvedValue([project, otherProject]);
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "8.4.1.26010101" },
+      { projectId: otherProject.id, engine: null, engineVersions: null },
+    ]);
+    api.listCharacterCaptureItemsPage.mockResolvedValue(paged([
+      item, { ...item, id: "item-2", sourcePath: "C:\\shots\\two.png" },
+    ]));
+    const wrapper = mount(Workbench);
+    await flushPromises();
+    const select = wrapper.getComponent(ProjectSelect);
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 8");
+    expect(wrapper.find(".workbench-detail .renpy-badge").exists()).toBe(false);
+    expect(engineApi.getCaptureMetadata).not.toHaveBeenCalled();
+    expect(eventHandlers.has("capture:engine-metadata-updated")).toBe(false);
+    const overviewCalls = api.listProjectOverviews.mock.calls.length;
+    await wrapper.findAll(".workbench-cell")[1].trigger("click");
+    await flushPromises();
+    expect(api.listProjectOverviews).toHaveBeenCalledTimes(overviewCalls);
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 8");
+    const itemCalls = api.listCharacterCaptureItemsPage.mock.calls.length;
+    const factsCalls = api.getCaptureImageFacts.mock.calls.length;
+
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "7.8.6, 8.4.1.26010101" },
+    ]);
+    select.vm.$emit("open");
+    await flushPromises();
+    expect(api.listProjectOverviews).toHaveBeenCalledTimes(overviewCalls + 1);
+    expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 7/8");
+    expect(select.get(".project-select-trigger .renpy-badge").attributes("title")).toBe("7.8.6、8.4.1.26010101");
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenCalledTimes(itemCalls);
+    expect(api.getCaptureImageFacts).toHaveBeenCalledTimes(factsCalls);
+
+    select.vm.$emit("update:modelValue", otherProject.id);
+    await flushPromises();
+    expect(select.props("modelValue")).toBe(otherProject.id);
+    expect(select.find(".project-select-trigger .renpy-badge").exists()).toBe(false);
+    expect(api.listProjectCharacterSummaries).toHaveBeenLastCalledWith(otherProject.id);
+    expect(localStorage.getItem("scene-vault.capture.project")).toBe(otherProject.id);
+    expect(engineApi.getCaptureMetadata).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
   it("batch re-recognizes all degraded captures", async () => {

@@ -152,6 +152,8 @@ pub async fn delete_character<R: FileRecycler>(
     .await
 }
 
+// Keep cache roots and the two independent deletion permissions explicit.
+#[allow(clippy::too_many_arguments)]
 async fn execute<R: FileRecycler>(
     pool: &SqlitePool,
     app_cache_root: &Path,
@@ -245,11 +247,21 @@ async fn execute<R: FileRecycler>(
                     }
                     let network_target = is_unc_path(&path);
                     if network_target && !allow_permanent_network_delete {
-                        set_destination_state(&mut transaction, &rows, &path, "available").await?;
                         result.failures.push(FileRecycleFailure {
                             path: capture_service::path_to_string(&path),
                             error: "network target requires explicit permanent-delete confirmation"
                                 .to_owned(),
+                        });
+                        continue;
+                    }
+                    if let Err(error) =
+                        validate_destination_identity(&mut transaction, &rows, &path).await
+                    {
+                        set_destination_state(&mut transaction, &rows, &path, "unavailable")
+                            .await?;
+                        result.failures.push(FileRecycleFailure {
+                            path: capture_service::path_to_string(&path),
+                            error: error.to_string(),
                         });
                         continue;
                     }
@@ -455,7 +467,7 @@ fn destination_paths(rows: &[DeletionRow]) -> Result<Vec<DestinationCandidate>, 
         {
             let Some(value) = value else { continue };
             let path = PathBuf::from(value);
-            if path == PathBuf::from(&row.source_path) {
+            if path.as_path() == Path::new(&row.source_path) {
                 return Err(AppError::Conflict(
                     "a target path resolves to the protected source image".to_owned(),
                 ));
@@ -476,6 +488,48 @@ fn destination_paths(rows: &[DeletionRow]) -> Result<Vec<DestinationCandidate>, 
         }
     }
     Ok(paths.into_values().collect())
+}
+
+async fn validate_destination_identity(
+    connection: &mut SqliteConnection,
+    rows: &[DeletionRow],
+    path: &Path,
+) -> Result<(), AppError> {
+    let key = deletion_path_key(path);
+    let mut expected_hashes = std::collections::BTreeSet::new();
+    for row in rows {
+        for recorded_path in [
+            row.destination_path.as_deref(),
+            row.destination_avatar_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|recorded_path| deletion_path_key(Path::new(recorded_path)) == key)
+        {
+            let expected: Option<String> = sqlx::query_scalar(
+                "SELECT content_hash FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?",
+            )
+            .bind(&row.id)
+            .bind(recorded_path)
+            .fetch_optional(&mut *connection)
+            .await?;
+            if let Some(expected) = expected {
+                expected_hashes.insert(expected);
+            }
+        }
+    }
+    // Keep legacy deletion behavior for outputs without a stored fingerprint;
+    // an existing fingerprint must never be replaced by the current bytes.
+    if !expected_hashes.is_empty() {
+        let actual = capture_service::sha256_file(path).await?;
+        if expected_hashes.iter().any(|expected| *expected != actual) {
+            return Err(AppError::Conflict(
+                "target content differs from the recorded archive; refusing to delete it"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn set_destination_state(
@@ -843,6 +897,82 @@ mod tests {
         assert!(retried.completed);
         assert_eq!(retried.destination_files_already_missing, 1);
         assert_eq!(retried.destination_files_recycled, 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_rejects_replaced_archive_bytes_and_can_retry_after_restoration() {
+        for avatar in [false, true] {
+            let pool = db::test_pool().await;
+            let (workspace, item, source) = item_fixture(&pool).await;
+            let target = workspace.path().join("tracked.png");
+            let target_string = capture_service::path_to_string(&target);
+            tokio::fs::write(&target, b"archive-A").await.unwrap();
+            let fingerprint = capture_service::sha256_file(&target).await.unwrap();
+            let sql = if avatar {
+                "UPDATE capture_items SET destination_avatar_path = ?, destination_avatar_file_state = 'available', status = 'completed' WHERE id = ?"
+            } else {
+                "UPDATE capture_items SET destination_path = ?, destination_file_state = 'available', status = 'completed' WHERE id = ?"
+            };
+            sqlx::query(sql)
+                .bind(&target_string)
+                .bind(&item.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO capture_archive_fingerprints (capture_item_id, path, content_hash) VALUES (?, ?, ?)")
+                .bind(&item.id)
+                .bind(&target_string)
+                .bind(fingerprint)
+                .execute(&pool)
+                .await
+                .unwrap();
+            tokio::fs::write(&target, b"archive-B").await.unwrap();
+
+            let rejected = delete_capture(
+                &pool,
+                workspace.path(),
+                workspace.path(),
+                &item.id,
+                true,
+                false,
+                &RemovingRecycler { fail_name: None },
+            )
+            .await
+            .unwrap();
+            assert!(!rejected.completed);
+            assert_eq!(rejected.records_deleted, 0);
+            assert_eq!(rejected.destination_files_recycled, 0);
+            assert_eq!(rejected.failures.len(), 1);
+            assert!(rejected.failures[0].error.contains("recorded archive"));
+            assert_eq!(tokio::fs::read(&target).await.unwrap(), b"archive-B");
+            let retained = capture_service::get_item(&pool, &item.id).await.unwrap();
+            assert_eq!(
+                if avatar {
+                    retained.destination_avatar_file_state
+                } else {
+                    retained.destination_file_state
+                },
+                "unavailable"
+            );
+
+            tokio::fs::write(&target, b"archive-A").await.unwrap();
+            let retried = delete_capture(
+                &pool,
+                workspace.path(),
+                workspace.path(),
+                &item.id,
+                true,
+                false,
+                &RemovingRecycler { fail_name: None },
+            )
+            .await
+            .unwrap();
+            assert!(retried.completed);
+            assert_eq!(retried.records_deleted, 1);
+            assert_eq!(retried.destination_files_recycled, 1);
+            assert!(!target.exists());
+            assert!(source.exists());
+        }
     }
 
     #[tokio::test]

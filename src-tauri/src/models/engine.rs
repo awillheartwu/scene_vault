@@ -10,7 +10,7 @@ pub const ARCHIVE_OUTPUT_SIZES: [&str; 5] = ["keep", "1080p", "1440p", "2160p", 
 /// Archive output format values a user can pick (besides `inherit`).
 pub const ARCHIVE_OUTPUT_FORMATS: [&str; 4] = ["keep", "png", "jpeg", "webp"];
 
-/// JPEG quality bounds and default used by the archive re-encode step.
+/// JPEG quality bounds and default for archive re-encoding.
 pub const ARCHIVE_OUTPUT_QUALITY_MIN: i64 = 60;
 pub const ARCHIVE_OUTPUT_QUALITY_MAX: i64 = 100;
 pub const DEFAULT_ARCHIVE_OUTPUT_QUALITY: i64 = 90;
@@ -42,7 +42,7 @@ pub struct EngineDetection {
     pub game_directory: String,
     /// Python major version shipped with the engine build, when detectable.
     pub python_major: Option<i64>,
-    /// Exact engine version read from `renpy/vc_version.py`, when readable.
+    /// Exact engine version read from the bundled Ren'Py version files.
     pub engine_version: Option<String>,
     /// Whether a Scene Vault bridge file already sits in `game/`.
     pub bridge_installed: bool,
@@ -60,6 +60,9 @@ pub struct InstallEngineBridgeInput {
     pub project_id: String,
     /// Game folder or executable the user picked for this project.
     pub path: String,
+    /// None preserves an existing override; new games inherit the project policy.
+    #[serde(default)]
+    pub auto_hide_ui: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +135,10 @@ pub struct ProjectEngineIntegration {
     /// Exact engine version, when it could be read from the installation.
     pub engine_version: Option<String>,
     pub bridge_version: String,
+    /// Fallback policy recorded when the bridge was installed.
+    pub auto_hide_ui: bool,
+    /// None follows the project; legacy per-game choices remain explicit.
+    pub auto_hide_ui_override: Option<bool>,
     /// App-cache directory the bridge writes screenshot metadata files into.
     pub metadata_directory: Option<String>,
     /// Serialized `Vec<BridgeFileEntry>`.
@@ -153,6 +160,8 @@ pub struct BridgeUninstallResult {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectEngineIntegrationView {
     pub integration: ProjectEngineIntegration,
+    /// Current value after global, project and installation inheritance.
+    pub resolved_auto_hide_ui: bool,
     /// Live filesystem state so the UI can prompt a reinstall after a game
     /// update or a store integrity check removed the bridge files.
     pub bridge_file_present: bool,
@@ -285,4 +294,43 @@ fn default_archive_output_quality() -> i64 {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateArchiveOutputSettingsInput {
     pub settings: ArchiveOutputSettings,
+}
+
+/// Global default for the optional Ren'Py screenshot-key integration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RenpyScreenshotSettings {
+    #[serde(default)]
+    pub auto_hide_ui: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRenpyScreenshotSettingsInput {
+    pub settings: RenpyScreenshotSettings,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenpyScreenshotPolicyView {
+    pub project_auto_hide_ui: Option<bool>,
+    pub global_auto_hide_ui: bool,
+    pub resolved_auto_hide_ui: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectRenpyScreenshotPolicyInput {
+    pub project_id: String,
+    /// None restores inheritance from the global default.
+    pub auto_hide_ui: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetInstallationRenpyScreenshotPolicyInput {
+    pub project_id: String,
+    pub integration_id: String,
+    /// None restores inheritance from the project policy.
+    pub auto_hide_ui: Option<bool>,
 }

@@ -145,7 +145,11 @@ pub async fn delete_capture_item(
         input.allow_permanent_network_delete,
         &SystemRecycleBin,
     )
-    .await?;
+    .await;
+    if !matches!(&result, Ok(result) if result.completed) {
+        emit_capture_item_updated(&app, &state.pool, &input.capture_item_id, None).await;
+    }
+    let result = result?;
     if result.completed {
         for id in &result.deleted_capture_item_ids {
             let _ = app.emit(
@@ -204,12 +208,17 @@ pub async fn reconcile_capture_files(
 
 #[tauri::command]
 pub async fn reconcile_project_files(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: ReconcileProjectFilesInput,
 ) -> Result<ProjectFileReconcileResult, AppError> {
     let project_id = input.project_id.clone();
-    let result =
-        project_file_reconcile_service::reconcile_project_files(&state.pool, input).await?;
+    let result = project_file_reconcile_service::reconcile_project_files(&state.pool, input).await;
+    let _ = app.emit(
+        "capture:project-files-updated",
+        serde_json::json!({ "projectId": project_id.trim() }),
+    );
+    let result = result?;
     log_service::record_event(LogRecord {
         level: LogLevel::Info,
         module: "capture.reconcile".to_owned(),
@@ -286,10 +295,13 @@ pub async fn label_capture(
     state: State<'_, AppState>,
     input: LabelCaptureInput,
 ) -> Result<CaptureItem, AppError> {
-    let item = capture_service::label_capture(&state.pool, input).await?;
-    item_event("labeled", &item);
-    let _ = app.emit("capture:item-updated", &item);
-    Ok(item)
+    let capture_item_id = input.capture_item_id.clone();
+    let result = capture_service::label_capture(&state.pool, input).await;
+    if let Ok(item) = &result {
+        item_event("labeled", item);
+    }
+    emit_capture_item_updated(&app, &state.pool, &capture_item_id, result.as_ref().ok()).await;
+    result
 }
 
 #[tauri::command]
@@ -298,10 +310,13 @@ pub async fn relabel_capture_item(
     state: State<'_, AppState>,
     input: RelabelCaptureInput,
 ) -> Result<CaptureItem, AppError> {
-    let item = capture_service::relabel_capture_item(&state.pool, input).await?;
-    item_event("relabeled", &item);
-    let _ = app.emit("capture:item-updated", &item);
-    Ok(item)
+    let capture_item_id = input.capture_item_id.clone();
+    let result = capture_service::relabel_capture_item(&state.pool, input).await;
+    if let Ok(item) = &result {
+        item_event("relabeled", item);
+    }
+    emit_capture_item_updated(&app, &state.pool, &capture_item_id, result.as_ref().ok()).await;
+    result
 }
 
 #[tauri::command]
@@ -310,23 +325,32 @@ pub async fn retry_capture(
     state: State<'_, AppState>,
     input: RetryCaptureInput,
 ) -> Result<CaptureItem, AppError> {
-    let item = capture_service::retry_capture(&state.pool, input).await?;
-    item_event("retry_requested", &item);
-    let _ = app.emit("capture:item-updated", &item);
-    Ok(item)
+    let capture_item_id = input.capture_item_id.clone();
+    let result = capture_service::retry_capture(&state.pool, input).await;
+    if let Ok(item) = &result {
+        item_event("retry_requested", item);
+    }
+    emit_capture_item_updated(&app, &state.pool, &capture_item_id, result.as_ref().ok()).await;
+    result
 }
 
 #[tauri::command]
 pub async fn retry_degraded_captures(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: RetryDegradedCapturesInput,
 ) -> Result<i64, AppError> {
-    capture_service::retry_degraded_captures(
+    let result = capture_service::retry_degraded_captures(
         &state.pool,
         &input.project_id,
         input.character_id.as_deref(),
     )
-    .await
+    .await;
+    let _ = app.emit(
+        "capture:project-files-updated",
+        serde_json::json!({ "projectId": input.project_id.trim() }),
+    );
+    result
 }
 
 #[tauri::command]
@@ -416,12 +440,16 @@ pub async fn mark_capture_failed(
 
 #[tauri::command]
 pub async fn archive_capture(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: CaptureItemIdInput,
 ) -> Result<CaptureItem, AppError> {
     // The archive service requests the throttled cache cleanup itself so the
     // background worker path is covered too.
-    capture_archive_service::archive(&state.pool, input).await
+    let capture_item_id = input.capture_item_id.clone();
+    let result = capture_archive_service::archive(&state.pool, input).await;
+    emit_capture_item_updated(&app, &state.pool, &capture_item_id, result.as_ref().ok()).await;
+    result
 }
 
 #[tauri::command]
@@ -604,6 +632,21 @@ pub async fn get_capture_image_facts(
     input: CaptureItemIdInput,
 ) -> Result<CaptureImageFacts, AppError> {
     image_facts_service::read(&state.pool, input.capture_item_id.trim()).await
+}
+
+/// Publish the returned item on success, or the persisted state after a partial
+/// failure. Lookup and emit failures must not replace the command's result.
+pub(super) async fn emit_capture_item_updated(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    capture_item_id: &str,
+    item: Option<&CaptureItem>,
+) {
+    if let Some(item) = item {
+        let _ = app.emit("capture:item-updated", item);
+    } else if let Ok(item) = capture_service::get_item(pool, capture_item_id.trim()).await {
+        let _ = app.emit("capture:item-updated", &item);
+    }
 }
 
 fn session_event(event: &str, session: &CaptureSession) {

@@ -12,9 +12,10 @@ from scene_vault_ai.vision.types import FaceBox
 
 
 def payload():
+    root = Path(tempfile.gettempdir()).resolve()
     return {
-        "inputPath": "/tmp/source.png",
-        "yunetModelPath": "/tmp/yunet.onnx",
+        "inputPath": str(root / "source.png"),
+        "yunetModelPath": str(root / "yunet.onnx"),
         "annotate": False,
         "cropAvatar": False,
     }

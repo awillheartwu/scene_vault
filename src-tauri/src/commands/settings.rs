@@ -7,14 +7,17 @@ use crate::{
         app_settings::{AppSettings, UpdateAppSettingsInput},
         archive_naming::{ArchiveNamingSettings, UpdateArchiveNamingSettingsInput},
         diagnostics::{LogLevel, LogRecord},
-        engine::{ArchiveOutputSettings, UpdateArchiveOutputSettingsInput},
+        engine::{
+            ArchiveOutputSettings, RenpyScreenshotSettings, UpdateArchiveOutputSettingsInput,
+            UpdateRenpyScreenshotSettingsInput,
+        },
         recognition_settings::{RecognitionSettings, UpdateRecognitionSettingsInput},
         vision::ProcessingSettings,
     },
     services::{
         app_settings_service, archive_naming_settings_service, archive_output_settings_service,
-        log_service, processing_settings_service, recognition_settings_service, shortcuts,
-        vision_worker_service,
+        log_service, processing_settings_service, recognition_settings_service,
+        renpy_screenshot_settings_service, shortcuts,
     },
 };
 
@@ -31,10 +34,7 @@ pub async fn update_app_settings(
 ) -> Result<AppSettings, AppError> {
     let previous = app_settings_service::get(&state.pool).await?;
     let saved = app_settings_service::update(&state.pool, input).await?;
-    vision_worker_service::set_image_processing_core_limit(saved.image_processing_core_limit);
-    crate::services::thumbnail_service::set_processing_parallelism(
-        saved.image_processing_core_limit,
-    );
+    app_settings_service::apply_runtime(&saved);
     shortcuts::reconfigure(&app, &previous, &saved)?;
     settings_event("app_settings_updated");
     Ok(saved)
@@ -117,4 +117,23 @@ fn settings_event(event: &str) {
         outcome: Some("succeeded".to_owned()),
         ..Default::default()
     });
+}
+
+#[tauri::command]
+pub async fn get_renpy_screenshot_settings(
+    state: State<'_, AppState>,
+) -> Result<RenpyScreenshotSettings, AppError> {
+    renpy_screenshot_settings_service::get(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn update_renpy_screenshot_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: UpdateRenpyScreenshotSettingsInput,
+) -> Result<RenpyScreenshotSettings, AppError> {
+    let saved =
+        renpy_screenshot_settings_service::update(&state.pool, &app, input.settings).await?;
+    settings_event("renpy_screenshot_settings_updated");
+    Ok(saved)
 }

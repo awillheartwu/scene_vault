@@ -79,7 +79,8 @@ Scene Vault 的人脸识别评测工具，已从"临时脚本"升级为 recognit
 ## 运行方法
 
 需要 Windows 侧的 venv（cv2 已固定 <5）。**务必保留 `--threads` 限制**，
-默认 8 个逻辑 CPU（4 个 P 核），否则会卡死机器。
+本机默认 10 个逻辑 CPU（CPU 0–9），也可通过 `SCENE_VAULT_BENCH_THREADS` 或
+`--threads` 指定。基准工具独立运行，不读取应用数据库中的图片处理设置。
 
 ```powershell
 $env:PYTHONPATH = "python\src"

@@ -4,6 +4,7 @@ import { ImageOff } from "@lucide/vue";
 import { captureApi, pathMimeType, type CaptureItem } from "@/lib/capture-api";
 import { subscribeCaptureImageUpdates } from "@/lib/capture-image-updates";
 import { captureVariantReadReason } from "./capture-file-state";
+import { reportImageLoadTiming } from "@/lib/image-performance";
 
 const props = withDefaults(defineProps<{
   item: CaptureItem;
@@ -46,6 +47,32 @@ watch(() => props.item.id, (id) => {
   });
 }, { immediate: true });
 let requestVersion = 0;
+let imageTiming: {
+  captureItemId: string;
+  variant: string;
+  kind: "thumb" | "full";
+  started: number;
+  published: number;
+  metrics: Record<string, number>;
+} | null = null;
+
+function finishImageTiming(outcome: "ok" | "failed" | "cancelled") {
+  const timing = imageTiming;
+  if (!timing) return;
+  imageTiming = null;
+  timing.metrics.total_ms = performance.now() - timing.started;
+  reportImageLoadTiming(timing.captureItemId, timing.variant, timing.kind, timing.metrics, outcome);
+}
+
+function onImageLoad(event: Event) {
+  if ((event.target as HTMLImageElement).src !== url.value || !imageTiming) return;
+  imageTiming.metrics.load_event_ms = performance.now() - imageTiming.published;
+  finishImageTiming("ok");
+}
+
+function onImageError(event: Event) {
+  if ((event.target as HTMLImageElement).src === url.value) finishImageTiming("failed");
+}
 
 function resolvedSize(): "thumb" | "full" {
   return props.size === "auto" ? automaticSize.value : props.size;
@@ -57,9 +84,19 @@ function updateAutomaticSize(width: number) {
 }
 
 async function loadImage() {
+  finishImageTiming("cancelled");
   const version = ++requestVersion;
   const imageSize = resolvedSize();
   const item = imageItem.value;
+  const timing = {
+    captureItemId: item.id,
+    variant: props.variant,
+    kind: imageSize,
+    started: performance.now(),
+    published: 0,
+    metrics: {} as Record<string, number>,
+  };
+  imageTiming = timing;
   if (url.value) URL.revokeObjectURL(url.value);
   url.value = null;
   const variants = props.fallbackVariant
@@ -69,18 +106,27 @@ async function loadImage() {
     // Known-missing, replaced or unreachable files must not trigger pointless
     // image reads; the backend state is authoritative when present.
     if (captureVariantReadReason(item, variant)) continue;
+    timing.variant = variant;
+    timing.kind = imageSize;
     try {
       let bytes: ArrayBuffer;
+      const readStarted = performance.now();
       try {
-        bytes = imageSize === "full"
-          ? await captureApi.readImage(item.id, variant)
-          : await captureApi.readThumbnail(item.id, variant);
-      } catch (error) {
-        if (version !== requestVersion) return;
-        if (imageSize === "full") throw error;
-        bytes = await captureApi.readImage(item.id, variant);
+        try {
+          bytes = imageSize === "full"
+            ? await captureApi.readImage(item.id, variant)
+            : await captureApi.readThumbnail(item.id, variant);
+        } catch (error) {
+          if (version !== requestVersion) return;
+          if (imageSize === "full") throw error;
+          timing.kind = "full";
+          bytes = await captureApi.readImage(item.id, variant);
+        }
+      } finally {
+        timing.metrics.read_ms = (timing.metrics.read_ms ?? 0) + performance.now() - readStarted;
       }
       if (version !== requestVersion) return;
+      const blobStarted = performance.now();
       const nextUrl = URL.createObjectURL(
         new Blob([bytes], {
           type: imageSize === "full"
@@ -88,10 +134,12 @@ async function loadImage() {
             : "image/jpeg",
         }),
       );
+      timing.metrics.blob_ms = performance.now() - blobStarted;
       if (version !== requestVersion) {
         URL.revokeObjectURL(nextUrl);
         return;
       }
+      timing.published = performance.now();
       url.value = nextUrl;
       return;
     } catch {
@@ -99,6 +147,7 @@ async function loadImage() {
       /* try the next variant */
     }
   }
+  if (version === requestVersion) finishImageTiming("failed");
 }
 
 function requestImage() {
@@ -155,6 +204,7 @@ watch(imageKey, () => {
   if (requested) void loadImage();
 });
 onBeforeUnmount(() => {
+  finishImageTiming("cancelled");
   requestVersion += 1;
   unsubscribe?.();
   observer?.disconnect();
@@ -172,6 +222,8 @@ onBeforeUnmount(() => {
       class="h-full w-full object-cover"
       decoding="async"
       loading="lazy"
+      @load="onImageLoad"
+      @error="onImageError"
     />
     <div v-else class="grid h-full w-full place-items-center bg-white/5 text-slate-600">
       <ImageOff :size="22" aria-hidden="true" />

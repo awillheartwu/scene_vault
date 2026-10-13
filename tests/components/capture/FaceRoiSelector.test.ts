@@ -3,6 +3,28 @@ import { describe, it, expect } from 'vitest';
 import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
 const props = { itemId:'one', imageUrl:'blob:one', modelValue:null };
 describe('FaceRoiSelector', () => {
+  it('shows a placeholder without an img or ROI when there is no displayable picture', async () => {
+    const wrapper=mount(FaceRoiSelector,{props:{...props,imageUrl:null,modelValue:{x:.1,y:.1,width:.5,height:.5}}});
+    expect(wrapper.find('img').exists()).toBe(false);
+    expect(wrapper.find('.roi-image').exists()).toBe(false);
+    expect(wrapper.get('.roi-placeholder').text()).toContain('正在加载图片');
+    expect(wrapper.findAll('button').every(button => button.attributes('disabled') !== undefined)).toBe(true);
+    await wrapper.setProps({imageError:'原图已被替换'});
+    expect(wrapper.get('.roi-placeholder').text()).toContain('原图已被替换');
+    expect(wrapper.get('.roi-placeholder').attributes('role')).toBe('alert');
+    expect(wrapper.emitted('confirm')).toBeUndefined();
+    wrapper.unmount();
+  });
+  it('cancels active framing if the preview disappears', async () => {
+    const wrapper=mount(FaceRoiSelector,{props});
+    await wrapper.get('button').trigger('click');
+    await wrapper.setProps({imageUrl:null});
+    expect(wrapper.find('.face-roi-selector.editing').exists()).toBe(false);
+    expect(wrapper.find('.roi-image').exists()).toBe(false);
+    expect(wrapper.find('.roi-confirm').exists()).toBe(false);
+    expect(wrapper.emitted('confirm')).toBeUndefined();
+    wrapper.unmount();
+  });
   it('only submits after confirmation, clamps pointer coordinates to the image, and cancels on image change', async () => {
     const wrapper=mount(FaceRoiSelector,{props});
     await wrapper.get('button').trigger('click');

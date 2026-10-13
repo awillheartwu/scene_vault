@@ -15,7 +15,7 @@ use crate::{
         },
         diagnostics::{LogLevel, LogRecord},
     },
-    services::{capture_service, log_service},
+    services::{capture_service, image_facts_service, log_service},
 };
 
 const DEFAULT_STABILITY_DELAY_MS: u64 = 250;
@@ -31,11 +31,6 @@ const SLOW_SCAN_WARNING_THRESHOLD_MS: u64 = 1_000;
 /// modification times down by up to two seconds. A live capture written just
 /// after the session started must not look like a backfill.
 const BACKFILL_MTIME_TOLERANCE: Duration = Duration::from_secs(2);
-
-/// Whether a completed scan should be surfaced as a slow-scan warning.
-pub(crate) fn should_warn_slow_scan(scan_duration_ms: u64) -> bool {
-    scan_duration_ms >= SLOW_SCAN_WARNING_THRESHOLD_MS
-}
 
 #[derive(Debug)]
 struct Candidate {
@@ -240,6 +235,7 @@ async fn discover_with_options(
             row.file_size == candidate.length as i64
                 && row.modified_at_ms.is_some()
                 && row.modified_at_ms == candidate_modified
+                && row.source_file_state == "available"
         });
         if stats_match && !force_rehash_known {
             // Known files are revisited on every poll (every couple of seconds
@@ -247,31 +243,8 @@ async fn discover_with_options(
             // unless something is actually wrong: refreshing every row turned an
             // idle session into a stream of commits, reset updated_at on every
             // poll and cleared the 'replaced' marker of older generations.
-            // Only the generation whose stats match the file on disk is
-            // repaired, and only when its state is stale.
-            let stale_ids: Vec<String> = rows
-                .iter()
-                .filter(|row| {
-                    row.file_size == candidate.length as i64
-                        && row.modified_at_ms.is_some()
-                        && row.modified_at_ms == candidate_modified
-                        && row.source_file_state != "available"
-                })
-                .map(|row| row.id.clone())
-                .collect();
-            for id in stale_ids {
-                sqlx::query(
-                    r#"
-                    UPDATE capture_items
-                    SET source_file_state = 'available',
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHERE id = ?
-                    "#,
-                )
-                .bind(&id)
-                .execute(pool)
-                .await?;
-            }
+            // Missing/replaced generations need a content check before they
+            // can become available again, even when their stats still match.
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
@@ -409,8 +382,11 @@ async fn discover_with_options(
             .bind(&row.id)
             .execute(pool)
             .await?;
+            // The matching hash proves which generation was restored. Probe
+            // only this verified input; normal polls retain the stat fast path.
+            image_facts_service::refresh_source_facts(pool, &row.id, &item.canonical_path).await?;
             sqlx::query(
-                "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ? AND id != ?",
+                "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ? AND id != ? AND source_file_state != 'replaced'",
             )
             .bind(&session.project_id)
             .bind(&item.key)
@@ -429,6 +405,12 @@ async fn discover_with_options(
             .bind(&row.id)
             .execute(pool)
             .await?;
+            emit_updated_item(pool, app, &row.id).await;
+            for previous in rows.iter().filter(|previous| {
+                previous.id != row.id && previous.source_file_state != "replaced"
+            }) {
+                emit_updated_item(pool, app, &previous.id).await;
+            }
             already_known_count = already_known_count.saturating_add(1);
             continue;
         }
@@ -437,7 +419,7 @@ async fn discover_with_options(
         // its database identity and is marked replaced. Deletion remains an
         // explicit user action; discovery never silently removes history.
         sqlx::query(
-            "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ?",
+            "UPDATE capture_items SET source_file_state = 'replaced', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE project_id = ? AND source_path = ? AND source_file_state != 'replaced'",
         )
         .bind(&session.project_id)
         .bind(&item.key)
@@ -453,6 +435,12 @@ async fn discover_with_options(
         .bind(&item.key)
         .execute(pool)
         .await?;
+        for previous in rows
+            .iter()
+            .filter(|previous| previous.source_file_state != "replaced")
+        {
+            emit_updated_item(pool, app, &previous.id).await;
+        }
         if rows.iter().any(|row| row.status == "processing") {
             // A processing row owns this path until it finishes or fails.
             already_known_count = already_known_count.saturating_add(1);
@@ -462,17 +450,9 @@ async fn discover_with_options(
             ignored_count = ignored_count.saturating_add(1);
             continue;
         }
-        if capture_service::matches_discovery_baseline(
-            pool,
-            session_id,
-            &item.canonical_path,
-            &metadata,
-        )
-        .await?
-        {
-            ignored_count = ignored_count.saturating_add(1);
-            continue;
-        }
+        // The content differs from every registered generation. A cheap
+        // session baseline cannot override that verified replacement, even
+        // when the new file happens to have the baseline's size and mtime.
         let is_backfill = session_started_at
             .and_then(|started_at| started_at.checked_sub(BACKFILL_MTIME_TOLERANCE))
             .is_some_and(|boundary| {
@@ -498,20 +478,27 @@ async fn discover_with_options(
     // unarchived disappearance is handled by the worker's guarded purge.
     for (path, rows) in &mut registered {
         let path = PathBuf::from(path);
-        if path.is_file()
-            || !scanned_roots
-                .iter()
-                .any(|root| capture_service::path_is_within(&path, root))
+        if !scanned_roots
+            .iter()
+            .any(|root| capture_service::path_is_within(&path, root))
         {
             continue;
         }
-        for row in rows.iter().filter(|row| row.archived) {
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => continue,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => continue,
+            _ => {}
+        }
+        for row in rows.iter().filter(|row| {
+            row.archived && !matches!(row.source_file_state.as_str(), "missing" | "replaced")
+        }) {
             sqlx::query(
                 "UPDATE capture_items SET source_file_state = 'missing', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
             )
             .bind(&row.id)
             .execute(pool)
             .await?;
+            emit_updated_item(pool, app, &row.id).await;
         }
     }
     let scan_duration_ms = SystemTime::now()
@@ -530,12 +517,27 @@ async fn discover_with_options(
     })
 }
 
+async fn emit_updated_item(pool: &SqlitePool, app: Option<&AppHandle>, id: &str) {
+    if let Some(app) = app {
+        if let Ok(item) = capture_service::get_item(pool, id).await {
+            let _ = app.emit("capture:item-updated", item);
+        }
+    }
+}
+
 /// Runs the same source reconciliation as the background poll and also checks
 /// archive targets on demand. Target-root failure is reported as unavailable,
 /// never as a mass deletion or missing-file conclusion.
 /// One archived target of a session plus its recorded states, as read by the
 /// session level file check.
-type ReconcileTargetRow = (String, Option<String>, Option<String>, String, String);
+type ReconcileTargetRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+);
 
 pub async fn reconcile_files(
     pool: &SqlitePool,
@@ -570,28 +572,41 @@ pub async fn reconcile_files(
     let project_id = session_project.as_ref().map(|(id, _)| id.clone());
     let root = session_project.and_then(|(_, directory)| directory);
     let targets: Vec<ReconcileTargetRow> = sqlx::query_as(
-        "SELECT id, destination_path, destination_avatar_path, destination_file_state, destination_avatar_file_state FROM capture_items WHERE session_id = ?",
+        "SELECT id, destination_path, destination_avatar_path, destination_file_state, destination_avatar_file_state, archived_at FROM capture_items WHERE session_id = ?",
     )
     .bind(&session_id)
     .fetch_all(pool)
     .await?;
     let mut destination_state_changed = false;
-    for (id, destination, avatar, previous_destination_state, previous_avatar_state) in targets {
-        let destination_state = check_target_state(destination.as_deref(), root.as_deref()).await;
-        let avatar_state = check_target_state(avatar.as_deref(), root.as_deref()).await;
+    for (id, destination, avatar, previous_destination_state, previous_avatar_state, archived_at) in
+        targets
+    {
+        let (destination_state, _) =
+            check_target_identity(pool, &id, destination.as_deref(), root.as_deref()).await?;
+        let (avatar_state, _) =
+            check_target_identity(pool, &id, avatar.as_deref(), root.as_deref()).await?;
         if destination_state != previous_destination_state.as_str()
             || avatar_state != previous_avatar_state.as_str()
         {
             destination_state_changed = true;
         }
-        sqlx::query(
-            "UPDATE capture_items SET destination_file_state = ?, destination_avatar_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        let applied = sqlx::query(
+            "UPDATE capture_items SET destination_file_state = ?, destination_avatar_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND destination_path IS ? AND destination_avatar_path IS ? AND archived_at IS ?",
         )
         .bind(destination_state)
         .bind(avatar_state)
-        .bind(id)
+        .bind(&id)
+        .bind(&destination)
+        .bind(&avatar)
+        .bind(&archived_at)
         .execute(pool)
         .await?;
+        if applied.rows_affected() > 0
+            && (destination_state != previous_destination_state.as_str()
+                || avatar_state != previous_avatar_state.as_str())
+        {
+            emit_updated_item(pool, app, &id).await;
+        }
     }
     if destination_state_changed {
         if let Some(project_id) = project_id.as_deref() {
@@ -621,6 +636,35 @@ pub async fn reconcile_files(
         destination_unavailable_count: destination_unavailable_count.max(0) as u32,
         unstable_count: discovery.unstable_count,
     })
+}
+
+/// Explicit checks verify recorded archive identity as well as accessibility.
+/// The bool reports a readable file whose content differs from its fingerprint.
+pub(crate) async fn check_target_identity(
+    pool: &SqlitePool,
+    capture_item_id: &str,
+    path: Option<&str>,
+    root: Option<&str>,
+) -> Result<(&'static str, bool), AppError> {
+    let state = check_target_state(path, root).await;
+    let Some(path) = path.filter(|_| state == "available") else {
+        return Ok((state, false));
+    };
+    let expected: Option<String> = sqlx::query_scalar(
+        "SELECT content_hash FROM capture_archive_fingerprints WHERE capture_item_id = ? AND path = ?",
+    )
+    .bind(capture_item_id)
+    .bind(path)
+    .fetch_optional(pool)
+    .await?;
+    let Some(expected) = expected else {
+        return Ok((state, false));
+    };
+    match capture_service::sha256_file(std::path::Path::new(path)).await {
+        Ok(actual) if actual == expected => Ok(("available", false)),
+        Ok(_) => Ok(("unavailable", true)),
+        Err(_) => Ok(("unavailable", false)),
+    }
 }
 
 pub(crate) async fn check_target_state(path: Option<&str>, root: Option<&str>) -> &'static str {
@@ -702,7 +746,7 @@ async fn poll_active_sessions_once(
                 // (notify/reconciliation is a later option). Entry count alone
                 // never warns: at the committed 1.0 scale (10k entries) a full
                 // scan completes in ~100ms and must not warn on every poll.
-                if should_warn_slow_scan(result.scan_duration_ms) {
+                if result.scan_duration_ms >= SLOW_SCAN_WARNING_THRESHOLD_MS {
                     log_service::record_event(LogRecord {
                         level: LogLevel::Warn,
                         module: "capture.discovery".to_owned(),
@@ -750,17 +794,6 @@ mod tests {
         models::capture::EndCaptureSessionInput,
         services::{capture_service, test_support},
     };
-
-    #[test]
-    fn slow_scan_warning_is_duration_based_and_quiet_at_the_10k_commitment() {
-        // The 1.0 fixture scans 10,000 entries in ~100ms; a large-but-fast
-        // scan must not warn on every 2s poll.
-        assert!(!should_warn_slow_scan(0));
-        assert!(!should_warn_slow_scan(100));
-        assert!(!should_warn_slow_scan(999));
-        assert!(should_warn_slow_scan(1_000));
-        assert!(should_warn_slow_scan(2_500));
-    }
 
     async fn session_fixture(
         pool: &SqlitePool,
@@ -1110,13 +1143,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn polling_repairs_a_stale_source_state() {
+    async fn polling_verifies_a_restored_source_and_repopulates_its_facts() {
         let pool = db::test_pool().await;
         let (_workspace, session, source) = session_fixture(&pool).await;
         let image = source.join("restored.png");
-        tokio::fs::write(&image, b"restored content")
-            .await
-            .expect("write");
+        image::RgbImage::new(12, 8).save(&image).expect("write PNG");
         let item = discover(
             &pool,
             None,
@@ -1138,6 +1169,9 @@ mod tests {
         .execute(&pool)
         .await
         .expect("mark missing");
+        image_facts_service::clear_source(&pool, &item.id)
+            .await
+            .expect("clear missing source facts");
 
         discover(
             &pool,
@@ -1158,6 +1192,17 @@ mod tests {
                 .expect("row");
         assert_eq!(state, "available");
         assert_ne!(updated_at, "2020-01-01T00:00:00.000Z");
+        let facts = image_facts_service::read(&pool, &item.id)
+            .await
+            .expect("read restored facts");
+        assert_eq!(
+            facts.source.as_ref().and_then(|facts| facts.width),
+            Some(12)
+        );
+        assert_eq!(
+            facts.source.as_ref().and_then(|facts| facts.height),
+            Some(8)
+        );
     }
 
     #[tokio::test]
@@ -1199,8 +1244,7 @@ mod tests {
         let modified_at_ms = metadata
             .modified()
             .ok()
-            .and_then(|value| unix_millis(value).ok())
-            .and_then(|value| i64::try_from(value).ok());
+            .and_then(|value| unix_millis(value).ok());
         sqlx::query("UPDATE capture_items SET file_size = ?, modified_at_ms = ? WHERE id = ?")
             .bind(i64::try_from(metadata.len()).expect("length"))
             .bind(modified_at_ms)
@@ -1208,12 +1252,22 @@ mod tests {
             .execute(&pool)
             .await
             .expect("match cheap stats");
+        sqlx::query(
+            "INSERT INTO capture_session_baseline_files (session_id, source_path, file_size, modified_at_ms) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&session.id)
+        .bind(capture_service::path_to_string(&image))
+        .bind(i64::try_from(metadata.len()).expect("baseline length"))
+        .bind(modified_at_ms)
+        .execute(&pool)
+        .await
+        .expect("same cheap baseline stats must not hide verified new content");
 
         let result = reconcile_files(
             &pool,
             None,
             ReconcileCaptureFilesInput {
-                session_id: session.id,
+                session_id: session.id.clone(),
             },
         )
         .await
@@ -1233,6 +1287,23 @@ mod tests {
         assert_eq!(
             versions.iter().filter(|row| row.1 == "available").count(),
             1
+        );
+        discover(
+            &pool,
+            None,
+            DiscoverCapturesInput {
+                session_id: session.id,
+                stability_delay_ms: Some(0),
+            },
+        )
+        .await
+        .expect("poll after strong replacement check");
+        assert_eq!(
+            capture_service::get_item(&pool, &first.id)
+                .await
+                .unwrap()
+                .source_file_state,
+            "replaced"
         );
     }
 

@@ -102,10 +102,14 @@ pub async fn execute_capture_reset(
     )
     .await?;
     for entry in &result.items {
-        if entry.status == "succeeded" {
-            if let Ok(item) = capture_service::get_item(&state.pool, &entry.capture_item_id).await {
-                let _ = app.emit("capture:item-updated", &item);
-            }
+        if matches!(entry.status.as_str(), "succeeded" | "failed") {
+            super::capture::emit_capture_item_updated(
+                &app,
+                &state.pool,
+                &entry.capture_item_id,
+                None,
+            )
+            .await;
         }
     }
     Ok(result)

@@ -2,12 +2,19 @@ use sqlx::SqlitePool;
 
 use crate::{
     error::AppError,
-    models::app_settings::{AppSettings, UpdateAppSettingsInput},
+    models::app_settings::{
+        AppSettings, UpdateAppSettingsInput, MAX_IMAGE_PROCESSING_CORE_LIMIT,
+        MIN_IMAGE_PROCESSING_CORE_LIMIT,
+    },
+    services::{image_processing_service, thumbnail_service},
 };
 
 const SETTINGS_KEY: &str = "app.general";
-const MIN_IMAGE_PROCESSING_CORE_LIMIT: u32 = 1;
-const MAX_IMAGE_PROCESSING_CORE_LIMIT: u32 = 32;
+
+pub fn apply_runtime(settings: &AppSettings) {
+    image_processing_service::set_core_limit(settings.image_processing_core_limit);
+    thumbnail_service::set_processing_parallelism(settings.image_processing_core_limit);
+}
 
 pub async fn get(pool: &SqlitePool) -> Result<AppSettings, AppError> {
     let value: Option<String> = sqlx::query_scalar("SELECT value_json FROM settings WHERE key = ?")

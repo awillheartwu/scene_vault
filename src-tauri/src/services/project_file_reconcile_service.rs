@@ -25,6 +25,7 @@ struct CaptureFileRow {
     destination_path: Option<String>,
     destination_avatar_path: Option<String>,
     asset_id: Option<String>,
+    archived_at: Option<String>,
 }
 
 #[derive(Debug)]
@@ -43,6 +44,7 @@ struct DestinationUpdate {
     asset_id: Option<String>,
     previous_destination_path: Option<String>,
     previous_destination_avatar_path: Option<String>,
+    previous_archived_at: Option<String>,
     destination_path: Option<String>,
     destination_avatar_path: Option<String>,
     destination_state: &'static str,
@@ -79,7 +81,7 @@ pub async fn reconcile_project_files(
         r#"
         SELECT id, source_path, file_size, content_hash,
                source_file_state, status, destination_path, destination_avatar_path,
-               asset_id
+               asset_id, archived_at
         FROM capture_items
         WHERE project_id = ?
         ORDER BY captured_at, id
@@ -130,7 +132,8 @@ pub async fn reconcile_project_files(
                 updates.push(SourceUpdate {
                     id: row.id.clone(),
                     old_source_path: row.source_path.clone(),
-                    new_source_path: Some(row.source_path.clone()),
+                    new_source_path: (state == "available" && actual_hash.is_ok())
+                        .then(|| row.source_path.clone()),
                     file_size: Some(i64::try_from(metadata.len()).unwrap_or(i64::MAX)),
                     modified_at_ms: metadata.modified().ok().and_then(file_relink::unix_millis),
                     state,
@@ -243,16 +246,23 @@ pub async fn reconcile_project_files(
         }
         let mut destination_path = row.destination_path.clone();
         let mut destination_avatar_path = row.destination_avatar_path.clone();
-        let mut destination_state = capture_discovery_service::check_target_state(
-            destination_path.as_deref(),
-            destination_root.as_deref(),
-        )
-        .await;
-        let mut avatar_state = capture_discovery_service::check_target_state(
+        let (mut destination_state, destination_mismatch) =
+            capture_discovery_service::check_target_identity(
+                pool,
+                &row.id,
+                destination_path.as_deref(),
+                destination_root.as_deref(),
+            )
+            .await?;
+        let (mut avatar_state, avatar_mismatch) = capture_discovery_service::check_target_identity(
+            pool,
+            &row.id,
             destination_avatar_path.as_deref(),
             destination_root.as_deref(),
         )
-        .await;
+        .await?;
+        destination_content_mismatch_count = destination_content_mismatch_count
+            .saturating_add(u32::from(destination_mismatch) + u32::from(avatar_mismatch));
         if (destination_state == "missing" || avatar_state == "missing") && !archive_scanned {
             archive_scanned = true;
             if let Some(root) = archive_search_root.as_deref() {
@@ -311,9 +321,30 @@ pub async fn reconcile_project_files(
         if avatar_state == "missing" {
             match file_relink::resolve(&archive_index, &archive_candidates, &(token, true)) {
                 file_relink::Match::Unique(candidate) => {
-                    destination_avatar_path = Some(candidate.normalized_path.clone());
-                    avatar_state = "available";
-                    destination_relocated_count = destination_relocated_count.saturating_add(1);
+                    let fingerprint = recorded_archive_fingerprint(
+                        pool,
+                        &row.id,
+                        row.destination_avatar_path.as_deref(),
+                    )
+                    .await?;
+                    let verified = match fingerprint {
+                        Some(expected) => {
+                            capture_service::sha256_file(&candidate.path)
+                                .await
+                                .ok()
+                                .as_deref()
+                                == Some(expected.as_str())
+                        }
+                        None => true, // Preserve the legacy identifier-only compatibility path.
+                    };
+                    if verified {
+                        destination_avatar_path = Some(candidate.normalized_path.clone());
+                        avatar_state = "available";
+                        destination_relocated_count = destination_relocated_count.saturating_add(1);
+                    } else {
+                        destination_content_mismatch_count =
+                            destination_content_mismatch_count.saturating_add(1);
+                    }
                 }
                 file_relink::Match::Ambiguous => {
                     destination_ambiguous_count = destination_ambiguous_count.saturating_add(1);
@@ -326,6 +357,7 @@ pub async fn reconcile_project_files(
             asset_id: row.asset_id.clone(),
             previous_destination_path: row.destination_path.clone(),
             previous_destination_avatar_path: row.destination_avatar_path.clone(),
+            previous_archived_at: row.archived_at.clone(),
             destination_path,
             destination_avatar_path,
             destination_state,
@@ -335,10 +367,10 @@ pub async fn reconcile_project_files(
 
     let mut transaction = pool.begin().await?;
     let mut source_relocated_count = 0_u32;
-    let mut relocated_source_facts: Vec<(String, String)> = Vec::new();
-    let mut replaced_source_facts: Vec<String> = Vec::new();
+    let mut available_source_facts: Vec<(String, String)> = Vec::new();
+    let mut invalid_source_facts: Vec<String> = Vec::new();
     for update in &updates {
-        if let Some(path) = &update.new_source_path {
+        let applied = if let Some(path) = &update.new_source_path {
             let applied = sqlx::query(
                 "UPDATE capture_items SET source_path = ?, file_size = ?, modified_at_ms = ?, source_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND source_path = ?",
             )
@@ -353,7 +385,7 @@ pub async fn reconcile_project_files(
             if path != &update.old_source_path && applied.rows_affected() == 1 {
                 source_relocated_count = source_relocated_count.saturating_add(1);
             }
-            relocated_source_facts.push((update.id.clone(), path.clone()));
+            applied
         } else {
             sqlx::query(
                 "UPDATE capture_items SET source_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND source_path = ?",
@@ -362,23 +394,35 @@ pub async fn reconcile_project_files(
             .bind(&update.id)
             .bind(&update.old_source_path)
             .execute(&mut *transaction)
-            .await?;
-            if update.state == "replaced" {
-                replaced_source_facts.push(update.id.clone());
+            .await?
+        };
+        if applied.rows_affected() == 1 {
+            if update.state == "available" {
+                if let Some(path) = &update.new_source_path {
+                    available_source_facts.push((update.id.clone(), path.clone()));
+                }
+            } else if matches!(update.state, "missing" | "replaced") {
+                invalid_source_facts.push(update.id.clone());
             }
         }
     }
     for update in destination_updates {
-        sqlx::query(
-            "UPDATE capture_items SET destination_path = ?, destination_avatar_path = ?, destination_file_state = ?, destination_avatar_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        let applied = sqlx::query(
+            "UPDATE capture_items SET destination_path = ?, destination_avatar_path = ?, destination_file_state = ?, destination_avatar_file_state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND destination_path IS ? AND destination_avatar_path IS ? AND archived_at IS ?",
         )
         .bind(&update.destination_path)
         .bind(&update.destination_avatar_path)
         .bind(update.destination_state)
         .bind(update.avatar_state)
         .bind(&update.id)
+        .bind(&update.previous_destination_path)
+        .bind(&update.previous_destination_avatar_path)
+        .bind(&update.previous_archived_at)
         .execute(&mut *transaction)
         .await?;
+        if applied.rows_affected() == 0 {
+            continue;
+        }
         if update.destination_path == update.previous_destination_path
             && update.destination_avatar_path == update.previous_destination_avatar_path
         {
@@ -402,11 +446,12 @@ pub async fn reconcile_project_files(
     transaction.commit().await?;
 
     // Image facts follow the file: a verified relocation refreshes them, a
-    // replacement clears them so an old record can never describe new bytes.
-    for (id, path) in relocated_source_facts {
+    // missing/replaced source clears them. An unavailable source retains its
+    // last known facts, matching the single-item reader.
+    for (id, path) in available_source_facts {
         let _ = image_facts_service::refresh_source_facts(pool, &id, Path::new(&path)).await;
     }
-    for id in replaced_source_facts {
+    for id in invalid_source_facts {
         let _ = image_facts_service::clear_source(pool, &id).await;
     }
 
@@ -656,6 +701,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checks_existing_archive_identity_even_for_same_size_replacements_and_recovers() {
+        let pool = db::test_pool().await;
+        let fixture = test_support::project_with_directories(&pool, "ExistingArchiveIdentity")
+            .await
+            .unwrap();
+        let item_id = registered_item(&pool, &fixture, "shot.png", b"source").await;
+        let destination = fixture.destination_directory.join("shot.png");
+        let avatar = fixture.destination_directory.join("avatar.png");
+        let original = b"original bytes";
+        let replacement = b"replaced bytes";
+        assert_eq!(original.len(), replacement.len());
+        for path in [&destination, &avatar] {
+            tokio::fs::write(path, original).await.unwrap();
+            let hash = capture_service::sha256_file(path).await.unwrap();
+            sqlx::query("INSERT INTO capture_archive_fingerprints (capture_item_id, path, content_hash) VALUES (?, ?, ?)")
+                .bind(&item_id).bind(capture_service::path_to_string(path)).bind(hash)
+                .execute(&pool).await.unwrap();
+            tokio::fs::write(path, replacement).await.unwrap();
+        }
+        sqlx::query("UPDATE capture_items SET classification = 'person', status = 'completed', archived_at = '2026-10-12T00:00:00Z', destination_path = ?, destination_avatar_path = ?, destination_file_state = 'available', destination_avatar_file_state = 'available' WHERE id = ?")
+            .bind(capture_service::path_to_string(&destination))
+            .bind(capture_service::path_to_string(&avatar)).bind(&item_id).execute(&pool).await.unwrap();
+        let input = || ReconcileProjectFilesInput {
+            project_id: fixture.project_id.clone(),
+            archive_search_directory: None,
+        };
+        let result = reconcile_project_files(&pool, input()).await.unwrap();
+        assert_eq!(result.destination_content_mismatch_count, 2);
+        let checked = capture_service::get_item(&pool, &item_id).await.unwrap();
+        assert_eq!(checked.destination_file_state, "unavailable");
+        assert_eq!(checked.destination_avatar_file_state, "unavailable");
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), replacement);
+        assert_eq!(tokio::fs::read(&avatar).await.unwrap(), replacement);
+
+        for path in [&destination, &avatar] {
+            tokio::fs::write(path, original).await.unwrap();
+        }
+        let restored = reconcile_project_files(&pool, input()).await.unwrap();
+        assert_eq!(restored.destination_content_mismatch_count, 0);
+        let checked = capture_service::get_item(&pool, &item_id).await.unwrap();
+        assert_eq!(checked.destination_file_state, "available");
+        assert_eq!(checked.destination_avatar_file_state, "available");
+    }
+
+    #[tokio::test]
     async fn relocates_unique_same_name_and_hash_without_importing_other_files() {
         let pool = db::test_pool().await;
         let fixture = test_support::project_with_directories(&pool, "Relocation")
@@ -848,6 +938,104 @@ mod tests {
         .await
         .expect("state and count");
         assert_eq!(row, ("replaced".to_owned(), 1));
+    }
+
+    #[tokio::test]
+    async fn source_facts_follow_verified_identity_and_preserve_unavailable_sources() {
+        for state in ["available", "replaced", "missing", "unavailable"] {
+            let pool = db::test_pool().await;
+            let fixture = test_support::project_with_directories(&pool, "SourceFacts")
+                .await
+                .unwrap();
+            let mut original = Vec::new();
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                16,
+                8,
+                image::Rgb([200, 100, 50]),
+            ))
+            .write_with_encoder(image::codecs::png::PngEncoder::new(&mut original))
+            .unwrap();
+            let id = registered_item(&pool, &fixture, "shot.png", &original).await;
+            let path = fixture.source_directory.join("shot.png");
+            let original_facts = image_facts_service::read(&pool, &id)
+                .await
+                .unwrap()
+                .source
+                .unwrap();
+            let original_identity: (Option<i64>, Option<String>) =
+                sqlx::query_as("SELECT file_size, content_hash FROM capture_items WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            match state {
+                "available" => image_facts_service::clear_source(&pool, &id).await.unwrap(),
+                "replaced" => {
+                    let mut replacement = Vec::new();
+                    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                        64,
+                        48,
+                        image::Rgb([10, 20, 30]),
+                    ))
+                    .write_with_encoder(image::codecs::jpeg::JpegEncoder::new(&mut replacement))
+                    .unwrap();
+                    tokio::fs::write(&path, replacement).await.unwrap();
+                }
+                "missing" => tokio::fs::remove_file(&path).await.unwrap(),
+                "unavailable" => {
+                    tokio::fs::remove_dir_all(&fixture.source_directory)
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let result = reconcile_project_files(
+                &pool,
+                ReconcileProjectFilesInput {
+                    project_id: fixture.project_id.clone(),
+                    archive_search_directory: None,
+                },
+            )
+            .await
+            .unwrap();
+            let stored: Option<String> = sqlx::query_scalar(
+                "SELECT source_json FROM capture_image_facts WHERE capture_item_id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let single = image_facts_service::read(&pool, &id).await.unwrap();
+            let bulk = image_facts_service::read_many(&pool, std::slice::from_ref(&id))
+                .await
+                .unwrap();
+            assert_eq!(bulk[&id].source, single.source);
+            if matches!(state, "missing" | "replaced") {
+                assert!(stored.is_none(), "{state} must clear the persisted facts");
+                assert!(single.source.is_none());
+            } else {
+                assert_eq!(
+                    image_facts_service::parse_source_json(stored.as_deref()),
+                    Some(original_facts)
+                );
+                assert!(single.source.is_some());
+            }
+            let identity: (Option<i64>, Option<String>) =
+                sqlx::query_as("SELECT file_size, content_hash FROM capture_items WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                identity, original_identity,
+                "{state} must preserve the capture identity"
+            );
+            if state == "unavailable" {
+                assert_eq!(result.source_unavailable_directory_count, 1);
+                assert_eq!(result.source_missing_count, 0);
+            }
+        }
     }
 
     struct ArchivedFixture {

@@ -1,9 +1,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CaptureImageFacts } from "@/lib/capture-api";
+import type { CaptureImageFacts, CapturePolicyView, ProjectEngineIntegration, ProjectEngineIntegrationView, RenpyScreenshotPolicyView } from "@/lib/capture-api";
 
-const { eventHandlers, api } = vi.hoisted(() => ({
+const { eventHandlers, eventListeners, api } = vi.hoisted(() => ({
   eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
+  eventListeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
   api: {
     getCaptureFaceRoi: vi.fn(async () => null),
     setCaptureFaceRoi: vi.fn(),
@@ -13,6 +14,7 @@ const { eventHandlers, api } = vi.hoisted(() => ({
     listProjectPendingCaptures: vi.fn(async () => []),
     listHistory: vi.fn(async () => ({ entries: [], total: 0 })),
     listProjects: vi.fn(),
+    listProjectOverviews: vi.fn(),
     listCharacters: vi.fn(),
     listSessions: vi.fn(),
     listItems: vi.fn(),
@@ -28,6 +30,7 @@ const { eventHandlers, api } = vi.hoisted(() => ({
     setProjectDestination: vi.fn(),
     runtimeStatus: vi.fn(),
     readImage: vi.fn(),
+    recordClientEvent: vi.fn(async () => {}),
     readThumbnail: vi.fn(),
     label: vi.fn(),
     verifyCaptureIdentity: vi.fn(),
@@ -51,8 +54,17 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
-    eventHandlers.set(name, handler);
-    return () => eventHandlers.delete(name);
+    const listeners = eventListeners.get(name) ?? new Set<(event: { payload: unknown }) => void>();
+    eventListeners.set(name, listeners);
+    listeners.add(handler);
+    eventHandlers.set(name, event => [...listeners].forEach(listener => listener(event)));
+    return () => {
+      listeners.delete(handler);
+      if (!listeners.size && eventListeners.get(name) === listeners) {
+        eventListeners.delete(name);
+        eventHandlers.delete(name);
+      }
+    };
   }),
 }));
 
@@ -82,6 +94,8 @@ vi.mock("@/lib/capture-api", async (importOriginal) => ({
 }));
 
 import Capture from "@/pages/Capture.vue";
+import ProjectSelect from "@/components/project/ProjectSelect.vue";
+import RenpyScreenshotSettings from "@/components/capture/RenpyScreenshotSettings.vue";
 import { toast } from "@/lib/toast";
 
 const project = {
@@ -89,6 +103,7 @@ const project = {
   name: "Love & Jealousy",
   description: null,
   coverAssetId: null,
+  coverCaptureItemId: null,
   lastSourceDirectory: null,
   lastDestinationDirectory: null,
   destinationDirectory: "D:\\Archive",
@@ -159,7 +174,38 @@ function engineMetadataFixture(speaker: string, suggestedCharacterId: string | n
   };
 }
 
+function policyFixture(overrides: Partial<CapturePolicyView> = {}): CapturePolicyView {
+  return {
+    projectSize: "inherit", resolvedSize: "keep", globalSize: "keep",
+    projectFormat: "inherit", resolvedFormat: "keep", globalFormat: "keep",
+    projectQuality: null, resolvedQuality: 90, globalQuality: 90,
+    ...overrides,
+  };
+}
+
+function screenshotPolicyFixture(overrides: Partial<RenpyScreenshotPolicyView> = {}): RenpyScreenshotPolicyView {
+  return {
+    projectAutoHideUi: null, globalAutoHideUi: false, resolvedAutoHideUi: false,
+    ...overrides,
+  };
+}
+
+function integrationFixture(overrides: Partial<ProjectEngineIntegration> = {}): ProjectEngineIntegrationView {
+  const engineRoot = overrides.engineRoot ?? "D:\\Games\\Demo";
+  return {
+    integration: {
+      id: "install-1", projectId: project.id, engine: "renpy", engineRoot,
+      gameDirectory: `${engineRoot}\\game`, pythonMajor: 3, engineVersion: "8.4.1",
+      bridgeVersion: "1.1.6", autoHideUi: false, autoHideUiOverride: null, manifestJson: "[]",
+      installedAt: "", updatedAt: "", ...overrides,
+    },
+    bridgeFilePresent: true, compiledFilePresent: true,
+    bundledBridgeVersion: "1.1.6", resolvedAutoHideUi: overrides.autoHideUiOverride ?? false, warning: null,
+  };
+}
+
 beforeAll(() => {
+  Object.defineProperty(HTMLImageElement.prototype, "decode", { configurable: true, value: vi.fn(async () => {}) });
   Object.defineProperty(URL, "createObjectURL", { value: vi.fn(() => "blob:preview") });
   Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn() });
 });
@@ -167,7 +213,9 @@ beforeAll(() => {
 beforeEach(() => {
   localStorage.clear();
   eventHandlers.clear();
+  eventListeners.clear();
   api.listProjects.mockResolvedValue([project]);
+  api.listProjectOverviews.mockReset().mockResolvedValue([]);
   api.listCharacters.mockResolvedValue(characters);
   api.listSessions.mockResolvedValue([session]);
   api.listSourceDirectories.mockResolvedValue([]);
@@ -186,6 +234,7 @@ beforeEach(() => {
   });
   api.readImage.mockResolvedValue(new ArrayBuffer(4));
   api.readThumbnail.mockResolvedValue(new ArrayBuffer(4));
+  api.getCaptureImageFacts.mockResolvedValue({ source: null, destination: null });
   api.verifyCaptureIdentity.mockResolvedValue({
     score: 0.9,
     bestOtherScore: null,
@@ -206,7 +255,9 @@ beforeEach(() => {
       case "get_project_engine_integration":
         return [];
       case "get_project_capture_policy":
-        return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+        return policyFixture();
+      case "get_project_renpy_screenshot_policy":
+        return screenshotPolicyFixture();
       case "get_capture_engine_metadata":
         return null;
       default:
@@ -245,6 +296,9 @@ describe("Capture adaptive label panel trigger", () => {
       expect(wrapper.find(".label-panel-trigger").exists()).toBe(false);
       expect(wrapper.get(".stage-progress").text()).toContain("图片处理状态");
       expect(wrapper.get(".stage-progress").text()).toContain("空闲");
+      const engineHealth = wrapper.get(".session-health").findAll("span")
+        .find((status) => status.text() === "AI 已配置")!;
+      expect(engineHealth.classes()).toContain("online");
       expect(wrapper.findAll(".project-controls .icon-button")).toHaveLength(2);
     } finally {
       wrapper.unmount();
@@ -268,19 +322,580 @@ describe("Capture adaptive label panel trigger", () => {
   });
 });
 
+describe("Capture Ren'Py screenshot settings", () => {
+  let installations: ProjectEngineIntegrationView[];
+  let policies: Record<string, RenpyScreenshotPolicyView>;
+  const save = vi.fn();
+  const saveProject = vi.fn();
+  const readPolicy = vi.fn();
+  const readIntegrations = vi.fn();
+  const uninstall = vi.fn();
+
+  function applyResolved(projectId: string) {
+    const resolved = policies[projectId]?.resolvedAutoHideUi ?? false;
+    installations = installations.map((view) => view.integration.projectId !== projectId ? view : {
+      ...view, resolvedAutoHideUi: view.integration.autoHideUiOverride ?? resolved,
+    });
+  }
+
+  beforeEach(() => {
+    installations = [integrationFixture()];
+    policies = { [project.id]: screenshotPolicyFixture() };
+    readPolicy.mockReset().mockImplementation(async (projectId: string) =>
+      policies[projectId] ?? screenshotPolicyFixture(),
+    );
+    readIntegrations.mockReset().mockImplementation(async (projectId: string) =>
+      installations.filter((view) => view.integration.projectId === projectId),
+    );
+    save.mockReset().mockImplementation(async (input: {
+      projectId: string; integrationId: string; autoHideUi: boolean | null;
+    }) => {
+      installations = installations.map((view) => view.integration.id !== input.integrationId ? view : {
+        ...view, integration: { ...view.integration, autoHideUiOverride: input.autoHideUi },
+      });
+      applyResolved(input.projectId);
+      return installations.find((view) => view.integration.id === input.integrationId);
+    });
+    saveProject.mockReset().mockImplementation(async (input: { projectId: string; autoHideUi: boolean | null }) => {
+      const current = policies[input.projectId] ?? screenshotPolicyFixture();
+      policies[input.projectId] = {
+        ...current, projectAutoHideUi: input.autoHideUi,
+        resolvedAutoHideUi: input.autoHideUi ?? current.globalAutoHideUi,
+      };
+      applyResolved(input.projectId);
+      return policies[input.projectId];
+    });
+    uninstall.mockReset().mockImplementation(async (input: { integrationId: string }) => {
+      installations = installations.filter((view) => view.integration.id !== input.integrationId);
+      return { removedFiles: [], keptFiles: [] };
+    });
+    vi.spyOn(toast, "success").mockReturnValue(0);
+    vi.spyOn(toast, "error").mockReturnValue(0);
+    vi.spyOn(toast, "info").mockReturnValue(0);
+    invokeMock.mockClear().mockImplementation(async (
+      command: string,
+      args?: { input?: { projectId?: string; integrationId?: string; autoHideUi?: boolean | null } },
+    ) => {
+      if (command === "get_project_engine_integration") return readIntegrations(args?.input?.projectId);
+      if (command === "get_project_capture_policy") return policyFixture();
+      if (command === "get_project_renpy_screenshot_policy") return readPolicy(args?.input?.projectId);
+      if (command === "set_installation_renpy_screenshot_policy") return save(args?.input);
+      if (command === "set_project_renpy_screenshot_policy") return saveProject(args?.input);
+      if (command === "uninstall_project_engine_bridge") return uninstall(args?.input);
+      return null;
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: Error) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  function projectSelect() {
+    return document.body.querySelector<HTMLSelectElement>('[aria-label="项目截图设置"]')!;
+  }
+
+  function gameSelects() {
+    return [...document.body.querySelectorAll<HTMLSelectElement>(".renpy-screenshot-list select")];
+  }
+
+  function choose(select: HTMLSelectElement, value: string) {
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  async function openSettings(wrapper: ReturnType<typeof mount>) {
+    await wrapper.get(".session-tools-actions").findAll("button")
+      .find((button) => button.text() === "截图设置")!.trigger("click");
+    await flushPromises();
+    return gameSelects();
+  }
+
+  async function closeSettings(wrapper: ReturnType<typeof mount>) {
+    wrapper.getComponent(RenpyScreenshotSettings).vm.$emit("update:open", false);
+    await flushPromises();
+  }
+
+  it("saves all three project defaults without an installed game or a bridge reinstall", async () => {
+    installations = [];
+    policies[project.id] = screenshotPolicyFixture({ globalAutoHideUi: true, resolvedAutoHideUi: true });
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      expect(wrapper.get(".session-tools-actions").text()).toContain("截图设置");
+      expect(await openSettings(wrapper)).toHaveLength(0);
+      expect(projectSelect().value).toBe("inherit");
+      expect(projectSelect().options[0].text).toBe("跟随全局（启用）");
+      for (const [choice, expected] of [["on", true], ["off", false], ["inherit", null]] as const) {
+        choose(projectSelect(), choice);
+        await flushPromises();
+        expect(saveProject).toHaveBeenLastCalledWith({ projectId: project.id, autoHideUi: expected });
+        expect(projectSelect().value).toBe(choice);
+      }
+      expect(invokeMock).toHaveBeenCalledWith("get_project_renpy_screenshot_policy", { input: { projectId: project.id } });
+      expect(document.body.textContent).toContain("仍可保存项目默认");
+      expect(invokeMock.mock.calls.some(([command]) => command === "install_project_engine_bridge")).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("changes every inheriting game with the project policy and preserves explicit game choices", async () => {
+    installations = [
+      integrationFixture(),
+      integrationFixture({ id: "install-2", engineRoot: "E:\\Games\\Other" }),
+      integrationFixture({ id: "install-3", engineRoot: "F:\\Games\\ExplicitOff", autoHideUiOverride: false, autoHideUi: true }),
+    ];
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const inputs = await openSettings(wrapper);
+      const reads = readIntegrations.mock.calls.length;
+      choose(projectSelect(), "on");
+      await flushPromises();
+      expect(projectSelect().value).toBe("on");
+      expect(inputs.map((select) => select.value)).toEqual(["inherit", "inherit", "off"]);
+      expect(inputs.map((select) => select.options[0].text)).toEqual([
+        "跟随项目（启用）", "跟随项目（启用）", "跟随项目（启用）",
+      ]);
+      expect([...document.body.querySelectorAll(".screenshot-game-state")].map((state) => state.textContent)).toEqual([
+        "当前有效：启用", "当前有效：启用", "当前有效：关闭",
+      ]);
+      expect(readIntegrations.mock.calls.length).toBeGreaterThan(reads);
+      expect(readPolicy).toHaveBeenCalledTimes(2);
+      expect(save).not.toHaveBeenCalled();
+      expect(invokeMock.mock.calls.some(([command]) => command === "install_project_engine_bridge")).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("saves the chosen game with a nullable policy, holds the engine lock through refresh, and never reinstalls", async () => {
+    const first = integrationFixture({ autoHideUiOverride: true });
+    const second = integrationFixture({ id: "install-2", engineRoot: "E:\\Games\\Other", engineVersion: "7.8.6" });
+    installations = [first, second];
+    const pending = deferred<ProjectEngineIntegrationView>();
+    const refresh = deferred<RenpyScreenshotPolicyView>();
+    save.mockReturnValueOnce(pending.promise);
+    const saved = {
+      ...second, integration: { ...second.integration, autoHideUiOverride: true },
+      resolvedAutoHideUi: true, warning: "保留的编译文件需要确认",
+    };
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const inputs = await openSettings(wrapper);
+      expect(inputs.map((input) => input.value)).toEqual(["on", "inherit"]);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      expect(api.label).not.toHaveBeenCalled();
+      choose(inputs[1], "on");
+      await flushPromises();
+      expect(invokeMock).toHaveBeenCalledWith("set_installation_renpy_screenshot_policy", {
+        input: { projectId: project.id, integrationId: second.integration.id, autoHideUi: true },
+      });
+      expect(inputs.map((input) => input.value)).toEqual(["on", "inherit"]);
+      expect(inputs.every((input) => input.disabled)).toBe(true);
+      expect(projectSelect().disabled).toBe(true);
+      const install = wrapper.findAll("button").find((button) => button.text() === "重新安装")!;
+      const remove = wrapper.findAll("button").find((button) => button.text() === "卸载")!;
+      expect(install.attributes("disabled")).toBeDefined();
+      expect(remove.attributes("disabled")).toBeDefined();
+      const dialog = wrapper.getComponent(RenpyScreenshotSettings);
+      dialog.vm.$emit("installation-change", first, false);
+      dialog.vm.$emit("project-change", true);
+      await flushPromises();
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(saveProject).not.toHaveBeenCalled();
+      expect(toast.success).not.toHaveBeenCalled();
+
+      installations = [first, saved];
+      readPolicy.mockReturnValueOnce(refresh.promise);
+      pending.resolve(saved);
+      await flushPromises();
+      expect(dialog.props("saving")).toBe(true);
+      expect(install.attributes("disabled")).toBeDefined();
+      expect(inputs[1].value).toBe("on");
+      expect(toast.success).not.toHaveBeenCalled();
+      refresh.resolve(policies[project.id]);
+      await flushPromises();
+      expect(inputs.every((input) => !input.disabled)).toBe(true);
+      expect(toast.success).toHaveBeenCalledWith(
+        "截图设置已保存；已更新并重启过的插件将在下一次截图时应用。",
+      );
+      expect(document.body.textContent).toContain(saved.warning);
+
+      choose(inputs[0], "off");
+      await flushPromises();
+      expect(save).toHaveBeenLastCalledWith({ projectId: project.id, integrationId: first.integration.id, autoHideUi: false });
+      expect(inputs[0].value).toBe("off");
+      choose(inputs[0], "inherit");
+      await flushPromises();
+      expect(save).toHaveBeenLastCalledWith({ projectId: project.id, integrationId: first.integration.id, autoHideUi: null });
+      expect(inputs[0].value).toBe("inherit");
+      expect(invokeMock.mock.calls.some(([command]) => command === "install_project_engine_bridge")).toBe(false);
+    } finally {
+      pending.resolve(saved);
+      refresh.resolve(policies[project.id]);
+      wrapper.unmount();
+    }
+  });
+
+  it.each(["rejected", "unchanged"])("preserves the persisted game choice when a save is %s", async (outcome) => {
+    const warning = "截图设置写入失败";
+    if (outcome === "rejected") save.mockRejectedValueOnce(new Error(warning));
+    else save.mockResolvedValueOnce({ ...installations[0], warning });
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const [input] = await openSettings(wrapper);
+      choose(input, "on");
+      await flushPromises();
+      expect(input.value).toBe("inherit");
+      expect(input.disabled).toBe(false);
+      expect(document.body.querySelector('.screenshot-settings-warning[role="alert"]')?.textContent).toContain(warning);
+      expect(toast.success).not.toHaveBeenCalled();
+      choose(input, "on");
+      await flushPromises();
+      expect(input.value).toBe("on");
+      expect(save).toHaveBeenCalledTimes(2);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it.each(["rejected", "unchanged"])("preserves the persisted project default when a save is %s", async (outcome) => {
+    if (outcome === "rejected") saveProject.mockRejectedValueOnce(new Error("项目写入失败"));
+    else saveProject.mockResolvedValueOnce(screenshotPolicyFixture());
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await openSettings(wrapper);
+      choose(projectSelect(), "on");
+      await flushPromises();
+      expect(projectSelect().value).toBe("inherit");
+      expect(projectSelect().disabled).toBe(false);
+      expect(document.body.querySelector('.screenshot-settings-warning[role="alert"]')).not.toBeNull();
+      expect(toast.success).not.toHaveBeenCalled();
+      choose(projectSelect(), "on");
+      await flushPromises();
+      expect(projectSelect().value).toBe("on");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("blocks editing on a load failure and retries both the policy and integrations", async () => {
+    readPolicy.mockRejectedValueOnce(new Error("读取失败"));
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const inputs = await openSettings(wrapper);
+      expect(projectSelect().disabled).toBe(true);
+      expect(inputs.every((input) => input.disabled)).toBe(true);
+      expect(document.body.textContent).toContain("截图设置加载失败：读取失败");
+      wrapper.getComponent(RenpyScreenshotSettings).vm.$emit("project-change", true);
+      wrapper.getComponent(RenpyScreenshotSettings).vm.$emit("installation-change", installations[0], true);
+      await flushPromises();
+      expect(save).not.toHaveBeenCalled();
+      expect(saveProject).not.toHaveBeenCalled();
+
+      document.body.querySelector<HTMLButtonElement>(".screenshot-settings-error button")!.click();
+      await flushPromises();
+      expect(readPolicy).toHaveBeenCalledTimes(2);
+      expect(projectSelect().disabled).toBe(false);
+      expect(gameSelects()[0].disabled).toBe(false);
+      expect(document.body.querySelector(".screenshot-settings-error")).toBeNull();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("shows a saved-but-unreadable state without resaving when refresh fails", async () => {
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await openSettings(wrapper);
+      readIntegrations.mockRejectedValueOnce(new Error("刷新失败"));
+      choose(projectSelect(), "on");
+      await flushPromises();
+      expect(projectSelect().value).toBe("on");
+      expect(projectSelect().disabled).toBe(true);
+      expect(document.body.textContent).toContain("设置已保存，但最新状态读取失败");
+      expect(toast.success).not.toHaveBeenCalled();
+      document.body.querySelector<HTMLButtonElement>(".screenshot-settings-error button")!.click();
+      await flushPromises();
+      expect(projectSelect().value).toBe("on");
+      expect(projectSelect().disabled).toBe(false);
+      expect(gameSelects()[0].options[0].text).toBe("跟随项目（启用）");
+      expect(saveProject).toHaveBeenCalledTimes(1);
+      expect(document.body.textContent).not.toContain("最新状态读取失败");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps the update and restart requirement visible for stale plugins when saving", async () => {
+    installations = [integrationFixture({ bridgeVersion: "1.1.5" })];
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await openSettings(wrapper);
+      expect(document.body.textContent).toContain("插件需要更新（1.1.5 → 1.1.6）");
+      choose(projectSelect(), "on");
+      await flushPromises();
+      expect(toast.success).toHaveBeenCalledWith(
+        "截图设置已保存；旧插件需要重新安装并重启游戏一次，更新后才会应用。",
+      );
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it.each(["success", "failure"])("retains the lock on a project switch and discards the old save's late %s", async (outcome) => {
+    const previous = installations[0];
+    const nextProject = { ...project, id: "project-2", name: "Other project" };
+    installations.push(integrationFixture({ id: "install-2", projectId: nextProject.id, engineRoot: "E:\\Games\\Other" }));
+    api.listProjects.mockResolvedValue([project, nextProject]);
+    const pending = deferred<ProjectEngineIntegrationView>();
+    save.mockReturnValueOnce(pending.promise);
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      choose((await openSettings(wrapper))[0], "on");
+      await flushPromises();
+      wrapper.getComponent(ProjectSelect).vm.$emit("update:modelValue", nextProject.id);
+      await flushPromises();
+      expect(wrapper.getComponent(RenpyScreenshotSettings).props("open")).toBe(false);
+      expect(wrapper.findAll("button").find((button) => button.text() === "重新安装")!.attributes("disabled")).toBeDefined();
+      if (outcome === "success") pending.resolve({
+        ...previous, integration: { ...previous.integration, autoHideUiOverride: true },
+        resolvedAutoHideUi: true, warning: "旧项目警告",
+      });
+      else pending.reject(new Error("旧项目保存失败"));
+      await flushPromises();
+      const inputs = await openSettings(wrapper);
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0].value).toBe("inherit");
+      expect(inputs[0].disabled).toBe(false);
+      expect(document.body.querySelector(".screenshot-game-name")?.textContent?.trim()).toBe("Other");
+      expect(document.body.textContent).not.toContain("旧项目");
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledWith({ projectId: project.id, integrationId: previous.integration.id, autoHideUi: true });
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("does not apply a project's old save after switching away and back", async () => {
+    const nextProject = { ...project, id: "project-2", name: "Other project" };
+    api.listProjects.mockResolvedValue([project, nextProject]);
+    const pending = deferred<RenpyScreenshotPolicyView>();
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await openSettings(wrapper);
+      saveProject.mockReturnValueOnce(pending.promise);
+      choose(projectSelect(), "on");
+      await flushPromises();
+      const select = wrapper.getComponent(ProjectSelect);
+      select.vm.$emit("update:modelValue", nextProject.id);
+      await flushPromises();
+      select.vm.$emit("update:modelValue", project.id);
+      await flushPromises();
+      pending.resolve(screenshotPolicyFixture({ projectAutoHideUi: true, resolvedAutoHideUi: true }));
+      await flushPromises();
+      expect((await openSettings(wrapper))[0].value).toBe("inherit");
+      expect(projectSelect().value).toBe("inherit");
+      expect(toast.success).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("discards an old policy load after switching projects", async () => {
+    const nextProject = { ...project, id: "project-2", name: "Other project" };
+    installations.push(integrationFixture({ id: "install-2", projectId: nextProject.id, engineRoot: "E:\\Games\\Other" }));
+    api.listProjects.mockResolvedValue([project, nextProject]);
+    const pending = deferred<RenpyScreenshotPolicyView>();
+    readPolicy.mockReturnValueOnce(pending.promise);
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await openSettings(wrapper);
+      expect(projectSelect().disabled).toBe(true);
+      wrapper.getComponent(ProjectSelect).vm.$emit("update:modelValue", nextProject.id);
+      await flushPromises();
+      await openSettings(wrapper);
+      expect(projectSelect().disabled).toBe(false);
+      pending.resolve(screenshotPolicyFixture({ projectAutoHideUi: true, globalAutoHideUi: true, resolvedAutoHideUi: true }));
+      await flushPromises();
+      expect(projectSelect().value).toBe("inherit");
+      expect(projectSelect().options[0].text).toBe("跟随全局（关闭）");
+      expect(document.body.querySelector(".screenshot-game-name")?.textContent?.trim()).toBe("Other");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("does not restore stale installation rows from a read started before saving", async () => {
+    const previous = installations[0];
+    const pendingRead = deferred<ProjectEngineIntegrationView[]>();
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await openSettings(wrapper);
+      readIntegrations.mockReturnValueOnce(pendingRead.promise);
+      await closeSettings(wrapper);
+      await openSettings(wrapper);
+      await closeSettings(wrapper);
+      await openSettings(wrapper);
+      choose(projectSelect(), "on");
+      await flushPromises();
+      pendingRead.resolve([previous]);
+      await flushPromises();
+      expect(gameSelects()[0].options[0].text).toBe("跟随项目（启用）");
+      expect(document.body.querySelector(".screenshot-game-state")?.textContent).toBe("当前有效：启用");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("does not restore an uninstalled game from an earlier dialog read", async () => {
+    const previous = installations[0];
+    const pendingRead = deferred<ProjectEngineIntegrationView[]>();
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      readIntegrations.mockReturnValueOnce(pendingRead.promise);
+      await openSettings(wrapper);
+      await closeSettings(wrapper);
+      const remove = wrapper.findAll("button").find((button) => button.text() === "卸载")!;
+      await remove.trigger("click");
+      await wrapper.findAll("button").find((button) => button.text() === "确认卸载？")!.trigger("click");
+      await flushPromises();
+      expect(uninstall).toHaveBeenCalledWith({ projectId: project.id, integrationId: previous.integration.id });
+      pendingRead.resolve([previous]);
+      await flushPromises();
+      expect(await openSettings(wrapper)).toHaveLength(0);
+      expect(projectSelect().disabled).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it.each(["success", "failure"])("ignores a late %s after unmount without refreshing or showing a Toast", async (outcome) => {
+    const previous = installations[0];
+    const pending = deferred<ProjectEngineIntegrationView>();
+    save.mockReturnValueOnce(pending.promise);
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      choose((await openSettings(wrapper))[0], "on");
+      await flushPromises();
+      wrapper.unmount();
+      const reads = [readPolicy.mock.calls.length, readIntegrations.mock.calls.length];
+      if (outcome === "success") pending.resolve({
+        ...previous, integration: { ...previous.integration, autoHideUiOverride: true }, resolvedAutoHideUi: true,
+      });
+      else pending.reject(new Error("卸载后保存失败"));
+      await flushPromises();
+      expect([readPolicy.mock.calls.length, readIntegrations.mock.calls.length]).toEqual(reads);
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(toast.info).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+});
+
 describe("Capture quick-label flow", () => {
-  it("renders the three-stage session rail and collapses its conditional tools", async () => {
+  it("refreshes ordinary image facts when the same capture is replaced", async () => {
+    api.getCaptureImageFacts.mockResolvedValue({
+      source: { width: 3840, height: 2160, format: "png" }, destination: null,
+    });
+    const wrapper = mount(Capture);
+    try {
+      await flushPromises();
+      const heading = wrapper.get(".stage-heading-actions");
+      const file = heading.get(".capture-heading-file");
+      const chips = heading.get(".engine-chips");
+      expect(file.text()).toContain("001.png");
+      expect(chips.text()).toBe("截图 3840×2160");
+      expect(file.element.compareDocumentPosition(chips.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      api.getCaptureImageFacts.mockResolvedValue({ source: null, destination: null });
+      eventHandlers.get("capture:item-updated")?.({
+        payload: { ...item(), sourceFileState: "replaced", updatedAt: "2026-08-01T00:00:03Z" },
+      });
+      await flushPromises();
+      expect(wrapper.text()).not.toContain("截图 3840×2160");
+      expect(api.getCaptureImageFacts).toHaveBeenLastCalledWith("item-1");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("serializes archive setting changes and shows the inherited JPEG quality", async () => {
+    api.listSessions.mockResolvedValue([]);
+    const initial = policyFixture({ globalFormat: "jpeg", resolvedFormat: "jpeg" });
+    let finishSave!: (policy: CapturePolicyView) => void;
+    const saving = new Promise<CapturePolicyView>((resolve) => { finishSave = resolve; });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_project_engine_integration") return [];
+      if (command === "get_project_capture_policy") return initial;
+      if (command === "set_project_capture_policy") return saving;
+      return null;
+    });
+    const wrapper = mount(Capture, { attachTo: document.body });
+    try {
+      await flushPromises();
+      expect(wrapper.get(".archive-spec-summary").text()).toBe("保持原样 · JPEG q90");
+      await wrapper.get('.archive-stage button[aria-haspopup="dialog"]').trigger("click");
+      await flushPromises();
+      const dialog = document.body.querySelector(".archive-policy-dialog")!;
+      expect(dialog.textContent).toContain("跟随全局（90）");
+      const size = dialog.querySelector('[aria-label="归档尺寸"]') as HTMLSelectElement;
+      size.value = "native";
+      size.dispatchEvent(new Event("change", { bubbles: true }));
+      await flushPromises();
+      expect(invokeMock).toHaveBeenCalledWith("set_project_capture_policy", {
+        input: { projectId: project.id, archiveOutputSize: "native", archiveOutputFormat: "inherit", archiveOutputQuality: null },
+      });
+      expect(size.disabled).toBe(true);
+      expect((dialog.querySelector('[aria-label="归档格式"]') as HTMLSelectElement).disabled).toBe(true);
+      expect(dialog.textContent).toContain("正在保存…");
+      finishSave({ ...initial, projectSize: "native", resolvedSize: "native" });
+      await flushPromises();
+      expect(size.disabled).toBe(false);
+      expect(wrapper.get(".archive-spec-summary").text()).toBe("按游戏设定尺寸 · JPEG q90");
+    } finally {
+      finishSave(initial);
+      wrapper.unmount();
+    }
+  });
+
+  it("renders the session rail, opens all source directories and collapses its tools", async () => {
     api.listProjectRecentCaptures.mockResolvedValue([]);
     api.listSourceDirectories.mockResolvedValue([
       { id: "dir-1", projectId: project.id, directory: "D:\\Game", enabled: true, createdAt: "" },
+      { id: "dir-2", projectId: project.id, directory: "D:\\Other Game", enabled: false, createdAt: "" },
     ]);
-    const wrapper = mount(Capture);
+    const wrapper = mount(Capture, { attachTo: document.body });
     await flushPromises();
 
     expect(wrapper.findAll(".session-stage-heading h2").map((heading) => heading.text())).toEqual([
       "选择项目",
       "截图来源",
-      "归档位置",
+      "归档",
     ]);
     expect(wrapper.get(".session-tools-actions").isVisible()).toBe(true);
 
@@ -290,7 +905,47 @@ describe("Capture quick-label flow", () => {
     expect(wrapper.get(".session-tools-actions").attributes("style")).toContain("display: none");
     expect(wrapper.text()).toContain("展开会话工具");
     expect(wrapper.text()).toContain("继续使用你习惯的截图方式，新截图会自动出现");
+
+    const sourceTrigger = wrapper.get('[aria-label="查看截图来源目录"]');
+    expect(sourceTrigger.attributes("aria-haspopup")).toBe("dialog");
+    expect(sourceTrigger.get(".source-dir-name").text()).toBe("D:\\Game");
+    expect(sourceTrigger.get(".source-directory-more").attributes("title")).toBe("共 2 个来源目录");
+    expect(wrapper.find(".sources-stage .source-dir-list").exists()).toBe(false);
+    await sourceTrigger.trigger("click");
+    await flushPromises();
+    const dialog = document.body.querySelector(".source-directories-dialog")!;
+    expect([...dialog.querySelectorAll(".source-dir-name")].map((name) => name.textContent)).toEqual([
+      "D:\\Game", "D:\\Other Game",
+    ]);
+    expect([...dialog.querySelectorAll(".source-dir-state")].map((state) => state.textContent?.trim())).toEqual([
+      "监听中", "已暂停",
+    ]);
     wrapper.unmount();
+  });
+
+  it("loads project badges without a selected capture and refreshes them when the menu opens", async () => {
+    api.listProjectRecentCaptures.mockResolvedValue([]);
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "8.4.1" },
+    ]);
+    const wrapper = mount(Capture);
+    try {
+      await flushPromises();
+      const select = wrapper.getComponent(ProjectSelect);
+      expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 8");
+      expect(wrapper.find(".capture-heading-title .renpy-badge").exists()).toBe(false);
+      const overviewCalls = api.listProjectOverviews.mock.calls.length;
+      api.listProjectOverviews.mockResolvedValue([
+        { projectId: project.id, engine: "renpy", engineVersions: "7.8.6,8.4.1" },
+      ]);
+      select.vm.$emit("open");
+      await flushPromises();
+      expect(api.listProjectOverviews).toHaveBeenCalledTimes(overviewCalls + 1);
+      expect(select.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 7/8");
+      expect(select.get(".project-select-trigger .renpy-badge").attributes("title")).toBe("7.8.6、8.4.1");
+    } finally {
+      wrapper.unmount();
+    }
   });
 
   it("opens the project creation form when requested from the home page", async () => {
@@ -363,6 +1018,9 @@ describe("Capture quick-label flow", () => {
   });
 
   it("preselects the dialogue speaker suggestion when no face suggestion exists", async () => {
+    api.listProjectOverviews.mockResolvedValue([
+      { projectId: project.id, engine: "renpy", engineVersions: "8.4.1" },
+    ]);
     api.getCaptureImageFacts.mockResolvedValue({
       source: { width: 3840, height: 2160, format: "png" },
       destination: null,
@@ -372,7 +1030,7 @@ describe("Capture quick-label flow", () => {
         case "get_project_engine_integration":
           return [];
         case "get_project_capture_policy":
-          return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+          return policyFixture();
         case "get_capture_engine_metadata":
           return engineMetadataFixture("Ethan", "char-2");
         default:
@@ -382,9 +1040,10 @@ describe("Capture quick-label flow", () => {
     const wrapper = mount(Capture);
     await flushPromises();
 
-    const chips = wrapper.find(".engine-chips");
+    const chips = wrapper.find(".stage-heading-actions .engine-chips");
     expect(chips.exists()).toBe(true);
-    expect(chips.text()).toContain("Ren'Py 8");
+    expect(wrapper.get(".project-select-trigger .renpy-badge").text()).toBe("Ren'Py 8");
+    expect(wrapper.get(".project-select-trigger .renpy-badge").attributes("title")).toBe("8.4.1");
     expect(chips.text()).toContain("说话人 Ethan");
     expect(chips.text()).toContain("引擎 1920×1080");
     expect(chips.text()).toContain("截图 3840×2160");
@@ -413,7 +1072,7 @@ describe("Capture quick-label flow", () => {
         case "get_project_engine_integration":
           return [];
         case "get_project_capture_policy":
-          return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+          return policyFixture();
         case "get_capture_engine_metadata":
           return engineMetadataFixture("Ethan", "char-2");
         default:
@@ -468,7 +1127,7 @@ describe("Capture quick-label flow", () => {
         case "get_project_engine_integration":
           return [];
         case "get_project_capture_policy":
-          return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+          return policyFixture();
         case "get_capture_engine_metadata":
           return engineMetadataFixture("Wuwu", null);
         default:
@@ -517,7 +1176,7 @@ describe("Capture quick-label flow", () => {
         case "get_project_engine_integration":
           return [];
         case "get_project_capture_policy":
-          return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+          return policyFixture();
         case "get_capture_engine_metadata":
           return engineMetadataFixture("Ethan", "char-2");
         default:
@@ -571,7 +1230,7 @@ describe("Capture quick-label flow", () => {
           case "get_project_engine_integration":
             return [];
           case "get_project_capture_policy":
-            return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+            return policyFixture();
           case "get_capture_engine_metadata":
             return args?.input?.captureItemId === "item-2"
               ? engineMetadataFixture("Ethan", "char-2")
@@ -649,7 +1308,7 @@ describe("Capture quick-label flow", () => {
           case "get_project_engine_integration":
             return [];
           case "get_project_capture_policy":
-            return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+            return policyFixture();
           case "get_capture_engine_metadata":
             return args?.input?.captureItemId === "item-2"
               ? engineMetadataFixture("Ethan", "char-2")
@@ -720,7 +1379,10 @@ describe("Capture quick-label flow", () => {
                 engineRoot: "D:\\Games\\Demo",
                 gameDirectory: "D:\\Games\\Demo\\game",
                 pythonMajor: 3,
+                engineVersion: null,
                 bridgeVersion: "1.1.3",
+                autoHideUi: false,
+                autoHideUiOverride: null,
                 metadataDirectory: null,
                 manifestJson: "[]",
                 installedAt: "",
@@ -729,11 +1391,12 @@ describe("Capture quick-label flow", () => {
               bridgeFilePresent: true,
               compiledFilePresent: false,
               bundledBridgeVersion: "1.1.3",
+              resolvedAutoHideUi: false,
               warning: null,
             },
           ];
         case "get_project_capture_policy":
-          return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+          return policyFixture();
         case "get_capture_engine_metadata":
           return null;
         case "list_project_games":
@@ -791,7 +1454,10 @@ describe("Capture quick-label flow", () => {
                 engineRoot: "D:\\Games\\Demo",
                 gameDirectory: "D:\\Games\\Demo\\game",
                 pythonMajor: 3,
+                engineVersion: null,
                 bridgeVersion: "1.1.3",
+                autoHideUi: false,
+                autoHideUiOverride: null,
                 metadataDirectory: null,
                 manifestJson: "[]",
                 installedAt: "",
@@ -800,11 +1466,12 @@ describe("Capture quick-label flow", () => {
               bridgeFilePresent: true,
               compiledFilePresent: false,
               bundledBridgeVersion: "1.1.3",
+              resolvedAutoHideUi: false,
               warning: null,
             },
           ];
         case "get_project_capture_policy":
-          return { projectSize: "inherit", resolvedSize: "keep", globalSize: "keep" };
+          return policyFixture();
         case "get_capture_engine_metadata":
           return null;
         case "list_project_games":
@@ -983,6 +1650,8 @@ describe("Capture quick-label flow", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("AI 未配置");
+    expect(wrapper.get(".session-health").findAll("span")
+      .find((status) => status.text() === "AI 未配置")!.classes()).not.toContain("online");
     const startRecognition = wrapper
       .findAll("button")
       .find((button) => button.text().includes("开始识别导入截图"));
@@ -1006,6 +1675,8 @@ describe("Capture quick-label flow", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("内置引擎");
+    expect(wrapper.get(".session-health").findAll("span")
+      .find((status) => status.text() === "内置引擎")!.classes()).toContain("online");
     const startRecognition = wrapper
       .findAll("button")
       .find((button) => button.text().includes("开始识别导入截图"));
@@ -1310,25 +1981,4 @@ describe("Capture item context menu", () => {
     expect(api.readImage).not.toHaveBeenCalled();
     wrapper.unmount();
   });
-});
-
-
-it("keeps an empty capture list free of reset actions", async () => {
-  api.listProjectRecentCaptures.mockResolvedValue([]);
-  const wrapper = mount(Capture);
-  await flushPromises();
-  expect(wrapper.find('.capture-list-toolbar').exists()).toBe(true);
-  expect(wrapper.find('.reset-actions button').exists()).toBe(false);
-  expect(wrapper.find('input.capture-selection').exists()).toBe(false);
-  wrapper.unmount();
-});
-
-it("keeps reset controls and browse filters out of the realtime capture page", async () => {
-  const wrapper = mount(Capture);
-  await flushPromises();
-  expect(wrapper.find('.reset-actions').exists()).toBe(false);
-  expect(wrapper.find('select[aria-label="角色筛选"]').exists()).toBe(false);
-  expect(wrapper.find('select[aria-label="捕获状态"]').exists()).toBe(false);
-  expect(wrapper.find('.capture-list-title').text()).toContain('近期捕获');
-  wrapper.unmount();
 });

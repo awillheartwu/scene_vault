@@ -193,8 +193,10 @@
 @layer components {
   .skip-link { position: fixed; z-index: 100; top: 8px; left: 8px; padding: 8px 12px; border-radius: 8px; background: var(--accent); color: var(--accent-foreground); transform: translateY(-150%); transition: transform var(--motion-fast) ease; }
   .skip-link:focus { transform: translateY(0); }
-  .app-shell { display: flex; height: 100vh; overflow: hidden; background: var(--bg-gradient); background-attachment: fixed; }
-  .app-sidebar { position: relative; z-index: 30; display: flex; width: 176px; flex: none; flex-direction: column; gap: 30px; padding: 24px 14px 18px; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 72%, transparent); background: color-mix(in srgb, var(--sidebar) 86%, transparent); backdrop-filter: var(--panel-blur); color: var(--sidebar-foreground); box-shadow: inset -1px 0 0 color-mix(in srgb, var(--foreground) 4%, transparent); }
+  /* Match the capture project's first grid column, less its padding, border
+     and two 40px actions. Workbench uses the same responsive selector width. */
+  .app-shell { --app-sidebar-width: 176px; --project-selector-width: calc((100vw - var(--app-sidebar-width)) * 1.25 / 3.7 - 123px); display: flex; height: 100vh; overflow: hidden; background: var(--bg-gradient); background-attachment: fixed; }
+  .app-sidebar { position: relative; z-index: 30; display: flex; width: var(--app-sidebar-width); flex: none; flex-direction: column; gap: 30px; padding: 24px 14px 18px; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 72%, transparent); background: color-mix(in srgb, var(--sidebar) 86%, transparent); backdrop-filter: var(--panel-blur); color: var(--sidebar-foreground); box-shadow: inset -1px 0 0 color-mix(in srgb, var(--foreground) 4%, transparent); }
   .sidebar-brand { display: flex; align-items: center; gap: 11px; padding: 0 6px 4px; color: var(--accent); }
   .sidebar-brand .brand-mark { display: grid; width: 36px; height: 36px; flex: none; place-items: center; border-radius: 11px; background: var(--accent-gradient); color: var(--accent-foreground); box-shadow: var(--glow), var(--inner-highlight); }
   .sidebar-brand span { color: var(--foreground); font-size: 12.5px; font-weight: 600; line-height: 1.2; letter-spacing: .1em; }
@@ -224,7 +226,8 @@
   }
   .sidebar-footer .theme-toggle:hover { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); }
   @media (max-width: 1439px) {
-    .app-sidebar { width: 68px; gap: 24px; padding: 20px 10px 16px; }
+    .app-shell { --app-sidebar-width: 68px; }
+    .app-sidebar { gap: 24px; padding: 20px 10px 16px; }
     .sidebar-brand { justify-content: center; padding: 0; }
     .sidebar-brand .brand-mark { width: 40px; height: 40px; }
     .brand-copy, .sidebar-label, .sidebar-footer-label { display: none; }
@@ -258,15 +261,15 @@
   @keyframes detail-drawer-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
   .capture-page { --capture-bg: var(--bg-gradient); --capture-surface: var(--card); --capture-surface-2: var(--secondary); --capture-border: var(--border); --capture-muted: var(--muted-foreground); --capture-accent: var(--accent); display: grid; height: 100%; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr) 44px; background: var(--capture-bg); color: var(--foreground); }
   .capture-toolbar { position: relative; min-width: 0; border-bottom: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); background: color-mix(in srgb, var(--sidebar) 66%, transparent); backdrop-filter: var(--panel-blur); box-shadow: var(--inner-highlight), 0 8px 26px -18px rgba(0, 0, 0, .3); }
-  .session-rail { display: grid; min-width: 0; grid-template-columns: minmax(230px, .8fr) minmax(300px, 1.25fr) minmax(240px, 1fr) minmax(160px, .65fr); }
-  .session-stage { position: relative; min-width: 0; padding: 13px 18px 12px; border-right: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); }
+  .session-rail { display: grid; min-width: 0; grid-template-columns: minmax(310px, 1.25fr) minmax(200px, .8fr) minmax(240px, 1fr) minmax(160px, .65fr); }
+  .session-stage { position: relative; min-width: 0; padding: 10px 14px; border-right: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); }
   .session-stage-heading { display: flex; min-width: 0; align-items: center; gap: 8px; margin-bottom: 9px; }
   .session-stage-heading h2 { margin: 0; color: var(--foreground); font-size: 12px; font-weight: 700; line-height: 1.3; }
   .session-step { display: grid; width: 22px; height: 22px; flex: none; place-items: center; border-radius: 999px; background: var(--accent-gradient); color: var(--accent-foreground); font-size: 11px; font-weight: 800; box-shadow: var(--glow); }
   .session-stage-check { margin-left: auto; flex: none; color: var(--accent); }
   .project-controls { display: flex; min-width: 0; align-items: center; gap: 7px; }
+  .project-controls .project-select-trigger { flex: 1; }
   .eyebrow, .section-label { display: block; margin-bottom: 6px; color: var(--capture-muted, var(--muted-foreground)); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
-  .capture-select { width: 100%; min-width: 0; height: 40px; padding: 0 34px 0 11px; border: 1px solid var(--capture-border); border-radius: 9px; background: var(--capture-surface); color: var(--foreground); box-shadow: var(--inner-highlight); }
   .icon-button { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; border: 1px solid var(--capture-border); border-radius: 9px; background: var(--capture-surface); color: var(--muted-foreground); box-shadow: var(--inner-highlight); transition: .18s ease; }
   .icon-button:hover { border-color: var(--accent); color: var(--capture-accent); box-shadow: var(--glow); }
   .icon-button:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -289,10 +292,7 @@
   .source-dir-actions button:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 6%, transparent); color: var(--foreground); }
   .source-dir-actions button.danger:hover:not(:disabled) { color: var(--destructive); }
   .source-dir-empty { color: var(--muted-foreground); font-size: 11px; }
-  .archive-path-button { display: flex; width: 100%; height: 38px; min-width: 0; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--capture-border); border-radius: 8px; background: color-mix(in srgb, var(--card) 55%, transparent); color: var(--foreground); box-shadow: var(--inner-highlight); }
-  .archive-path-button span { min-width: 0; flex: 1; overflow: hidden; font-size: 11.5px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-  .archive-path-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--accent); }
-  .session-control { display: flex; min-width: 0; align-items: stretch; justify-content: center; flex-direction: column; gap: 9px; padding: 13px 18px 12px; }
+  .session-control { display: flex; min-width: 0; align-items: stretch; justify-content: center; flex-direction: column; gap: 7px; padding: 10px 14px; }
   .session-health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
   .session-health span { display: flex; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
   .session-health span.online { color: var(--ok); }
@@ -329,7 +329,7 @@
   .capture-alert button { border: 0; background: transparent; color: inherit; font-size: 20px; }
   .capture-loading { display: flex; min-height: 280px; align-items: center; justify-content: center; gap: 10px; color: var(--capture-muted); }
   .capture-workspace { display: grid; grid-row: 3; min-height: 0; overflow: hidden; grid-template-columns: minmax(620px, 1fr) 316px; }
-  .capture-stage { display: grid; min-width: 0; min-height: 0; grid-template-rows: 48px 48px minmax(240px, 1fr) auto; padding: 0 20px; border-right: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); }
+  .capture-stage { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto 48px minmax(240px, 1fr) auto; padding: 0 20px; border-right: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); }
   .stage-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .stage-heading-actions { display: flex; min-width: 0; align-items: center; gap: 8px; }
   .label-panel-trigger { flex: none; }
@@ -343,8 +343,6 @@
   .classification-pill { padding: 4px 10px; border-radius: 99px; background: color-mix(in srgb, var(--accent) 18%, var(--card)); color: var(--accent); font-size: 11px; font-weight: 600; box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent); }
   .classification-pill[data-classification="scene"] { background: color-mix(in srgb, var(--info) 18%, var(--card)); color: var(--info); }
   .classification-pill[data-classification="private"] { background: color-mix(in srgb, var(--warn) 18%, var(--card)); color: var(--warn); }
-  .file-meta { display: flex; align-items: center; gap: 12px; overflow: hidden; padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--capture-border) 70%, transparent); border-radius: 99px; background: color-mix(in srgb, var(--card) 55%, transparent); color: var(--capture-muted); font-size: 11px; font-variant-numeric: tabular-nums; box-shadow: var(--inner-highlight); }
-  .file-meta span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .preview-shell { position: relative; display: grid; min-height: 0; overflow: hidden; place-items: center; border: 1px solid color-mix(in srgb, var(--capture-border) 78%, transparent); border-radius: 14px; background: radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--card) 55%, var(--background)), var(--background)); box-shadow: var(--card-shadow), var(--inner-highlight); }
   .preview-shell::after { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 5%, transparent), inset 0 0 64px color-mix(in srgb, var(--foreground) 6%, transparent); content: ""; }
   .preview-shell img { width: 100%; height: 100%; object-fit: contain; }
@@ -462,6 +460,7 @@
   .footer-nav button:hover:not(:disabled) { color: var(--foreground); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
   @media (max-width: 1240px) {
+    .app-shell { --project-selector-width: calc((100vw - var(--app-sidebar-width)) / 2 - 123px); }
     .session-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .session-stage:nth-child(2), .session-control { border-right: 0; }
     .session-stage:nth-child(-n + 2) { border-bottom: 1px solid color-mix(in srgb, var(--capture-border) 75%, transparent); }
@@ -472,7 +471,6 @@
   @media (max-width: 1439px) {
     .capture-workspace { grid-template-columns: minmax(0, 1fr); }
     .capture-stage { border-right: 0; }
-    .stage-heading .file-meta { max-width: 360px; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
@@ -526,7 +524,9 @@
   .workbench-header h1 { margin: 0; font-size: 22px; font-weight: 700; }
   .workbench-header p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 12px; }
   .workbench-header > div { min-width: 0; flex: 1 1 auto; }
-  .workbench-project { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
+  .workbench-project { display: flex; width: calc(var(--project-selector-width, 383px) + 32px); min-width: 0; max-width: 100%; flex: 0 1 auto; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
+  .workbench-project > span { flex: none; }
+  .workbench-project .project-select-trigger { flex: 1; }
   .workbench-project select, .action-card select { height: 34px; padding: 0 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--secondary); color: var(--foreground); font-size: 12px; }
   .workbench-project select:focus-visible, .action-card select:focus-visible { border-color: var(--ring); outline: 2px solid color-mix(in srgb, var(--ring) 35%, transparent); outline-offset: 1px; }
   .rebuild-progress { color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -770,4 +770,34 @@
   .health-card dl div { display: flex; gap: 7px; font-size: 11px; }
   .health-card dt { color: var(--muted-foreground); }
   .health-card dd { margin: 0; color: var(--foreground); }
+}
+
+/* Keep legacy menu overrides unlayered to beat Tailwind utilities and the
+   custom menus' scoped rules. Limit them to menu rows, excluding disabled ones. */
+[role="menuitem"].project-menu-danger:not([data-disabled]):is(:focus, [data-highlighted]) {
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+  color: var(--destructive);
+}
+.dark [role="menuitem"].project-menu-danger:not([data-disabled]):is(:focus, [data-highlighted]) {
+  background: color-mix(in oklab, var(--destructive) 20%, transparent);
+}
+[role="menuitem"].project-menu-danger svg:not([class*='text-']) {
+  color: var(--destructive);
+}
+:where([data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-sub-trigger"]):not([data-disabled])[data-highlighted] svg:not([class*='text-']) {
+  color: inherit;
+}
+.reset-menu-content > button[type="button"]:not(:disabled):is(:hover, :focus-visible),
+.project-select-menu .project-select-option:not([data-disabled]):is(:focus, [data-highlighted]) {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  outline: none;
+}
+.reset-menu-content > button[type="button"]:disabled:is(:hover, :focus-visible),
+.project-select-menu .project-select-option[data-disabled]:is(:focus, [data-highlighted]) {
+  background: transparent;
+  color: var(--popover-foreground);
+}
+.project-select-menu .project-select-option:not([data-disabled]):is(:focus, [data-highlighted]) .project-select-check {
+  color: inherit;
 }

@@ -1,16 +1,17 @@
 # Scene Vault Ren'Py bridge (installed by Scene Vault).
 #
-# The bridge never captures the screen and never changes game logic. When the
-# player takes the engine's own screenshot (default key: S), it records the
-# current game context into a small JSON file inside the app cache directory
+# The bridge records the engine's screenshots (default key: S). An opt-in
+# policy also captures after suppressing standard UI in a temporary
+# context, then restores the original interaction without advancing it.
+# It records the current game context in a JSON file inside the app cache
 # named by `scenevault_bridge.json`. Scene Vault ingests that file and deletes
 # it right away; nothing is written next to the screenshots.
 #
 # Safety rules followed by this file:
 #   * Python 2 / Python 3 compatible, ASCII-only source.
-#   * Every entry point is wrapped; failures are logged and swallowed so the
-#     game can never be blocked or crashed by the bridge.
-#   * No store variables are written (state lives on renpy.config).
+#   * Bridge failures are logged and contained; engine control flow such as
+#     quitting and restarting still propagates normally.
+#   * No gameplay variables are assigned; bridge state lives on renpy.config.
 
 init -1000 python:
     # SCENEVAULT-BRIDGE-LOGIC-BEGIN
@@ -18,8 +19,12 @@ init -1000 python:
     import json
     import os
     import time
+    try:
+        import builtins as _sv_builtins
+    except ImportError:
+        import __builtin__ as _sv_builtins
 
-    SCENEVAULT_BRIDGE_VERSION = "1.1.4"
+    SCENEVAULT_BRIDGE_VERSION = "1.1.7"
     SCENEVAULT_BRIDGE_SCHEMA = 1
 
     def _sv_text(value):
@@ -42,11 +47,14 @@ init -1000 python:
         else:
             os.rename(source, target)
 
-    class _SceneVaultBridge(object):
+    class _SceneVaultBridge(_sv_builtins.object):
         def __init__(self):
             self.config = None
             self.dialogue = None
             self.installed = False
+            self.capture_in_progress = False
+            self.pending_snapshot = None
+            self.policy_error_logged = False
 
         # -- setup -------------------------------------------------------
 
@@ -65,6 +73,16 @@ init -1000 python:
                 self._register_character_callback()
             except Exception:
                 self.log_exception("register_character_callback")
+            try:
+                # Wrap even while disabled: inherited settings can change in
+                # the app without restarting or rewriting the game files.
+                wrapped = self._wrap_screenshot_actions()
+                self.log("bridge %s ready: autoHideUi=%s, screenshot keymaps=%s" %
+                         (SCENEVAULT_BRIDGE_VERSION, self._auto_hide_enabled(), wrapped))
+                if not wrapped:
+                    self.log("warning: no screenshot keymap found; automatic UI hiding is unavailable")
+            except Exception:
+                self.log_exception("wrap_screenshot_actions")
 
         def _load_config(self):
             try:
@@ -103,7 +121,7 @@ init -1000 python:
 
         def _register_character_callback(self):
             callbacks = getattr(renpy.config, "all_character_callbacks", None)
-            if not isinstance(callbacks, list):
+            if not isinstance(callbacks, _sv_builtins.list):
                 return
             bridge = self
 
@@ -121,15 +139,11 @@ init -1000 python:
 
         # -- capture-time context ----------------------------------------
 
-        def on_screenshot(self, screenshot_path):
-            started = time.time()
-            if not self.config.get("metadataDirectory"):
-                return
+        def _capture_context(self):
             payload = {
                 "schemaVersion": SCENEVAULT_BRIDGE_SCHEMA,
                 "bridgeVersion": SCENEVAULT_BRIDGE_VERSION,
                 "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "screenshot": {"file": os.path.basename(screenshot_path)},
             }
             errors = []
             engine_version = self._engine_version()
@@ -153,8 +167,243 @@ init -1000 python:
                 payload["physicalSize"] = list(physical)
             payload["sceneTags"] = self.scene_tags()
             payload["errors"] = errors
+            return payload
+
+        def on_screenshot(self, screenshot_path):
+            started = time.time()
+            if not self.config.get("metadataDirectory"):
+                return
+            snapshot = self.pending_snapshot
+            if snapshot and os.path.abspath(screenshot_path) == snapshot[0]:
+                payload = _sv_builtins.dict(snapshot[1])
+            else:
+                payload = self._capture_context()
+                payload["captureMode"] = ("manual-ui-hidden" if
+                    getattr(renpy.store, "_windows_hidden", False) else "native")
+                payload["uiSuppressionApplied"] = False
+                if self._auto_hide_enabled() and payload["captureMode"] == "native":
+                    self.log("screenshot bypassed automatic UI hiding: " + os.path.basename(screenshot_path))
+            payload["screenshot"] = {"file": os.path.basename(screenshot_path)}
             payload["timing"] = {"callbackMs": int((time.time() - started) * 1000)}
             self.write_sidecar(screenshot_path, payload)
+
+        # -- optional standard-UI screenshot action ----------------------
+
+        def _wrap_screenshot_actions(self):
+            # Keymaps hold the original callable. Reassigning _screenshot
+            # alone would miss those references; retain the game's keymap.
+            wrapped = 0
+            for underlay in getattr(renpy.config, "underlay", []):
+                mapping = getattr(underlay, "keymap", None)
+                # .rpy globals replace dict/list with rollback types. Engine
+                # Keymap.keymap is a native Python dictionary, so explicitly
+                # use builtins (which also accepts revertable subclasses).
+                if not isinstance(mapping, _sv_builtins.dict) or "screenshot" not in mapping:
+                    continue
+                previous = mapping["screenshot"]
+                if getattr(previous, "_scenevault_action", False):
+                    wrapped += 1
+                    continue
+                bridge = self
+
+                def screenshot_action(_previous=previous):
+                    return bridge._screenshot_action(_previous)
+
+                screenshot_action._scenevault_action = True
+                mapping["screenshot"] = screenshot_action
+                wrapped += 1
+            return wrapped
+
+        def _auto_hide_enabled(self):
+            # Rust owns policy persistence. Python reads only this small local
+            # cache file and never opens the application's SQLite database.
+            path = self.config.get("screenshotPolicyFile")
+            if path:
+                try:
+                    handle = io.open(path, "r", encoding="utf-8")
+                    try:
+                        policy = json.loads(handle.read())
+                    finally:
+                        handle.close()
+                    if policy.get("schemaVersion") != 1:
+                        raise ValueError("unsupported screenshot policy schema")
+                    installed = policy.get("installations", {})
+                    value = installed.get(self.config.get("integrationId"))
+                    if not isinstance(value, _sv_builtins.bool):
+                        value = policy.get("projects", {}).get(self.config.get("projectId"))
+                    if not isinstance(value, _sv_builtins.bool):
+                        raise ValueError("screenshot policy has no matching project")
+                    self.policy_error_logged = False
+                    return value
+                except Exception:
+                    if not self.policy_error_logged:
+                        self.log_exception("read screenshot policy; using installed setting")
+                        self.policy_error_logged = True
+            return self.config.get("autoHideUi") is True
+
+        def _auto_hide_unavailable(self, previous):
+            context = renpy.context()
+            if getattr(context, "_menu", False) or getattr(renpy.store, "_main_menu", False):
+                return "menu"
+            # renpy.context() already returns Context.info in Ren'Py 7/8.
+            interaction = getattr(context, "_current_interact_type", None)
+            if interaction not in ("say", "nvl", "menu"):
+                return "non-story interaction"
+            interface = getattr(getattr(renpy, "game", None), "interface", None)
+            if interface is None:
+                return "missing transition API"
+            if getattr(interface, "trans_pause", False):
+                return "transition pause"
+            # Entering a new context clears the engine's transition state.
+            # Finished standard transitions are safe; active or unknown ones
+            # must stay untouched, even if the previous interact type was say.
+            for layer, transition in getattr(interface, "ongoing_transition", {}).items():
+                if not transition:
+                    continue
+                start = getattr(interface, "transition_time", {}).get(layer)
+                delay = getattr(transition, "delay", None)
+                frame = getattr(interface, "frame_time", None)
+                if start is None or delay is None or frame is None or frame - start < delay:
+                    return "active transition"
+            if getattr(renpy.config, "skipping", None):
+                return "skipping"
+            if previous is not getattr(renpy.store, "_screenshot", None):
+                return "custom screenshot action"
+            # Ren'Py 8's default is Hide("notify", immediately=True). It is
+            # already hidden by clearing the temporary context's screen layer.
+            hide = getattr(renpy.store, "Hide", None)
+            for action in getattr(renpy.config, "pre_screenshot_actions", []):
+                if (type(action) is not hide or getattr(action, "screen", None) != "notify"
+                        or getattr(action, "immediately", False) is not True
+                        or getattr(action, "transition", None) is not None
+                        or getattr(action, "_layer", None) is not None):
+                    return "custom pre-screenshot actions"
+            if renpy.has_label("hide_windows"):
+                return "custom hide_windows"
+            layers = getattr(renpy.config, "context_clear_layers", [])
+            interface_layer = getattr(renpy.config, "interface_layer", "screens")
+            if interface_layer not in layers or any(layer not in ("screens", "top", "bottom", "x52Overlay") for layer in layers):
+                return "custom context layers"
+            for name, allowed in (
+                ("layers", ("master", "transient", "screens", "overlay", "x52Overlay")),
+                ("top_layers", ("top",)), ("bottom_layers", ("bottom",)),
+            ):
+                if any(layer not in allowed for layer in getattr(renpy.config, name, [])):
+                    return "custom display layers"
+            if "x52Overlay" in getattr(renpy.config, "layers", []) and not callable(getattr(renpy, "scene", None)):
+                return "missing overlay API"
+            if getattr(renpy.config, "always_shown_screens", []):
+                return "always-shown screens"
+            ui = getattr(renpy, "ui", None)
+            if not all(callable(getattr(ui, name, None)) for name in ("timer", "keymap", "interact")):
+                return "missing UI API"
+            if not callable(getattr(renpy, "invoke_in_new_context", None)) or not callable(getattr(renpy, "screenshot", None)):
+                return "missing capture API"
+            return None
+
+        def _screenshot_filename(self):
+            destination = renpy.config.renpy_base
+            if getattr(renpy, "macapp", False):
+                destination = os.path.expanduser(u"~/Desktop")
+            pattern = getattr(renpy.store, "_screenshot_pattern", None) or renpy.config.screenshot_pattern
+            number = 1
+            while True:
+                filename = os.path.abspath(os.path.join(destination, pattern % number))
+                if not os.path.exists(filename):
+                    self._ensure_directory(os.path.dirname(filename))
+                    return filename
+                number += 1
+
+        def _capture_hidden_frame(self, filename):
+            ui = renpy.ui
+            # URM adds its controls above the standard screen layer. Clear
+            # only this known UI layer inside the copied capture context;
+            # returning from the context restores the game's original layer.
+            if "x52Overlay" in getattr(renpy.config, "layers", []):
+                renpy.scene(layer="x52Overlay")
+            # Match the engine's standard H interaction: keep spoken dialogue
+            # playing through this temporary interaction using its public API.
+            sustain = getattr(renpy.store, "voice_sustain", None)
+            if callable(sustain):
+                sustain()
+            # A timer is processed by the hidden interaction after its draw,
+            # not a blocking sleep or a queued save after UI restoration.
+            def save():
+                self.save_attempted = True
+                return "saved" if renpy.screenshot(filename) else "failed"
+
+            def cancel():
+                return "cancelled"
+
+            ui.keymap(game_menu=cancel, hide_windows=cancel)
+            ui.timer(0.05, action=save)
+            return ui.interact(
+                suppress_overlay=True, suppress_window=True,
+                suppress_underlay=True, show_mouse=False,
+            )
+
+        def _engine_control_flow(self, error):
+            game = getattr(renpy, "game", None)
+            names = ("QuitException", "JumpException", "JumpOutException", "CallException",
+                     "RestartContext", "RestartTopContext", "FullRestartException",
+                     "UtterRestartException", "EndReplay")
+            classes = tuple(getattr(game, name) for name in names if hasattr(game, name))
+            return isinstance(error, classes)
+
+        def _notify(self, message):
+            try:
+                renpy.notify(message)
+            except Exception:
+                self.log_exception("notify")
+
+        def _screenshot_action(self, previous):
+            if self.capture_in_progress:
+                return
+            # H then S remains the game's own screenshot path. This is also
+            # the explicit manual retry after an unsupported auto-hide.
+            if not self._auto_hide_enabled() or getattr(renpy.store, "_windows_hidden", False):
+                return renpy.run(previous)
+            self.capture_in_progress = True
+            self.save_attempted = False
+            try:
+                reason = self._auto_hide_unavailable(previous)
+                if reason:
+                    self.log("auto-hide unsupported: " + reason)
+                    self._notify("Auto-hide unavailable (%s). No screenshot taken. Press H, then S." % reason)
+                    return
+                filename = self._screenshot_filename()
+                payload = self._capture_context()
+                payload["contextSnapshotAt"] = payload["createdAt"]
+                payload["captureMode"] = "standard-ui-hidden"
+                payload["uiSuppressionApplied"] = True
+                self.pending_snapshot = (filename, payload)
+                result = renpy.invoke_in_new_context(self._capture_hidden_frame, filename)
+                # invoke_in_new_context restores the original display even
+                # on exceptions. Notify the game only after that restoration.
+                if result == "saved":
+                    self.log("auto-hide screenshot saved: " + os.path.basename(filename))
+                    self._wrap_screenshot_callback()
+                    renpy.config.screenshot_callback(filename)
+                elif result == "cancelled":
+                    self._notify("Screenshot cancelled. UI restored.")
+                else:
+                    self.log("auto-hide screenshot save failed: " + os.path.basename(filename))
+                    self._notify("Screenshot save failed. Check the screenshot folder and retry. UI restored.")
+            except Exception as error:
+                if self._engine_control_flow(error):
+                    raise
+                self.log_exception("auto-hide screenshot")
+                if self.save_attempted:
+                    self._notify("Screenshot result uncertain. Check the screenshot folder before retrying. UI restored.")
+                else:
+                    self._notify("Auto-hide failed. No screenshot taken. Press H, then S.")
+            finally:
+                self.pending_snapshot = None
+                self.capture_in_progress = False
+                try:
+                    renpy.restart_interaction()
+                except Exception:
+                    self.log_exception("restore interaction")
 
         def current_speaker(self):
             """Display name of the current speaker.

@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -14,12 +18,42 @@ use crate::{
     },
     services::{
         archive_naming::{self, ArchiveNameContext},
-        archive_naming_settings_service, capture_service, image_facts_service, log_service,
-        perf_log_service, processing_settings_service,
+        archive_naming_settings_service, capture_service, image_facts_service,
+        image_processing_service, log_service, perf_log_service, processing_settings_service,
+        timing::elapsed_ms,
     },
 };
 
 pub async fn archive(
+    pool: &SqlitePool,
+    input: CaptureItemIdInput,
+) -> Result<CaptureItem, AppError> {
+    let started = Instant::now();
+    let capture_item_id = input.capture_item_id.trim().to_owned();
+    let result = archive_inner(pool, input).await;
+    perf_log_service::record_event(LogRecord {
+        level: LogLevel::Debug,
+        module: "capture.archive".to_owned(),
+        event: Some("archive_total".to_owned()),
+        message: "archive operation including validation, output preparation, copy and persistence"
+            .to_owned(),
+        capture_item_id: Some(capture_item_id),
+        project_id: result.as_ref().ok().map(|item| item.project_id.clone()),
+        duration_ms: Some(elapsed_ms(started)),
+        outcome: Some(
+            if result.is_ok() {
+                "succeeded"
+            } else {
+                "failed"
+            }
+            .to_owned(),
+        ),
+        ..Default::default()
+    });
+    result
+}
+
+async fn archive_inner(
     pool: &SqlitePool,
     input: CaptureItemIdInput,
 ) -> Result<CaptureItem, AppError> {
@@ -36,6 +70,9 @@ pub async fn archive(
     if current.status == "completed" {
         return Ok(current);
     }
+    // Every archive entry point must verify the capture's original identity,
+    // including direct IPC calls that do not pass through the worker.
+    capture_service::validate_source_identity(pool, &current).await?;
     let item = capture_service::set_archive_pending_for_retry(pool, capture_item_id).await?;
 
     match archive_pending_item(pool, &item).await {
@@ -363,17 +400,19 @@ async fn archive_source_direct(
         .and_then(|value| value.to_str())
         .unwrap_or("capture")
         .to_owned();
-    let extension = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::Validation("source capture has no extension".to_owned()))?
-        .to_owned();
     // Optional archive-time downscale. The prepared copy becomes the archived
     // identity so {seq} reuse and retry checks compare against the same bytes
     // that are actually written.
     let prepared = prepare_archive_source(&source, spec, destination_root).await?;
     log_resize_event(item, &spec.size, &prepared, "capture");
     let outcome = async {
+        let extension = prepared
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                AppError::Validation("prepared archive source has no extension".to_owned())
+            })?;
         let directory = destination_root.join(subdirectory);
         let context = ArchiveNameContext {
             source_stem: &source_stem,
@@ -384,7 +423,7 @@ async fn archive_source_direct(
             avatar: false,
         };
         let final_path =
-            resolve_archive_destination(naming, &context, &directory, &extension, &prepared.path)
+            resolve_archive_destination(naming, &context, &directory, extension, &prepared.path)
                 .await?;
         let final_path =
             resolve_legacy_repair_destination(pool, item, &prepared.path, final_path).await?;
@@ -423,6 +462,7 @@ struct PreparedSource {
     /// Facts for the bytes this preparation produced; the archive step
     /// refreshes `bytes` with the size actually written.
     facts: ArchiveImageFacts,
+    timings: BTreeMap<&'static str, f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +502,7 @@ fn log_resize_event(item: &CaptureItem, policy: &str, prepared: &PreparedSource,
             project_id: Some(item.project_id.clone()),
             capture_item_id: Some(item.id.clone()),
             duration_ms: Some(info.duration_ms),
+            metrics: Some(json!(prepared.timings)),
             outcome: Some("succeeded".to_owned()),
             policy: Some(policy.to_owned()),
             file_kind: Some(file_kind.to_owned()),
@@ -483,6 +524,8 @@ fn log_resize_event(item: &CaptureItem, policy: &str, prepared: &PreparedSource,
             outcome: Some("skipped".to_owned()),
             policy: Some(policy.to_owned()),
             file_kind: Some(file_kind.to_owned()),
+            duration_ms: prepared.timings.get("total_ms").copied(),
+            metrics: Some(json!(prepared.timings)),
             ..Default::default()
         }),
         None => perf_log_service::record_event(LogRecord {
@@ -495,6 +538,8 @@ fn log_resize_event(item: &CaptureItem, policy: &str, prepared: &PreparedSource,
             outcome: Some("unchanged".to_owned()),
             policy: Some(policy.to_owned()),
             file_kind: Some(file_kind.to_owned()),
+            duration_ms: prepared.timings.get("total_ms").copied(),
+            metrics: Some(json!(prepared.timings)),
             ..Default::default()
         }),
     }
@@ -519,8 +564,8 @@ fn archive_output_height(policy: &str) -> Option<u32> {
 
 /// Applies the project's archive policy to one source file: optional
 /// downscale (never upscale) plus optional format conversion. A file is only
-/// re-encoded when the size or the format actually needs to change, so
-/// "keep size + convert" still converts while "keep + keep" stays a copy.
+/// re-encoded when the size or format changes, or an explicit JPEG/WebP
+/// policy requires encoding its quality. "keep + keep" stays a copy.
 async fn prepare_archive_source(
     source: &Path,
     spec: &ArchiveSpec,
@@ -528,6 +573,7 @@ async fn prepare_archive_source(
 ) -> Result<PreparedSource, AppError> {
     let started = std::time::Instant::now();
     let probe = image_facts_service::probe_file(source).await;
+    let mut timings = BTreeMap::from([("probe_ms", elapsed_ms(started))]);
     let source_format = probe.as_ref().map(|probe| probe.format.clone());
     let wants_convert = spec.format != "keep";
     let target_format = if wants_convert {
@@ -544,12 +590,13 @@ async fn prepare_archive_source(
         (Some(target), Some(probe)) => target < probe.height,
         _ => false,
     };
-    // A "keep" policy never re-encodes a webp source: the only encoder in
-    // this build would turn a lossy webp into a much larger lossless one.
+    // A "keep" policy never re-encodes a WebP source: without an explicit
+    // compression choice, preserve its existing lossless/lossy encoding.
     let reencodable = probe.is_some()
         && (wants_convert || matches!(source_format.as_deref(), Some("png") | Some("jpeg")));
     let convert_needed = wants_convert && target_format.as_deref() != source_format.as_deref();
-    let reencode = reencodable && (convert_needed || needs_resize);
+    let explicit_encoding = matches!(spec.format.as_str(), "jpeg" | "webp");
+    let reencode = reencodable && (convert_needed || needs_resize || explicit_encoding);
     let size_policy_applied = if spec.size == "keep" {
         true
     } else if spec.size == "native" && spec.native_size.is_none() {
@@ -579,44 +626,77 @@ async fn prepare_archive_source(
             size_policy_applied: Some(size_policy_applied),
             format_applied: Some(format_applied),
         };
+        timings.insert("total_ms", elapsed_ms(started));
         return Ok(PreparedSource {
             path: source.to_path_buf(),
             temporary: None,
             resize: None,
             facts,
+            timings,
         });
     }
 
+    let phase_started = Instant::now();
     let bytes = tokio::fs::read(source).await?;
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| AppError::Image(format!("cannot decode archive source: {error}")))?;
-    let from = (image.width(), image.height());
-    let output = if needs_resize {
-        let target = target_height.expect("resize requires a resolved target height");
-        let scale = f64::from(target) / f64::from(image.height());
-        let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
-        image.resize_exact(width, target, image::imageops::FilterType::Lanczos3)
-    } else {
-        image
-    };
+    timings.insert("read_ms", elapsed_ms(phase_started));
     let output_format = target_format.unwrap_or_else(|| "png".to_owned());
-    let (buffer, quality_kind, quality) =
-        encode_archive_output(&output, &output_format, spec.quality)?;
+    let encoding_format = if wants_convert {
+        spec.format.clone()
+    } else {
+        output_format.clone()
+    };
+    let encoding_quality = spec.quality;
+    let from_bytes = bytes.len() as u64;
+    let (buffer, from, to, quality_kind, quality, encoding_timings) =
+        tokio::task::spawn_blocking(move || {
+            image_processing_service::run(|| {
+                let mut timings = BTreeMap::new();
+                let phase_started = Instant::now();
+                let image = image::load_from_memory(&bytes).map_err(|error| {
+                    AppError::Image(format!("cannot decode archive source: {error}"))
+                })?;
+                timings.insert("decode_ms", elapsed_ms(phase_started));
+                let from = (image.width(), image.height());
+                let phase_started = Instant::now();
+                let output = if needs_resize {
+                    let target = target_height.expect("resize requires a resolved target height");
+                    let scale = f64::from(target) / f64::from(image.height());
+                    let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
+                    image.resize_exact(width, target, image::imageops::FilterType::Lanczos3)
+                } else {
+                    image
+                };
+                if needs_resize {
+                    timings.insert("resize_ms", elapsed_ms(phase_started));
+                }
+                let to = (output.width(), output.height());
+                let phase_started = Instant::now();
+                let (buffer, quality_kind, quality) =
+                    encode_archive_output(&output, &encoding_format, encoding_quality)?;
+                timings.insert("encode_ms", elapsed_ms(phase_started));
+                Ok((buffer, from, to, quality_kind, quality, timings))
+            })
+        })
+        .await
+        .map_err(|error| AppError::Image(format!("archive image task failed: {error}")))??;
+    timings.extend(encoding_timings);
     let temporary = destination_root.join(format!(
         ".scenevault-resize-{}.{}",
         uuid::Uuid::new_v4(),
         extension_for_format(&output_format)
     ));
     let to_bytes = buffer.len() as u64;
-    let to = (output.width(), output.height());
+    let phase_started = Instant::now();
     tokio::fs::write(&temporary, &buffer).await?;
+    timings.insert("write_ms", elapsed_ms(phase_started));
+    timings.insert("total_ms", elapsed_ms(started));
     Ok(PreparedSource {
         path: temporary.clone(),
         temporary: Some(temporary),
         resize: Some(ResizeInfo {
             from,
             to,
-            from_bytes: bytes.len() as u64,
+            from_bytes,
             to_bytes,
             duration_ms: started.elapsed().as_secs_f64() * 1000.0,
             output_format: output_format.clone(),
@@ -633,6 +713,7 @@ async fn prepare_archive_source(
             size_policy_applied: Some(size_policy_applied),
             format_applied: Some(format_applied),
         },
+        timings,
     })
 }
 
@@ -843,10 +924,21 @@ async fn copy_tracked_archive(
         copy_verified_atomic(source, destination, &item.id, previous_hash.as_deref()).await?;
     // Persist after each individual verified output, not just after both files
     // complete. A failed avatar/DB write or restart can safely retry the image.
+    let started = Instant::now();
     sqlx::query(
         "INSERT INTO capture_archive_fingerprints(capture_item_id, path, content_hash) VALUES (?, ?, ?) ON CONFLICT(capture_item_id, path) DO UPDATE SET content_hash = excluded.content_hash",
     ).bind(&item.id).bind(capture_service::path_to_string(destination)).bind(hash)
         .execute(pool).await?;
+    perf_log_service::record_event(LogRecord {
+        level: LogLevel::Debug,
+        module: "capture.archive".to_owned(),
+        event: Some("archive_fingerprint_saved".to_owned()),
+        message: "verified archive fingerprint persisted".to_owned(),
+        capture_item_id: Some(item.id.clone()),
+        duration_ms: Some(elapsed_ms(started)),
+        outcome: Some("succeeded".to_owned()),
+        ..Default::default()
+    });
     Ok(size)
 }
 
@@ -1103,6 +1195,46 @@ async fn copy_verified_atomic(
     capture_item_id: &str,
     expected_previous_hash: Option<&str>,
 ) -> Result<(u64, String), AppError> {
+    let started = Instant::now();
+    let mut timings = BTreeMap::new();
+    let result = copy_verified_atomic_inner(
+        source,
+        destination,
+        capture_item_id,
+        expected_previous_hash,
+        &mut timings,
+    )
+    .await;
+    timings.insert("total_ms", elapsed_ms(started));
+    perf_log_service::record_event(LogRecord {
+        level: LogLevel::Debug,
+        module: "capture.archive".to_owned(),
+        event: Some("archive_copy".to_owned()),
+        message: "verified atomic archive copy".to_owned(),
+        capture_item_id: Some(capture_item_id.to_owned()),
+        duration_ms: Some(elapsed_ms(started)),
+        outcome: Some(
+            if result.is_ok() {
+                "succeeded"
+            } else {
+                "failed"
+            }
+            .to_owned(),
+        ),
+        metrics: Some(json!(timings)),
+        ..Default::default()
+    });
+    result
+}
+
+async fn copy_verified_atomic_inner(
+    source: &Path,
+    destination: &Path,
+    capture_item_id: &str,
+    expected_previous_hash: Option<&str>,
+    timings: &mut BTreeMap<&'static str, f64>,
+) -> Result<(u64, String), AppError> {
+    let phase_started = Instant::now();
     let source_metadata = tokio::fs::metadata(source).await?;
     if !source_metadata.is_file() || source_metadata.len() == 0 {
         return Err(AppError::Validation(
@@ -1111,8 +1243,12 @@ async fn copy_verified_atomic(
     }
     let expected_length = source_metadata.len();
     let expected_hash = capture_service::sha256_file(source).await?;
+    timings.insert("source_hash_ms", elapsed_ms(phase_started));
+    let phase_started = Instant::now();
+    let existing_hash = destination_hash(destination).await?;
+    timings.insert("destination_check_ms", elapsed_ms(phase_started));
     if check_destination_identity(
-        destination_hash(destination).await?.as_deref(),
+        existing_hash.as_deref(),
         &expected_hash,
         expected_previous_hash,
         destination,
@@ -1129,7 +1265,11 @@ async fn copy_verified_atomic(
         Uuid::new_v4()
     ));
     let result = async {
-        let copied = tokio::fs::copy(source, &temporary).await?;
+        let phase_started = Instant::now();
+        let copied = tokio::fs::copy(source, &temporary).await;
+        timings.insert("copy_ms", elapsed_ms(phase_started));
+        let copied = copied?;
+        let phase_started = Instant::now();
         if copied != expected_length
             || capture_service::sha256_file(&temporary).await? != expected_hash
         {
@@ -1138,6 +1278,7 @@ async fn copy_verified_atomic(
                 destination.display()
             )));
         }
+        timings.insert("temporary_verify_ms", elapsed_ms(phase_started));
         log_service::record_event(LogRecord {
             level: LogLevel::Debug,
             module: "capture.archive".to_owned(),
@@ -1148,20 +1289,23 @@ async fn copy_verified_atomic(
             ..Default::default()
         });
         // Copying to NAS can take time. Recheck immediately before promotion.
+        let phase_started = Instant::now();
+        let existing_hash = destination_hash(destination).await?;
+        timings.insert("destination_recheck_ms", elapsed_ms(phase_started));
         if check_destination_identity(
-            destination_hash(destination).await?.as_deref(),
+            existing_hash.as_deref(),
             &expected_hash,
             expected_previous_hash,
             destination,
         )? {
             return Ok((expected_length, expected_hash.clone()));
         }
-        verify_archive_promotion(
-            destination,
-            &expected_hash,
-            tokio::fs::rename(&temporary, destination).await,
-        )
-        .await?;
+        let phase_started = Instant::now();
+        let rename_result = tokio::fs::rename(&temporary, destination).await;
+        timings.insert("rename_ms", elapsed_ms(phase_started));
+        let phase_started = Instant::now();
+        verify_archive_promotion(destination, &expected_hash, rename_result).await?;
+        timings.insert("final_verify_ms", elapsed_ms(phase_started));
         log_service::record_event(LogRecord {
             level: LogLevel::Debug,
             module: "capture.archive".to_owned(),
@@ -1369,6 +1513,38 @@ mod tests {
             avatar,
             destination,
         }
+    }
+
+    #[tokio::test]
+    async fn direct_archive_rejects_replaced_source_even_with_ready_derived_outputs() {
+        let pool = db::test_pool().await;
+        let fixture = ready_to_archive(&pool).await;
+        let original = tokio::fs::read(&fixture.source).await.unwrap();
+        let replacement = b"different source";
+        assert_eq!(original.len(), replacement.len());
+        tokio::fs::write(&fixture.source, replacement)
+            .await
+            .unwrap();
+
+        let result = archive(
+            &pool,
+            CaptureItemIdInput {
+                capture_item_id: fixture.item.id.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        let current = capture_service::get_item(&pool, &fixture.item.id)
+            .await
+            .unwrap();
+        assert_eq!(current.source_file_state, "replaced");
+        assert!(current.destination_path.is_none());
+        assert!(current.asset_id.is_none());
+        assert_eq!(tokio::fs::read(&fixture.source).await.unwrap(), replacement);
+        assert_eq!(
+            tokio::fs::read(&fixture.annotated).await.unwrap(),
+            b"annotated result"
+        );
     }
 
     #[tokio::test]
@@ -2470,6 +2646,77 @@ mod storage_policy_tests {
         }
     }
 
+    #[tokio::test]
+    async fn direct_archives_use_the_prepared_extension_and_mime_type() {
+        for (format, extension, mime_type, image_format) in [
+            ("jpeg", "jpg", "image/jpeg", image::ImageFormat::Jpeg),
+            ("webp", "webp", "image/webp", image::ImageFormat::WebP),
+        ] {
+            let pool = crate::db::test_pool().await;
+            let project = crate::services::test_support::project_with_directories(&pool, "Format")
+                .await
+                .unwrap();
+            let session = crate::services::test_support::start_session(&pool, &project.project_id)
+                .await
+                .unwrap();
+            let source = project.source_directory.join("capture.png");
+            let original = png_bytes(80, 60);
+            tokio::fs::write(&source, &original).await.unwrap();
+            let item = capture_service::register_capture(
+                &pool,
+                crate::models::capture::RegisterCaptureInput {
+                    session_id: session.id,
+                    source_path: capture_service::path_to_string(&source),
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE capture_items SET classification = 'scene', status = 'archive_pending' WHERE id = ?",
+            )
+            .bind(&item.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let item = capture_service::get_item(&pool, &item.id).await.unwrap();
+            let naming = archive_naming_settings_service::get(&pool).await.unwrap();
+            let completed = archive_source_direct(
+                &pool,
+                &item,
+                &project.destination_directory,
+                "游戏截图",
+                None,
+                &naming,
+                &spec("keep", format),
+            )
+            .await
+            .unwrap();
+            let path = Path::new(completed.destination_path.as_deref().unwrap());
+            assert_eq!(
+                path.extension().and_then(|value| value.to_str()),
+                Some(extension)
+            );
+            let archived = tokio::fs::read(path).await.unwrap();
+            assert_eq!(image::guess_format(&archived).unwrap(), image_format);
+            assert_eq!(image::image_dimensions(path).unwrap(), (80, 60));
+            let stored_mime: Option<String> =
+                sqlx::query_scalar("SELECT mime_type FROM assets WHERE id = ?")
+                    .bind(completed.asset_id.as_deref())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stored_mime.as_deref(), Some(mime_type));
+            let facts = image_facts_service::read(&pool, &item.id)
+                .await
+                .unwrap()
+                .destination
+                .unwrap();
+            assert_eq!(facts.format.as_deref(), Some(format));
+            assert_eq!(facts.bytes, Some(archived.len() as u64));
+            assert_eq!(tokio::fs::read(&source).await.unwrap(), original);
+        }
+    }
+
     #[test]
     fn policy_maps_to_target_height_only_for_known_sizes() {
         assert_eq!(archive_output_height("keep"), None);
@@ -2584,6 +2831,90 @@ mod storage_policy_tests {
     }
 
     #[tokio::test]
+    async fn same_format_jpeg_applies_quality_without_resizing() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("capture.jpg");
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x * 17) as u8, (y * 23) as u8, (x * y * 7) as u8])
+        }));
+        let mut original = Vec::new();
+        image
+            .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut original,
+                100,
+            ))
+            .unwrap();
+        tokio::fs::write(&source, &original).await.unwrap();
+
+        let kept = prepare_archive_source(&source, &spec("keep", "keep"), workspace.path())
+            .await
+            .unwrap();
+        assert!(kept.temporary.is_none());
+        assert_eq!(kept.path, source);
+        assert_eq!(kept.facts.quality, None);
+
+        let mut low_spec = spec("keep", "jpeg");
+        low_spec.quality = 20;
+        let low = prepare_archive_source(&source, &low_spec, workspace.path())
+            .await
+            .unwrap();
+        let high = prepare_archive_source(&source, &spec("keep", "jpeg"), workspace.path())
+            .await
+            .unwrap();
+        assert!(low.temporary.is_some());
+        assert!(high.temporary.is_some());
+        assert_eq!(image::image_dimensions(&low.path).unwrap(), (64, 48));
+        assert_eq!(image::image_dimensions(&high.path).unwrap(), (64, 48));
+        assert_eq!(low.facts.quality_kind.as_deref(), Some("quality"));
+        assert_eq!(low.facts.quality, Some(20));
+        assert_eq!(high.facts.quality, Some(90));
+        let low_bytes = tokio::fs::read(&low.path).await.unwrap();
+        let high_bytes = tokio::fs::read(&high.path).await.unwrap();
+        assert!(low_bytes.len() < high_bytes.len());
+        assert_ne!(low_bytes, original);
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), original);
+        low.cleanup().await;
+        high.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_webp_reencodes_lossy_webp_as_lossless_while_keep_copies_it() {
+        // One-pixel lossy WebP (VP8), so passing through the original bytes
+        // cannot satisfy the explicit lossless output policy.
+        let original: &[u8] = &[
+            0x52, 0x49, 0x46, 0x46, 0x22, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50,
+            0x38, 0x20, 0x16, 0x00, 0x00, 0x00, 0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x01, 0x00,
+            0x01, 0x00, 0x0e, 0xc0, 0xfe, 0x25, 0xa4, 0x00, 0x03, 0x70, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("capture.webp");
+        tokio::fs::write(&source, original).await.unwrap();
+        let decoded_source = image::open(&source).unwrap().to_rgba8();
+        let kept = prepare_archive_source(&source, &spec("keep", "keep"), workspace.path())
+            .await
+            .unwrap();
+        assert!(kept.temporary.is_none());
+        assert_eq!(kept.path, source);
+        assert_eq!(kept.facts.quality_kind.as_deref(), Some("unknown"));
+
+        let prepared = prepare_archive_source(&source, &spec("keep", "webp"), workspace.path())
+            .await
+            .unwrap();
+        assert!(prepared.temporary.is_some());
+        let encoded = tokio::fs::read(&prepared.path).await.unwrap();
+        assert_eq!(&encoded[12..16], b"VP8L");
+        assert_eq!(
+            image::open(&prepared.path).unwrap().to_rgba8(),
+            decoded_source
+        );
+        assert_eq!(prepared.facts.quality_kind.as_deref(), Some("lossless"));
+        assert_eq!(prepared.facts.quality, None);
+        assert_eq!(prepared.facts.format_applied, Some(true));
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), original);
+        prepared.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn native_policy_follows_the_engine_size_and_marks_missing_metadata() {
         let workspace = tempdir().unwrap();
         let source = workspace.path().join("capture.png");
@@ -2592,7 +2923,7 @@ mod storage_policy_tests {
             .unwrap();
 
         let mut native = spec("native", "keep");
-        native.native_size = Some((1920, 1080));
+        native.native_size = Some((800, 1080));
         let prepared = prepare_archive_source(&source, &native, workspace.path())
             .await
             .expect("prepare");
@@ -2603,6 +2934,13 @@ mod storage_policy_tests {
         assert_eq!(prepared.facts.size_policy.as_deref(), Some("native"));
         assert_eq!(prepared.facts.size_policy_applied, Some(true));
         prepared.cleanup().await;
+
+        native.native_size = Some((6400, 4320));
+        let kept = prepare_archive_source(&source, &native, workspace.path())
+            .await
+            .unwrap();
+        assert!(kept.temporary.is_none(), "native must never upscale");
+        assert_eq!(image::image_dimensions(&kept.path).unwrap(), (3840, 2160));
 
         let missing = spec("native", "keep");
         let kept = prepare_archive_source(&source, &missing, workspace.path())

@@ -579,7 +579,7 @@ onBeforeUnmount(() => {
           </label>
           <label class="log-policy-toggle">
             <input v-model="logSettings.performanceLogging" type="checkbox" />
-            <span>性能日志写入独立文件（图片读取 / 压缩 / 扫描 / AI 请求耗时）</span>
+            <span>性能日志写入独立文件（图片加载 / 保存 / AI / 应用资源采样）</span>
           </label>
         </div>
       </form>

@@ -168,25 +168,6 @@ afterEach(() => {
 });
 
 describe("ResourceStoragePanel lifecycle", () => {
-  it("uses full-width-safe text actions for refresh controls", async () => {
-    const wrapper = mount(ResourceStoragePanel);
-    await flushPromises();
-
-    const actions = wrapper.findAll(".section-action");
-    expect(actions).toHaveLength(4);
-    expect(actions.map((button) => button.text())).toEqual([
-      "刷新",
-      "重新扫描",
-      "保存策略",
-      "数据体检",
-    ]);
-    expect(wrapper.findAll("button.icon-action")).toHaveLength(0);
-    expect(wrapper.text()).toContain("Python AI Worker");
-    expect(wrapper.text()).toContain("首次 AI 请求时按需启动");
-    expect(api.getDatabaseStartupStatus).toHaveBeenCalledTimes(1);
-    wrapper.unmount();
-  });
-
   it("samples processes while mounted and stops after unmount", async () => {
     const wrapper = mount(ResourceStoragePanel);
     await flushPromises();

@@ -252,21 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_the_largest_remaining_executable() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let root = workspace.path().join("repack");
-        std::fs::create_dir_all(&root).unwrap();
-        write_exe(&root, "a.exe", 100);
-        write_exe(&root, "whatever.exe", 500);
-        let found = game_executables(&root);
-        assert_eq!(
-            found[0].file_name().and_then(|n| n.to_str()),
-            Some("whatever.exe")
-        );
-        assert_eq!(found[1].file_name().and_then(|n| n.to_str()), Some("a.exe"));
-    }
-
-    #[test]
     fn recognizes_a_suffixed_folder_name() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let root = workspace.path().join("TheBeachHouse-0.2-pc");

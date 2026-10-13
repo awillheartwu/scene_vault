@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_IMAGE_PROCESSING_CORE_LIMIT: u32 = 4;
+pub const MIN_IMAGE_PROCESSING_CORE_LIMIT: u32 = 1;
+pub const MAX_IMAGE_PROCESSING_CORE_LIMIT: u32 = 32;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -35,8 +39,8 @@ pub struct AppSettings {
     #[serde(default = "default_thumbnail_cache_size_mb")]
     pub thumbnail_cache_size_mb: i64,
     /// Maximum worker threads exposed to CPU-heavy image processing
-    /// libraries. Capture jobs remain serial; this limits the parallelism
-    /// used inside one OpenCV/YuNet/SFace/ArcFace request.
+    /// libraries and concurrent thumbnail generations. Capture jobs remain
+    /// serial; Python requests and Rust image codecs use the same setting.
     #[serde(default = "default_image_processing_core_limit")]
     pub image_processing_core_limit: u32,
     /// Whether the local capture-output cache is trimmed automatically once
@@ -86,7 +90,7 @@ fn default_thumbnail_cache_size_mb() -> i64 {
 }
 
 fn default_image_processing_core_limit() -> u32 {
-    4
+    DEFAULT_IMAGE_PROCESSING_CORE_LIMIT
 }
 
 fn default_classify_shortcut() -> String {

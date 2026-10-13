@@ -3,6 +3,7 @@ import { isOlderCapture } from "@/lib/capture-api";
 import FaceRoiSelector from '@/components/capture/FaceRoiSelector.vue';
 import CharacterAvatar from '@/components/character/CharacterAvatar.vue';
 import { useCaptureFaceRoi } from '@/composables/useCaptureFaceRoi';
+import { useCapturePreview } from '@/composables/useCapturePreview';
 import { parseFaceBox } from '@/lib/face-box';
 import {
   characterMatchesSpeaker,
@@ -11,7 +12,7 @@ import {
 } from "@/lib/speaker-suggestion";
 import { describeError } from '@/lib/vision-errors';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useTauriEventListeners } from "@/composables/useTauriEventListeners";
 import {
   AlertCircle,
   Archive,
@@ -34,6 +35,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings2,
   Sparkles,
   Trash2,
   Unplug,
@@ -44,6 +46,7 @@ import {
 import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
 import CaptureProgress from "@/components/capture/CaptureProgress.vue";
 import CaptureDeleteDialog from "@/components/capture/CaptureDeleteDialog.vue";
+import RenpyScreenshotSettings from "@/components/capture/RenpyScreenshotSettings.vue";
 import {
   captureFileIssues,
   captureVariantReadReason,
@@ -59,13 +62,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
+import ProjectSelect from "@/components/project/ProjectSelect.vue";
+import { useProjectEngineBadges } from "@/composables/useProjectEngineBadges";
 import {
   captureApi,
   engineApi,
   captureClassificationLabel,
   captureStatusLabel,
   pathFileName,
-  pathMimeType,
   pickDirectory,
   revealPath,
   type CaptureItem,
@@ -80,6 +84,7 @@ import {
   type ProjectEngineIntegrationView,
   type ProjectGameLaunchOption,
   type CapturePolicyView,
+  type RenpyScreenshotPolicyView,
   type UnimportedCapture,
   type VerificationResult,
 } from "@/lib/capture-api";
@@ -90,6 +95,7 @@ import { archiveFormatLabel, archiveSizeLabel } from "@/lib/image-facts";
 const { isWideLayout } = useAdaptiveLayout();
 
 const projects = ref<Project[]>([]);
+const { engineVersions, refreshEngineBadges } = useProjectEngineBadges();
 const characters = ref<Character[]>([]);
 const sessions = ref<CaptureSession[]>([]);
 const items = ref<CaptureItem[]>([]);
@@ -106,20 +112,17 @@ const engineStatusLabel = computed(() => {
 });
 const engineOnline = computed(
   () =>
-    (runtime.value?.engineStatus === "configured" ||
-      runtime.value?.engineStatus === "sidecar") &&
-    !runtime.value?.workerStatus,
+    runtime.value?.engineStatus === "configured" || runtime.value?.engineStatus === "sidecar",
 );
 const projectId = ref("");
 const sourceDirs = ref<ProjectSourceDirectory[]>([]);
+const sourceDirectoriesOpen = ref(false);
 const projectDestination = ref("");
 const selectedItemId = ref<string | null>(null);
 const selectedCharacterId = ref<string | null>(null);
 const pendingClassification = ref<CaptureClassification | null>(null);
 const verificationWarning = ref<VerificationResult | null>(null);
 const search = ref("");
-const previewUrl = ref<string | null>(null);
-const previewUnavailable = ref("");
 const loading = ref(true);
 const busy = ref(false);
 const importCandidates = ref<UnimportedCapture[] | null>(null);
@@ -226,7 +229,7 @@ const sessionToolsOpen = ref(true);
 const showCharacterForm = ref(false);
 const newProjectName = ref("");
 const newCharacterName = ref("");
-const unlisteners: UnlistenFn[] = [];
+const { listen, isActive } = useTauriEventListeners();
 const stripRow = ref<HTMLElement | null>(null);
 const stripBar = ref<HTMLElement | null>(null);
 const stripThumb = ref<HTMLElement | null>(null);
@@ -259,6 +262,11 @@ const stripItems = computed(() => {
     });
 });
 const { roi: faceRoi, busy: roiBusy, blocked: roiBlocked, loading: roiLoading, error: roiError, revision: roiRevision, save: saveFaceRoi } = useCaptureFaceRoi(selectedItem, upsertItem);
+const { url: previewUrl, loading: previewLoading, unavailable: previewUnavailable, load: loadPreview } = useCapturePreview(
+  selectedItem,
+  () => selectedItem.value?.status === "completed" && selectedItem.value.destinationPath ? "destination" : "source",
+  message => toast.error(message),
+);
 watch(roiRevision, () => { verificationWarning.value = null; });
 // The last detected primary face: framing starts from it instead of an
 // arbitrary centered box.
@@ -274,6 +282,7 @@ const suggestedCharacter = computed(() => {
 // resolutions and extracted originals. Absent for every non-bridged capture.
 const engineMetadata = ref<CaptureEngineMetadata | null>(null);
 let engineMetadataRequest = 0;
+let imageFactsRequest = 0;
 const engineSuggestedCharacter = computed(() => {
   // Live match first: a character created or renamed after the capture still
   // matches the speaker name. The stored suggestion is only reused while that
@@ -355,21 +364,30 @@ async function loadEngineMetadata() {
   // its speaker suggestion can never be clicked for the new image.
   const token = ++engineMetadataRequest;
   engineMetadata.value = null;
+  if (!item) return;
+  try {
+    const metadata = await engineApi.getCaptureMetadata(item.id);
+    if (token !== engineMetadataRequest || selectedItem.value?.id !== item.id) return;
+    engineMetadata.value = metadata;
+  } catch {
+    if (token === engineMetadataRequest && selectedItem.value?.id === item.id) {
+      engineMetadata.value = null;
+    }
+  }
+}
+
+async function loadImageFacts() {
+  const item = selectedItem.value;
+  const token = ++imageFactsRequest;
   imageFacts.value = null;
   if (!item) return;
   try {
-    const [metadata, facts] = await Promise.allSettled([
-      engineApi.getCaptureMetadata(item.id),
-      // Lazy so a test/preview stub without this lookup cannot break the
-      // engine metadata fetch above.
-      Promise.resolve().then(() => captureApi.getCaptureImageFacts(item.id)),
-    ]);
-    if (token !== engineMetadataRequest) return;
-    engineMetadata.value = metadata.status === "fulfilled" ? metadata.value : null;
-    imageFacts.value = facts.status === "fulfilled" ? facts.value : null;
+    const facts = await captureApi.getCaptureImageFacts(item.id);
+    if (token === imageFactsRequest && selectedItem.value?.id === item.id) {
+      imageFacts.value = facts;
+    }
   } catch {
-    if (token === engineMetadataRequest) {
-      engineMetadata.value = null;
+    if (token === imageFactsRequest && selectedItem.value?.id === item.id) {
       imageFacts.value = null;
     }
   }
@@ -380,6 +398,12 @@ async function loadEngineMetadata() {
 const engineIntegrations = ref<ProjectEngineIntegrationView[]>([]);
 const engineDetectedRoot = ref<string | null>(null);
 const engineWorking = ref(false);
+const screenshotSettingsOpen = ref(false);
+const screenshotSettingsSaving = ref(false);
+const screenshotPolicy = ref<RenpyScreenshotPolicyView | null>(null);
+const screenshotSettingsLoading = ref(false);
+const screenshotSettingsLoadError = ref<string | null>(null);
+const screenshotSettingsWarning = ref<string | null>(null);
 const engineError = ref<string | null>(null);
 const engineConfirmUninstall = ref(false);
 const engineConfirmUninstallId = ref<string | null>(null);
@@ -397,6 +421,25 @@ const archiveSizeChoice = ref("inherit");
 const archiveFormatChoice = ref("inherit");
 const archiveQualityInherit = ref(true);
 const archiveQualityChoice = ref(90);
+const archivePolicyOpen = ref(false);
+const archivePolicySaving = ref(false);
+const archivePolicyDisabled = computed(() =>
+  !projectId.value || !archivePolicy.value || Boolean(activeSession.value) || archivePolicySaving.value,
+);
+const archiveUsesLossyQuality = computed(() => {
+  const format = archiveFormatChoice.value === "inherit"
+    ? archivePolicy.value?.globalFormat
+    : archiveFormatChoice.value;
+  return format === "jpeg" || format === "keep";
+});
+const archivePolicySummary = computed(() => {
+  const policy = archivePolicy.value;
+  if (!policy) return "归档规格暂不可用";
+  const format = archiveFormatLabel(policy.resolvedFormat);
+  const quality = policy.resolvedFormat === "jpeg"
+    ? ` q${policy.resolvedQuality}` : "";
+  return `${archiveSizeLabel(policy.resolvedSize)} · ${format}${quality}`;
+});
 const imageFacts = ref<CaptureImageFacts | null>(null);
 
 const engineButtonTitle = computed(() => {
@@ -424,13 +467,127 @@ const engineButtonTitle = computed(() => {
 });
 
 let engineStateRequest = 0;
+let engineIntegrationsRequest = 0;
+let screenshotSettingsRequest = 0;
+let screenshotSettingsLoadRequest = 0;
+let screenshotSettingsDisposed = false;
+let screenshotSettingsSavingProject: string | null = null;
+
+async function loadScreenshotSettings(): Promise<boolean> {
+  const current = projectId.value;
+  if (!current || screenshotSettingsDisposed) return false;
+  const token = ++screenshotSettingsLoadRequest;
+  const integrationsToken = ++engineIntegrationsRequest;
+  const isCurrent = () => !screenshotSettingsDisposed
+    && token === screenshotSettingsLoadRequest && projectId.value === current;
+  screenshotSettingsLoading.value = true;
+  screenshotSettingsLoadError.value = null;
+  try {
+    const [policy, integrations] = await Promise.all([
+      engineApi.getScreenshotPolicy(current),
+      engineApi.getProjectIntegration(current),
+    ]);
+    if (!isCurrent()) return false;
+    screenshotPolicy.value = policy;
+    if (integrationsToken === engineIntegrationsRequest) engineIntegrations.value = integrations;
+    screenshotSettingsWarning.value = null;
+    return true;
+  } catch (error) {
+    if (isCurrent()) screenshotSettingsLoadError.value = normalizeError(error);
+    return false;
+  } finally {
+    if (isCurrent()) screenshotSettingsLoading.value = false;
+  }
+}
+
+async function saveScreenshotSettings(autoHideUi: boolean | null, integrationId: string | null = null) {
+  const current = projectId.value;
+  if (!current || screenshotSettingsDisposed || busy.value || engineWorking.value
+    || screenshotSettingsSaving.value || screenshotSettingsLoading.value
+    || screenshotSettingsLoadError.value || !screenshotPolicy.value) return;
+  const installed = integrationId
+    ? engineIntegrations.value.find((view) => view.integration.id === integrationId
+      && view.integration.projectId === current)
+    : null;
+  if (integrationId && !installed) return;
+  const token = ++screenshotSettingsRequest;
+  const isCurrent = () => !screenshotSettingsDisposed
+    && token === screenshotSettingsRequest && projectId.value === current;
+  screenshotSettingsLoadRequest += 1;
+  engineIntegrationsRequest += 1;
+  engineWorking.value = true;
+  screenshotSettingsSaving.value = true;
+  screenshotSettingsSavingProject = current;
+  screenshotSettingsWarning.value = null;
+  try {
+    if (integrationId) {
+      const saved = await engineApi.setInstallationScreenshotPolicy(current, integrationId, autoHideUi);
+      if (!isCurrent() || !engineIntegrations.value.some((view) => view.integration.id === integrationId)) return;
+      if (saved.integration.id !== integrationId || saved.integration.projectId !== current
+        || saved.integration.autoHideUiOverride !== autoHideUi) {
+        screenshotSettingsWarning.value = saved.warning ?? "截图设置未保存，请重试。";
+        return;
+      }
+      engineIntegrations.value = engineIntegrations.value.map((view) =>
+        view.integration.id === integrationId ? saved : view,
+      );
+    } else {
+      const saved = await engineApi.setProjectScreenshotPolicy(current, autoHideUi);
+      if (!isCurrent()) return;
+      if (saved.projectAutoHideUi !== autoHideUi) {
+        screenshotSettingsWarning.value = "项目截图设置未保存，请重试。";
+        return;
+      }
+      screenshotPolicy.value = saved;
+    }
+    // Refresh both levels while retaining the engine-operation lock. A policy
+    // change may affect every inheriting installation without reinstalling it.
+    const refreshed = await loadScreenshotSettings();
+    if (!isCurrent()) return;
+    if (!refreshed) {
+      screenshotSettingsWarning.value = "设置已保存，但最新状态读取失败；请重试读取截图设置。";
+      return;
+    }
+    toast.success(engineStaleInstalls.value.length
+      ? "截图设置已保存；旧插件需要重新安装并重启游戏一次，更新后才会应用。"
+      : "截图设置已保存；已更新并重启过的插件将在下一次截图时应用。");
+  } catch (error) {
+    if (isCurrent()) screenshotSettingsWarning.value = "截图设置保存失败：" + normalizeError(error) + "。请重试。";
+  } finally {
+    // Project switches invalidate the result, but must not release this lock
+    // until the outstanding mutation ends.
+    if (!screenshotSettingsDisposed) {
+      screenshotSettingsSaving.value = false;
+      screenshotSettingsSavingProject = null;
+      engineWorking.value = false;
+      if (!isCurrent() && projectId.value) void loadEngineState();
+    }
+  }
+}
+
+function retryScreenshotSettings() {
+  if (busy.value || engineWorking.value || screenshotSettingsSaving.value || screenshotSettingsLoading.value) return;
+  void loadScreenshotSettings();
+}
+
+function saveProjectScreenshotPolicy(autoHideUi: boolean | null) {
+  void saveScreenshotSettings(autoHideUi);
+}
+
+function saveInstallationScreenshotPolicy(view: ProjectEngineIntegrationView, autoHideUi: boolean | null) {
+  if (view.integration.projectId !== projectId.value) return;
+  void saveScreenshotSettings(autoHideUi, view.integration.id);
+}
 
 async function loadEngineState() {
+  if (screenshotSettingsDisposed) return;
   const current = projectId.value;
   // Responses carry a request generation and are only applied while the same
   // project is still selected: a late answer for project A must never
   // overwrite what project B is showing.
   const token = ++engineStateRequest;
+  const canApplyIntegrations = screenshotSettingsSavingProject !== current;
+  const integrationsToken = canApplyIntegrations ? ++engineIntegrationsRequest : engineIntegrationsRequest;
   if (!current) {
     engineIntegrations.value = [];
     archivePolicy.value = null;
@@ -443,15 +600,20 @@ async function loadEngineState() {
       engineApi.getProjectIntegration(current),
       engineApi.getCapturePolicy(current).catch(() => null),
     ]);
-    if (token !== engineStateRequest || projectId.value !== current) return;
-    engineIntegrations.value = integrations;
+    if (screenshotSettingsDisposed || token !== engineStateRequest || projectId.value !== current) return;
+    if (canApplyIntegrations && integrationsToken === engineIntegrationsRequest) {
+      engineIntegrations.value = integrations;
+      void refreshEngineBadges();
+    }
     engineConfirmUninstall.value = false;
     engineConfirmUninstallId.value = null;
     engineUninstallOpen.value = false;
-    archivePolicy.value = policy;
-    if (policy) applyPolicyChoices(policy);
+    if (!archivePolicySaving.value) {
+      archivePolicy.value = policy;
+      if (policy) applyPolicyChoices(policy);
+    }
   } catch (error) {
-    if (token === engineStateRequest && projectId.value === current) {
+    if (!screenshotSettingsDisposed && token === engineStateRequest && projectId.value === current) {
       engineError.value = normalizeError(error);
     }
   }
@@ -468,8 +630,9 @@ function applyPolicyChoices(policy: CapturePolicyView) {
 
 async function saveArchivePolicy() {
   const current = projectId.value;
-  if (!current) return;
+  if (archivePolicyDisabled.value) return;
   const token = ++archiveSaveRequest;
+  archivePolicySaving.value = true;
   try {
     const policy = await engineApi.setProjectCapturePolicy({
       projectId: current,
@@ -488,6 +651,10 @@ async function saveArchivePolicy() {
     if (token === archiveSaveRequest && projectId.value === current) {
       toast.error(normalizeError(error));
       if (archivePolicy.value) applyPolicyChoices(archivePolicy.value);
+    }
+  } finally {
+    if (token === archiveSaveRequest && projectId.value === current) {
+      archivePolicySaving.value = false;
     }
   }
 }
@@ -539,6 +706,7 @@ async function installEnginePlugins(interactive = true): Promise<boolean> {
       return false;
     }
   }
+  if (projectId.value !== current || engineWorking.value) return false;
   engineWorking.value = true;
   let installed = 0;
   let failed = 0;
@@ -588,6 +756,10 @@ async function uninstallEnginePlugin(integrationId: string | null = null) {
   }
   engineConfirmUninstall.value = false;
   engineConfirmUninstallId.value = null;
+  // Reads started before uninstall must never restore the removed game row.
+  screenshotSettingsLoadRequest += 1;
+  engineIntegrationsRequest += 1;
+  screenshotSettingsLoading.value = false;
   engineWorking.value = true;
   try {
     const result = await engineApi.uninstallBridge(current, targetId);
@@ -596,7 +768,10 @@ async function uninstallEnginePlugin(integrationId: string | null = null) {
     } else {
       toast.success("插件已卸载。");
     }
-    if (projectId.value === current) await loadEngineState();
+    if (!screenshotSettingsDisposed && projectId.value === current) {
+      await loadEngineState();
+      if (screenshotSettingsOpen.value) await loadScreenshotSettings();
+    }
   } catch (error) {
     toast.error(normalizeError(error));
   } finally {
@@ -616,7 +791,7 @@ async function detectAndMaybeInstallEngine(path: string) {
     const known = engineIntegrations.value.some(
       (view) => view.integration.gameDirectory === detection.gameDirectory,
     );
-    if (known) return;
+    if (known || engineWorking.value) return;
     engineWorking.value = true;
     let warning: string | null = null;
     try {
@@ -709,9 +884,13 @@ const canSubmit = computed(
 );
 
 async function initialize() {
+  if (!isActive()) return;
   loading.value = true;
+  void refreshEngineBadges();
   try {
-    projects.value = await captureApi.listProjects();
+    const nextProjects = await captureApi.listProjects();
+    if (!isActive()) return;
+    projects.value = nextProjects;
     const savedProject = localStorage.getItem("scene-vault.capture.project");
     projectId.value = projects.value.some((project) => project.id === savedProject)
       ? savedProject!
@@ -720,29 +899,55 @@ async function initialize() {
       showProjectForm.value = true;
       localStorage.removeItem("scene-vault.capture.create-project");
     }
-    runtime.value = await captureApi.runtimeStatus();
+    const nextRuntime = await captureApi.runtimeStatus();
+    if (!isActive()) return;
+    runtime.value = nextRuntime;
     if (projectId.value) await loadProject();
   } catch (error) {
-    toast.error(normalizeError(error));
+    if (isActive()) toast.error(normalizeError(error));
   } finally {
-    loading.value = false;
+    if (isActive()) loading.value = false;
   }
 }
 
+let projectLoadRequest = 0;
+let displayedProjectId = "";
 async function loadProject() {
-  if (!projectId.value) return;
-  localStorage.setItem("scene-vault.capture.project", projectId.value);
-  [characters.value, sessions.value, sourceDirs.value] = await Promise.all([
-    captureApi.listCharacters(projectId.value),
-    captureApi.listSessions(projectId.value),
-    captureApi.listSourceDirectories(projectId.value),
+  if (!isActive()) return;
+  const current = projectId.value;
+  const request = ++projectLoadRequest;
+  if (displayedProjectId !== current) {
+    displayedProjectId = current;
+    characters.value = [];
+    sessions.value = [];
+    sourceDirs.value = [];
+    projectDestination.value = "";
+    items.value = [];
+    selectedItemId.value = null;
+    selectedCharacterId.value = null;
+    pendingClassification.value = null;
+    deferredImportCount.value = 0;
+  }
+  if (!current) return;
+  localStorage.setItem("scene-vault.capture.project", current);
+  const [nextCharacters, nextSessions, nextSources] = await Promise.all([
+    captureApi.listCharacters(current),
+    captureApi.listSessions(current),
+    captureApi.listSourceDirectories(current),
   ]);
-  const project = projects.value.find((value) => value.id === projectId.value);
+  if (request !== projectLoadRequest || projectId.value !== current) return;
+  characters.value = nextCharacters;
+  sessions.value = nextSessions;
+  sourceDirs.value = nextSources;
+  const project = projects.value.find((value) => value.id === current);
   projectDestination.value = project?.destinationDirectory ?? "";
   await refreshRecentCaptures();
-  deferredImportCount.value = activeSession.value
+  if (request !== projectLoadRequest || projectId.value !== current) return;
+  const deferred = activeSession.value
     ? await captureApi.deferredImportRecognitionCount(activeSession.value.id)
     : 0;
+  if (request !== projectLoadRequest || projectId.value !== current) return;
+  deferredImportCount.value = deferred;
   selectBestItem();
 }
 
@@ -804,7 +1009,8 @@ async function createCharacterFromSpeaker() {
 }
 
 async function addSourceDir() {
-  if (!projectId.value) {
+  const current = projectId.value;
+  if (!current) {
     toast.error("请先选择项目。");
     return;
   }
@@ -818,14 +1024,16 @@ async function addSourceDir() {
   if (!path) return;
   const directory = path;
   await runBusy(async () => {
-    sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
     try {
-      await captureApi.addSourceDirectory(projectId.value, directory);
+      await captureApi.addSourceDirectory(current, directory);
     } catch (error) {
-      sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
+      const directories = await captureApi.listSourceDirectories(current);
+      if (projectId.value === current) sourceDirs.value = directories;
       throw error;
     }
-    sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
+    const directories = await captureApi.listSourceDirectories(current);
+    if (projectId.value !== current) return;
+    sourceDirs.value = directories;
     toast.success("已添加截图目录，下次开始会话时生效。");
     void detectAndMaybeInstallEngine(directory);
   });
@@ -834,26 +1042,30 @@ async function addSourceDir() {
 async function removeSourceDir(dir: ProjectSourceDirectory) {
   await runBusy(async () => {
     await captureApi.removeSourceDirectory(dir.id);
-    sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
+    const directories = await captureApi.listSourceDirectories(dir.projectId);
+    if (projectId.value === dir.projectId) sourceDirs.value = directories;
   });
 }
 
 async function toggleSourceDir(dir: ProjectSourceDirectory) {
   await runBusy(async () => {
     await captureApi.setSourceDirectoryEnabled(dir.id, !dir.enabled);
-    sourceDirs.value = await captureApi.listSourceDirectories(projectId.value);
+    const directories = await captureApi.listSourceDirectories(dir.projectId);
+    if (projectId.value === dir.projectId) sourceDirs.value = directories;
   });
 }
 
 async function chooseDestination() {
-  if (!projectId.value) return;
+  const current = projectId.value;
+  if (!current) return;
   const path = await pickDirectory();
   if (!path) return;
   await runBusy(async () => {
-    const project = await captureApi.setProjectDestination(projectId.value, path);
-    projectDestination.value = project.destinationDirectory ?? "";
+    const project = await captureApi.setProjectDestination(current, path);
     const index = projects.value.findIndex((value) => value.id === project.id);
     if (index !== -1) projects.value[index] = project;
+    if (projectId.value !== current) return;
+    projectDestination.value = project.destinationDirectory ?? "";
     toast.success("归档目录已设置。");
   });
 }
@@ -955,6 +1167,7 @@ async function startImportedRecognition() {
 
 let recentRequest = 0;
 async function refreshRecentCaptures() {
+  if (!isActive()) return;
   const request = ++recentRequest;
   if (!projectId.value) return;
   const id = projectId.value;
@@ -1176,6 +1389,8 @@ function moveSelection(direction: number) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || archivePolicyOpen.value || sourceDirectoriesOpen.value || screenshotSettingsOpen.value) return;
+  if (event.target instanceof Element && event.target.closest('[role="dialog"]')) return;
   if (event.target instanceof Element && event.target.matches("input, textarea, select")) return;
   if (event.key === "Enter") {
     event.preventDefault();
@@ -1194,29 +1409,6 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
-let previewRequest = 0;
-async function loadPreview() {
-  const request = ++previewRequest;
-  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
-  previewUrl.value = null;
-  previewUnavailable.value = "";
-  if (!selectedItem.value) return;
-  const item = selectedItem.value;
-  const variant = item.status === "completed" && item.destinationPath ? "destination" : "source";
-  const blockedReason = captureVariantReadReason(item, variant);
-  if (blockedReason) {
-    previewUnavailable.value = blockedReason;
-    return;
-  }
-  try {
-    const bytes = await captureApi.readImage(item.id, variant);
-    if (request !== previewRequest) return;
-    previewUrl.value = URL.createObjectURL(new Blob([bytes], { type: pathMimeType(item.sourcePath) }));
-  } catch (error) {
-    if (request === previewRequest) toast.error(normalizeError(error));
-  }
-}
-
 function normalizeError(error: unknown): string {
   return describeError(error);
 }
@@ -1228,7 +1420,19 @@ watch(
     // Switching projects clears the previous project's toolbar state before
     // the new state loads.
     engineIntegrations.value = [];
+    screenshotSettingsOpen.value = false;
+    screenshotSettingsWarning.value = null;
+    screenshotPolicy.value = null;
+    screenshotSettingsLoadError.value = null;
+    screenshotSettingsLoading.value = false;
+    screenshotSettingsRequest += 1;
+    screenshotSettingsLoadRequest += 1;
+    engineIntegrationsRequest += 1;
     archivePolicy.value = null;
+    archiveSaveRequest += 1;
+    archivePolicySaving.value = false;
+    archivePolicyOpen.value = false;
+    sourceDirectoriesOpen.value = false;
     engineDetectedRoot.value = null;
     engineError.value = null;
     engineConfirmUninstall.value = false;
@@ -1240,8 +1444,11 @@ watch(
   },
   { immediate: true },
 );
-watch(() => [selectedItem.value?.id, selectedItem.value?.status, selectedItem.value?.destinationPath, selectedItem.value?.sourcePath], () => void loadPreview());
+watch(screenshotSettingsOpen, (open) => {
+  if (open && !screenshotSettingsSaving.value) void loadScreenshotSettings();
+});
 watch(() => selectedItem.value?.id, () => void loadEngineMetadata());
+watch(() => selectedItem.value, () => void loadImageFacts());
 
 // Leaving a capture invalidates the suggestion it auto-picked: the next
 // image starts from its own suggestions instead of inheriting a stale
@@ -1268,33 +1475,37 @@ onMounted(async () => {
   // Register listeners before the first load so a late metadata event that
   // arrives while initialize() is still running is not lost.
   try {
-    unlisteners.push(
-      await listen<CaptureItem>("capture:item-created", (event) => upsertItem(event.payload)),
-      await listen<CaptureItem>("capture:item-updated", (event) => upsertItem(event.payload)),
-      await listen<{ captureItemId: string }>("capture:engine-metadata-updated", (event) => {
-        if (selectedItem.value?.id === event.payload.captureItemId) void loadEngineMetadata();
-      }),
-      await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
-        const purgedId = event.payload.captureItemId;
-        if (selectedItemId.value === purgedId) {
-          selectedItemId.value = null;
-          pendingClassification.value = null;
-        }
-        void refreshRecentCaptures();
-      }),
-      await listen("capture:face-bank-rebuilt", () => void refreshRecentCaptures()),
-      await listen<CaptureRuntimeStatus>("capture:runtime-status", (event) => {
-        runtime.value = event.payload;
-      }),
-      await listen<string>("capture:runtime-error", (event) => {
-        toast.error(event.payload);
-      }),
-    );
+    await listen<CaptureItem>("capture:item-created", (event) => upsertItem(event.payload));
+    await listen<CaptureItem>("capture:item-updated", (event) => upsertItem(event.payload));
+    await listen<{ projectId: string }>("capture:project-files-updated", (event) => {
+      if (event.payload.projectId === projectId.value) void refreshRecentCaptures();
+    });
+    await listen<{ captureItemId: string }>("capture:engine-metadata-updated", (event) => {
+      if (selectedItem.value?.id === event.payload.captureItemId) void loadEngineMetadata();
+    });
+    await listen<{ captureItemId: string }>("capture:item-purged", (event) => {
+      const purgedId = event.payload.captureItemId;
+      if (selectedItemId.value === purgedId) {
+        selectedItemId.value = null;
+        pendingClassification.value = null;
+      }
+      void refreshRecentCaptures();
+    });
+    await listen("capture:face-bank-rebuilt", () => void refreshRecentCaptures());
+    await listen<CaptureRuntimeStatus>("capture:runtime-status", (event) => {
+      runtime.value = event.payload;
+    });
+    await listen<string>("capture:runtime-error", (event) => {
+      toast.error(event.payload);
+    });
   } catch {
     // Browser previews do not expose the Tauri event bridge.
   }
+  if (!isActive()) return;
   await initialize();
+  if (!isActive()) return;
   await nextTick();
+  if (!isActive()) return;
   syncStripBar();
   if (typeof ResizeObserver !== "undefined" && stripRow.value) {
     stripObserver = new ResizeObserver(() => syncStripBar());
@@ -1304,13 +1515,18 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  previewRequest++;
+  screenshotSettingsDisposed = true;
+  screenshotSettingsRequest += 1;
+  screenshotSettingsLoadRequest += 1;
+  engineIntegrationsRequest += 1;
+  engineStateRequest += 1;
+  projectLoadRequest += 1;
+  engineMetadataRequest++;
+  imageFactsRequest++;
   recentRequest++;
   stripObserver?.disconnect();
   stripObserver = null;
   window.removeEventListener("keydown", onKeydown);
-  unlisteners.forEach((unlisten) => unlisten());
-  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
 });
 </script>
 
@@ -1325,10 +1541,7 @@ onBeforeUnmount(() => {
             <Check v-if="projectId" class="session-stage-check" :size="16" aria-label="已选择项目" />
           </div>
           <div class="project-controls">
-            <select v-model="projectId" aria-label="当前项目" class="capture-select">
-              <option value="" disabled>选择项目</option>
-              <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
-            </select>
+            <ProjectSelect v-model="projectId" :projects="projects" :engine-versions="engineVersions" @open="refreshEngineBadges" />
             <button class="icon-button" type="button" aria-label="新建项目" @click="showProjectForm = !showProjectForm">
               <Plus :size="18" />
             </button>
@@ -1355,97 +1568,34 @@ onBeforeUnmount(() => {
             <h2 id="session-sources-title">截图来源</h2>
             <Check v-if="sourceDirs.some((dir) => dir.enabled)" class="session-stage-check" :size="16" aria-label="已配置截图来源" />
           </div>
-          <ul class="source-dir-list session-source-list">
-            <li v-for="dir in sourceDirs" :key="dir.id" :class="{ muted: !dir.enabled }">
-              <FolderOpen :size="15" class="source-dir-icon" />
-              <span class="source-dir-name" :title="dir.directory">{{ dir.directory }}</span>
-              <span class="source-dir-state" :class="{ online: activeSession && dir.enabled }">
-                {{ !dir.enabled ? "已暂停" : activeSession ? "监听中" : "已启用" }}
-              </span>
-              <div v-if="!activeSession" class="source-dir-actions">
-                <button type="button" :disabled="busy" @click="toggleSourceDir(dir)">
-                  {{ dir.enabled ? "暂停" : "启用" }}
-                </button>
-                <button type="button" class="danger" :disabled="busy" :aria-label="`移除 ${dir.directory}`" @click="removeSourceDir(dir)">
-                  <Trash2 :size="14" />移除
-                </button>
-              </div>
-            </li>
-            <li v-if="!sourceDirs.length" class="source-dir-empty">还没有来源目录</li>
-          </ul>
+          <button
+            type="button" class="source-directory-summary" :disabled="!projectId"
+            :title="sourceDirs[0]?.directory" aria-haspopup="dialog" aria-label="查看截图来源目录"
+            @click="sourceDirectoriesOpen = true"
+          >
+            <FolderOpen :size="16" aria-hidden="true" />
+            <span class="source-dir-name">{{ sourceDirs[0]?.directory ?? "还没有来源目录" }}</span>
+            <span v-if="sourceDirs.length > 1" class="source-directory-more" :title="`共 ${sourceDirs.length} 个来源目录`">…</span>
+            <ChevronDown :size="14" aria-hidden="true" />
+          </button>
         </section>
 
         <section class="session-stage archive-stage" aria-labelledby="session-archive-title">
           <div class="session-stage-heading">
             <span class="session-step" aria-hidden="true">3</span>
-            <h2 id="session-archive-title">归档位置</h2>
+            <h2 id="session-archive-title">归档</h2>
             <Check v-if="projectDestination" class="session-stage-check" :size="16" aria-label="已配置归档位置" />
+            <span class="archive-spec-summary" :title="archivePolicySummary">{{ archivePolicySummary }}</span>
+            <button v-if="archivePolicy" type="button" class="archive-inline-action" :disabled="!projectId" aria-haspopup="dialog" @click="archivePolicyOpen = true">调整…</button>
+            <button v-else type="button" class="archive-inline-action" :disabled="!projectId" @click="loadEngineState">重试</button>
           </div>
-          <button type="button" class="archive-path-button" :disabled="Boolean(activeSession)" @click="chooseDestination">
-            <Archive :size="16" />
-            <span :title="projectDestination">{{ projectDestination || "选择归档目录" }}</span>
-            <ChevronRight :size="15" />
-          </button>
-          <label class="archive-size-field">
-            <span>归档图规格</span>
-            <select
-              v-model="archiveSizeChoice"
-              :disabled="Boolean(activeSession) || !projectId"
-              :title="`全局默认：${archiveSizeLabel(archivePolicy?.resolvedSize)}`"
-              class="archive-size-select"
-              @change="saveArchivePolicy"
-            >
-              <option value="inherit">继承全局（{{ archiveSizeLabel(archivePolicy?.globalSize) }}）</option>
-              <option value="keep">保持原样</option>
-              <option value="1080p">1080p</option>
-              <option value="1440p">1440p</option>
-              <option value="2160p">2160p</option>
-              <option value="native">按游戏设定尺寸</option>
-            </select>
-          </label>
-          <label class="archive-size-field">
-            <span>归档格式</span>
-            <select
-              v-model="archiveFormatChoice"
-              :disabled="Boolean(activeSession) || !projectId"
-              :title="`全局默认：${archiveFormatLabel(archivePolicy?.globalFormat)}`"
-              class="archive-size-select"
-              @change="saveArchivePolicy"
-            >
-              <option value="inherit">继承全局（{{ archiveFormatLabel(archivePolicy?.globalFormat) }}）</option>
-              <option value="keep">保持原格式</option>
-              <option value="png">PNG</option>
-              <option value="jpeg">JPEG</option>
-              <option value="webp">WebP（无损）</option>
-            </select>
-          </label>
-          <div class="archive-quality-field">
-            <label
-              class="archive-quality-toggle"
-              :title="`全局默认 JPEG 质量 ${archivePolicy?.globalQuality ?? 90}`"
-            >
-              <input
-                v-model="archiveQualityInherit"
-                type="checkbox"
-                :disabled="Boolean(activeSession) || !projectId"
-                @change="saveArchivePolicy"
-              />
-              <span>跟随全局</span>
-            </label>
-            <input
-              v-model.number="archiveQualityChoice"
-              class="archive-quality-range"
-              type="range"
-              min="60"
-              max="100"
-              step="1"
-              :disabled="archiveQualityInherit || Boolean(activeSession) || !projectId"
-              :aria-label="`JPEG 质量 ${archiveQualityChoice}`"
-              @change="saveArchivePolicy"
-            />
-            <span class="archive-quality-value">{{ archiveQualityInherit ? "—" : archiveQualityChoice }}</span>
+          <div class="archive-directory-row">
+            <FolderOpen :size="16" aria-hidden="true" />
+            <span class="archive-directory" :title="projectDestination">{{ projectDestination || "未选择归档目录" }}</span>
+            <button type="button" class="archive-inline-action" :disabled="Boolean(activeSession) || !projectId" @click="chooseDestination">
+              {{ projectDestination ? "更改" : "选择" }}
+            </button>
           </div>
-          <p class="archive-quality-hint">JPEG 质量；PNG 与无损 WebP 不受影响。</p>
         </section>
 
         <section class="session-control" aria-label="会话控制">
@@ -1477,6 +1627,14 @@ onBeforeUnmount(() => {
             @click="launchProjectGame"
           >
             <Play :size="16" />启动游戏
+          </button>
+          <button
+            type="button"
+            :disabled="busy || engineWorking || !projectId"
+            aria-haspopup="dialog"
+            @click="screenshotSettingsOpen = true"
+          >
+            <Settings2 :size="16" />截图设置
           </button>
           <div v-if="gameLaunchOpen && gameLaunchOptions.length > 1" class="game-launch-list">
             <div
@@ -1573,52 +1731,58 @@ onBeforeUnmount(() => {
     <div v-else class="capture-workspace">
       <main class="capture-stage">
         <div class="stage-heading">
-          <div class="flex items-center gap-3">
-            <h1 id="capture-title">最新捕获</h1>
-            <span
-              v-if="selectedItem && selectedItem.classification !== 'unclassified'"
-              class="classification-pill"
-              :data-classification="selectedItem.classification"
-            >
-              {{ captureClassificationLabel(selectedItem.classification) }}
-            </span>
-            <span class="status-pill" :data-status="selectedItem?.status ?? 'idle'">
-              {{ selectedItem ? captureStatusLabel(selectedItem.status, selectedItem.failureStage) : "等待截图" }}
-            </span>
-            <span
-              v-for="issue in selectedItem ? captureFileIssues(selectedItem) : []"
-              :key="issue.kind"
-              class="file-state-chip"
-              :data-state="issue.state"
-            >{{ issue.label }}</span>
-          </div>
-          <div class="stage-heading-actions">
-            <div v-if="selectedItem" class="file-meta">
-              <span>{{ pathFileName(selectedItem.sourcePath) }}</span>
-              <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
+          <div class="capture-heading-row">
+            <div class="capture-heading-title">
+              <h1 id="capture-title">最新捕获</h1>
+              <span
+                v-if="selectedItem && selectedItem.classification !== 'unclassified'"
+                class="classification-pill"
+                :data-classification="selectedItem.classification"
+              >
+                {{ captureClassificationLabel(selectedItem.classification) }}
+              </span>
+              <span class="status-pill" :data-status="selectedItem?.status ?? 'idle'">
+                {{ selectedItem ? captureStatusLabel(selectedItem.status, selectedItem.failureStage) : "等待截图" }}
+              </span>
+              <span
+                v-for="issue in selectedItem ? captureFileIssues(selectedItem) : []"
+                :key="issue.kind"
+                class="file-state-chip"
+                :data-state="issue.state"
+              >{{ issue.label }}</span>
             </div>
-            <CaptureEngineChips :engine-metadata="engineMetadata" :image-facts="imageFacts" />
-            <button
-              v-if="!isWideLayout"
-              type="button"
-              class="secondary-action label-panel-trigger"
-              :aria-expanded="labelPanelOpen"
-              @click="labelPanelOpen = true"
-            >
-              <UserRound :size="16" />角色与分类
-            </button>
+            <div class="stage-heading-actions">
+              <div v-if="selectedItem" class="capture-heading-file">
+                <span :title="pathFileName(selectedItem.sourcePath)">{{ pathFileName(selectedItem.sourcePath) }}</span>
+                <span>{{ new Date(selectedItem.capturedAt).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</span>
+              </div>
+              <CaptureEngineChips :engine-metadata="engineMetadata" :image-facts="imageFacts" />
+              <button
+                v-if="!isWideLayout"
+                type="button"
+                class="secondary-action label-panel-trigger"
+                :aria-expanded="labelPanelOpen"
+                @click="labelPanelOpen = true"
+              >
+                <UserRound :size="16" />角色与分类
+              </button>
+            </div>
           </div>
         </div>
 
         <CaptureProgress persistent :deferred-count="deferredImportCount" class="stage-progress" />
 
         <div class="preview-shell" :class="{ empty: !selectedItem }">
-          <FaceRoiSelector inline v-if="selectedItem && pendingClassification === 'person' && selectedItem.status === 'awaiting_label' && selectedItem.classification === 'unclassified'" :item-id="selectedItem.id" :image-url="previewUrl" :model-value="faceRoi" :face-box="detectedFaceBox" :mode="selectedItem.faceDetectionMode === 'normalized' ? 'normalized' : 'auto'" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading" :error="roiError" @confirm="saveFaceRoi" />
+          <FaceRoiSelector inline v-if="selectedItem && pendingClassification === 'person' && selectedItem.status === 'awaiting_label' && selectedItem.classification === 'unclassified'" :item-id="selectedItem.id" :image-url="previewUrl" :image-error="previewUnavailable" :model-value="faceRoi" :face-box="detectedFaceBox" :mode="selectedItem.faceDetectionMode === 'normalized' ? 'normalized' : 'auto'" :busy="roiBusy" :loading="roiLoading" :disabled="busy || roiLoading || previewLoading" :error="roiError" @confirm="saveFaceRoi" />
           <img v-else-if="previewUrl" :src="previewUrl" :alt="selectedItem ? `${pathFileName(selectedItem.sourcePath)} 预览` : ''" />
           <div v-else-if="previewUnavailable" class="preview-unavailable">
             <ImageOff :size="44" />
             <strong>{{ previewUnavailable }}</strong>
             <span>此截图对应的文件已不可读取，可右键从 Scene Vault 移除该记录。</span>
+          </div>
+          <div v-else-if="selectedItem && previewLoading" class="preview-empty" role="status">
+            <LoaderCircle class="animate-spin" :size="32" />
+            <strong>正在加载图片…</strong>
           </div>
           <div v-else class="preview-empty">
             <ImageOff :size="44" />
@@ -1855,6 +2019,103 @@ onBeforeUnmount(() => {
       <div>{{ runtime?.queuedCount ?? 0 }} 排队 · {{ runtime?.archivePendingCount ?? 0 }} 待归档</div>
     </footer>
 
+    <RenpyScreenshotSettings
+      v-model:open="screenshotSettingsOpen"
+      :integrations="engineIntegrations"
+      :policy="screenshotPolicy"
+      :loading="screenshotSettingsLoading"
+      :load-error="screenshotSettingsLoadError"
+      :working="engineWorking || busy"
+      :saving="screenshotSettingsSaving"
+      :warning="screenshotSettingsWarning"
+      @project-change="saveProjectScreenshotPolicy"
+      @installation-change="saveInstallationScreenshotPolicy"
+      @retry="retryScreenshotSettings"
+    />
+
+    <Dialog v-model:open="sourceDirectoriesOpen">
+      <DialogContent class="source-directories-dialog">
+        <DialogTitle>截图来源目录</DialogTitle>
+        <DialogDescription>当前项目的全部来源目录。目录调整在下次开始会话时生效。</DialogDescription>
+        <ul class="source-dir-list">
+          <li v-for="dir in sourceDirs" :key="dir.id" :class="{ muted: !dir.enabled }">
+            <FolderOpen :size="15" class="source-dir-icon" />
+            <span class="source-dir-name" :title="dir.directory">{{ dir.directory }}</span>
+            <span class="source-dir-state" :class="{ online: activeSession && dir.enabled }">
+              {{ !dir.enabled ? "已暂停" : activeSession ? "监听中" : "已启用" }}
+            </span>
+            <div v-if="!activeSession" class="source-dir-actions">
+              <button type="button" :disabled="busy" @click="toggleSourceDir(dir)">{{ dir.enabled ? "暂停" : "启用" }}</button>
+              <button type="button" class="danger" :disabled="busy" :aria-label="`移除 ${dir.directory}`" @click="removeSourceDir(dir)"><Trash2 :size="14" />移除</button>
+            </div>
+          </li>
+          <li v-if="!sourceDirs.length" class="source-dir-empty">还没有来源目录</li>
+        </ul>
+        <button type="button" class="secondary-action" :disabled="busy" @click="addSourceDir"><FolderPlus :size="16" />添加截图目录</button>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="archivePolicyOpen">
+      <DialogContent class="archive-policy-dialog">
+        <DialogTitle>归档规格</DialogTitle>
+        <DialogDescription>仅设置当前项目的新归档图片，已有归档不会改变。</DialogDescription>
+        <p v-if="activeSession" class="archive-policy-note">会话运行中，请先停止监听再修改。</p>
+        <label class="archive-policy-field">
+          <span>尺寸</span>
+          <select v-model="archiveSizeChoice" aria-label="归档尺寸" :disabled="archivePolicyDisabled" @change="saveArchivePolicy">
+            <option value="inherit">继承全局（{{ archiveSizeLabel(archivePolicy?.globalSize) }}）</option>
+            <option value="keep">保持原样</option>
+            <option value="1080p">1080p</option>
+            <option value="1440p">1440p</option>
+            <option value="2160p">2160p</option>
+            <option value="native">按游戏设定尺寸</option>
+          </select>
+        </label>
+        <label class="archive-policy-field">
+          <span>格式</span>
+          <select v-model="archiveFormatChoice" aria-label="归档格式" :disabled="archivePolicyDisabled" @change="saveArchivePolicy">
+            <option value="inherit">继承全局（{{ archiveFormatLabel(archivePolicy?.globalFormat) }}）</option>
+            <option value="keep">保持原格式</option>
+            <option value="png">PNG</option>
+            <option value="jpeg">JPEG</option>
+            <option value="webp">WebP（无损）</option>
+          </select>
+        </label>
+        <div class="archive-policy-quality">
+          <div class="archive-quality-heading">
+            <span>JPEG 质量</span>
+            <span v-if="!archiveUsesLossyQuality" class="archive-quality-inactive">不适用</span>
+          </div>
+          <template v-if="archiveUsesLossyQuality">
+            <label class="archive-quality-toggle">
+              <input v-model="archiveQualityInherit" type="checkbox" :disabled="archivePolicyDisabled" @change="saveArchivePolicy" />
+              <span>跟随全局（{{ archivePolicy?.globalQuality }}）</span>
+            </label>
+            <div class="archive-quality-control">
+              <input
+                v-model.number="archiveQualityChoice"
+                class="archive-quality-range"
+                type="range"
+                min="60"
+                max="100"
+                step="1"
+                :disabled="archiveQualityInherit || archivePolicyDisabled"
+                :aria-label="`JPEG 质量 ${archiveQualityChoice}`"
+                @change="saveArchivePolicy"
+              />
+              <output class="archive-quality-value">{{ archiveQualityInherit ? archivePolicy?.globalQuality : archiveQualityChoice }}</output>
+            </div>
+            <p class="archive-policy-note">JPEG 使用此质量；保持原格式时，仅重新编码 JPEG 会应用。</p>
+          </template>
+          <p v-else class="archive-policy-note">PNG 与无损 WebP 不使用 JPEG 质量。</p>
+        </div>
+        <div class="archive-policy-footer">
+          <span role="status" aria-live="polite">{{ archivePolicySaving ? "正在保存…" : "修改后自动保存" }}</span>
+          <button type="button" class="archive-policy-done" :disabled="archivePolicySaving" @click="archivePolicyOpen = false">完成</button>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <Dialog
       v-if="importCandidates"
       :open="true"
@@ -1900,113 +2161,82 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.archive-path-button,
-.archive-size-field {
-  height: 40px;
-  border-radius: var(--radius-control);
-  background: var(--capture-surface);
-}
-
-.archive-size-field {
+.archive-directory-row {
   display: flex;
-  width: 100%;
   min-width: 0;
+  min-height: 36px;
   align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
+  gap: 8px;
   padding: 0 10px;
-  border: 1px solid var(--capture-border);
-  box-shadow: var(--inner-highlight);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--card) 75%, transparent);
 }
-
-.archive-size-field > span {
+.archive-directory-row > svg { flex: none; color: var(--muted-foreground); }
+.archive-directory { min-width: 0; flex: 1; overflow: hidden; color: var(--foreground); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.archive-inline-action {
   flex: none;
-  color: var(--capture-muted);
-  font-size: 11.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.archive-size-select {
-  width: 0;
-  min-width: 0;
-  height: 100%;
-  flex: 1;
-  padding: 0 0 0 8px;
+  min-height: 30px;
+  padding: 3px 6px;
   border: 0;
+  border-radius: 5px;
   background: transparent;
-  color: var(--foreground);
-  font-size: 11.5px;
-  text-overflow: ellipsis;
-}
-
-.archive-size-field:focus-within {
-  border-color: var(--ring);
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
-}
-
-.archive-size-select:focus-visible { outline: none; }
-
-.archive-size-select:disabled {
-  color: var(--capture-muted);
-  cursor: not-allowed;
-}
-
-.archive-quality-field {
-  display: flex;
-  height: 40px;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-  padding: 0 10px;
-  border: 1px solid var(--capture-border);
-  border-radius: var(--radius-control);
-  background: var(--capture-surface);
-  box-shadow: var(--inner-highlight);
-  color: var(--capture-muted);
-  font-size: 11.5px;
-}
-
-.archive-quality-field:focus-within {
-  border-color: var(--ring);
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
-}
-
-.archive-quality-toggle {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 6px;
+  color: var(--accent);
+  font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
+.archive-inline-action:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.archive-inline-action:disabled { color: var(--muted-foreground); cursor: not-allowed; opacity: .55; }
+.archive-stage .session-stage-heading { gap: 6px; }
+.archive-stage .session-stage-check { margin-left: 0; }
+.archive-spec-summary { min-width: 0; flex: 1; overflow: hidden; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.archive-stage .archive-inline-action { min-height: 22px; padding: 0 4px; font-size: 11px; }
+.source-directory-summary { display: flex; width: 100%; min-width: 0; min-height: 36px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: var(--radius-control); background: color-mix(in srgb, var(--card) 75%, transparent); color: var(--foreground); text-align: left; }
+.source-directory-summary > svg, .source-directory-more { flex: none; color: var(--muted-foreground); }
+.source-directory-summary:not(:disabled):hover { border-color: var(--accent); }
+.source-directories-dialog { max-width: min(620px, calc(100vw - 32px)); }
+.source-directories-dialog .source-dir-list { max-height: min(360px, 50vh); overflow-y: auto; }
+.source-directories-dialog .source-dir-list li { flex-wrap: wrap; border-color: var(--border); }
+.source-directories-dialog .source-dir-name { flex-basis: 220px; white-space: normal; overflow-wrap: anywhere; }
 
-.archive-quality-range {
-  width: 0;
+.archive-policy-dialog { max-width: min(440px, calc(100vw - 32px)); }
+.archive-policy-field { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: 12px; color: var(--foreground); font-size: 13px; }
+.archive-policy-field > select {
   min-width: 0;
-  flex: 1;
-  accent-color: var(--accent);
-}
-
-.archive-quality-range:disabled {
-  opacity: 0.5;
-}
-
-.archive-quality-value {
-  flex: none;
-  min-width: 20px;
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
   color: var(--foreground);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
+.archive-policy-field > select:disabled { color: var(--muted-foreground); cursor: not-allowed; opacity: .65; }
+.archive-policy-quality { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 13px; }
+.archive-quality-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.archive-quality-inactive { color: var(--muted-foreground); font-size: 12px; }
+.archive-quality-toggle { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
+.archive-quality-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.archive-quality-control { display: flex; align-items: center; gap: 14px; }
+.archive-quality-range { min-width: 0; flex: 1; accent-color: var(--accent); }
+.archive-quality-range:disabled { opacity: .5; }
+.archive-quality-value { flex: none; min-width: 28px; color: var(--foreground); text-align: right; font-variant-numeric: tabular-nums; }
+.archive-policy-note { margin: 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.archive-policy-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 4px; }
+.archive-policy-footer > span { color: var(--muted-foreground); font-size: 12px; }
+.archive-policy-done { min-height: 36px; padding: 0 18px; border: 0; border-radius: var(--radius-control); background: var(--accent); color: var(--accent-foreground); font-size: 12px; font-weight: 600; }
+.archive-policy-done:disabled { opacity: .55; }
 
-.archive-quality-hint {
-  margin: var(--space-1) 2px 0;
-  color: var(--capture-muted);
-  font-size: 10.5px;
-}
+.stage-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px 0; }
+.capture-heading-row { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.capture-heading-title { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 8px; }
+.stage-heading h1 { white-space: nowrap; }
+.stage-heading-actions { display: flex; min-width: 0; max-width: 100%; flex: 1; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px 14px; margin-left: auto; }
+.capture-heading-file { display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.capture-heading-file > span:first-child { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capture-heading-file > span:last-child { flex: none; white-space: nowrap; }
 
 .stage-heading .file-state-chip {
   display: inline-flex;

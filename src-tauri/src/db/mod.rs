@@ -55,7 +55,14 @@ pub async fn connect(path: &Path, create_if_missing: bool) -> Result<SqlitePool,
 }
 
 pub async fn migrate(pool: &SqlitePool) -> Result<(), AppError> {
-    MIGRATOR.run(pool).await?;
+    let mut connection = pool.acquire().await?;
+    let result = MIGRATOR.run_direct(&mut *connection).await;
+    if result.is_err() {
+        // Startup may immediately restore the previous database after a
+        // migration failure. Await release of this connection's file handle.
+        connection.close().await?;
+    }
+    result?;
     Ok(())
 }
 

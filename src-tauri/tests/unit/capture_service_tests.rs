@@ -2184,6 +2184,129 @@ async fn lists_and_imports_pre_existing_directory_images() {
 }
 
 #[tokio::test]
+async fn stale_import_skips_ignored_content_and_preserves_sources_and_project_scope() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (_workspace, _, source) = session_with_source(&pool, &proj.id).await;
+    let ignored = source.join("a-ignored.png");
+    let normal = source.join("b-normal.png");
+    tokio::fs::write(&ignored, b"removed image").await.unwrap();
+    tokio::fs::write(&normal, b"normal image").await.unwrap();
+    let session = test_support::start_session(&pool, &proj.id).await.unwrap();
+    let stale_paths = list_unimported_captures(&pool, &session.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect::<Vec<_>>();
+    assert_eq!(stale_paths.len(), 2);
+    let ignored_hash = sha256_file(&ignored).await.unwrap();
+    sqlx::query("INSERT INTO ignored_capture_contents (project_id, content_hash, source_path) VALUES (?, ?, ?)")
+        .bind(&proj.id).bind(&ignored_hash).bind(path_to_string(&ignored))
+        .execute(&pool).await.unwrap();
+
+    let listed = list_unimported_captures(&pool, &session.id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, path_to_string(&normal));
+    let imported = import_directory_captures(
+        &pool,
+        ImportDirectoryCapturesInput {
+            session_id: session.id.clone(),
+            paths: stale_paths,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].source_path, path_to_string(&normal));
+    assert_eq!(imported[0].status, "awaiting_label");
+    assert_eq!(
+        deferred_import_recognition_count(&pool, &session.id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(is_content_ignored(&pool, &proj.id, &ignored_hash)
+        .await
+        .unwrap());
+    assert_eq!(tokio::fs::read(&ignored).await.unwrap(), b"removed image");
+    assert_eq!(tokio::fs::read(&normal).await.unwrap(), b"normal image");
+    let baseline: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capture_session_baseline_files WHERE session_id = ? AND source_path = ?")
+        .bind(&session.id).bind(path_to_string(&ignored)).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        baseline, 1,
+        "ignored content retains its discovery baseline"
+    );
+
+    let other = project_service::create(
+        &pool,
+        CreateProjectInput {
+            name: "Other project".to_owned(),
+            description: None,
+            cover_asset_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (_other_workspace, other_session, other_source) =
+        session_with_source(&pool, &other.id).await;
+    let copy = other_source.join("copy.png");
+    tokio::fs::copy(&ignored, &copy).await.unwrap();
+    let other_import = import_directory_captures(
+        &pool,
+        ImportDirectoryCapturesInput {
+            session_id: other_session.id,
+            paths: vec![path_to_string(&copy)],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        other_import.len(),
+        1,
+        "ignoring one project does not affect another"
+    );
+}
+
+#[tokio::test]
+async fn changed_content_at_an_ignored_path_can_be_imported() {
+    let pool = db::test_pool().await;
+    let proj = project(&pool).await;
+    let (_workspace, session, source) = session_with_source(&pool, &proj.id).await;
+    let screenshot = source.join("reused.png");
+    tokio::fs::write(&screenshot, b"old-content").await.unwrap();
+    let ignored_hash = sha256_file(&screenshot).await.unwrap();
+    sqlx::query("INSERT INTO ignored_capture_contents (project_id, content_hash, source_path) VALUES (?, ?, ?)")
+        .bind(&proj.id).bind(&ignored_hash).bind(path_to_string(&screenshot))
+        .execute(&pool).await.unwrap();
+    assert!(list_unimported_captures(&pool, &session.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    tokio::fs::write(&screenshot, b"new-content").await.unwrap();
+    let listed = list_unimported_captures(&pool, &session.id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    let imported = import_directory_captures(
+        &pool,
+        ImportDirectoryCapturesInput {
+            session_id: session.id,
+            paths: vec![listed[0].path.clone()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(imported.len(), 1);
+    assert_ne!(
+        imported[0].content_hash.as_deref(),
+        Some(ignored_hash.as_str())
+    );
+    assert!(is_content_ignored(&pool, &proj.id, &ignored_hash)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn import_is_deduplicated_across_sessions() {
     let pool = db::test_pool().await;
     let proj = project(&pool).await;
