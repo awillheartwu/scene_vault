@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Camera, FolderKanban, History, Moon, Settings, Sun, UserRound, Vault } from "@lucide/vue";
 import { useAppStore } from "@/stores/app";
+import { version as appVersion } from "../../../src-tauri/tauri.conf.json";
 
 const appStore = useAppStore();
 
@@ -56,7 +57,7 @@ const menus = [
       </RouterLink>
     </nav>
     <div class="sidebar-footer">
-      <span class="status-dot active" /><span class="sidebar-footer-label">本地优先</span>
+      <span class="sidebar-footer-label" :title="`当前版本：${appVersion}`">v{{ appVersion }}</span>
       <button
         type="button"
         class="theme-toggle"

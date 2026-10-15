@@ -43,6 +43,11 @@
 
 ## 开发规则
 
+- 日常开发在 `dev`，可以日常提交和推送；`dev` 推送不触发安装包构建或发布。
+  完成版本收尾与实机验收后合入 `main`，正式打包从 `main` 进行；发布标签必须指向
+  已经合入 `main` 的提交。用户明确要求暂不提交时，改动继续保留在工作区。
+- 自动 CI 与发布只使用 GitHub Actions，Forgejo 用于同步代码。保留
+  `.forgejo/workflows/README.md`，阻止 Forgejo 回退读取 GitHub 工作流，不新增 Forgejo CI。
 - 保持 Commands 薄，将业务逻辑放进 Services。
 - 不在 Rust 中硬编码 AI 厂商或模型。
 - 不提交数据库、模型权重、缓存、虚拟环境、`target/` 或 `dist/`。

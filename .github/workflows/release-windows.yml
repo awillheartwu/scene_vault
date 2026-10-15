@@ -10,10 +10,21 @@ permissions:
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release commit is merged into main
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release commit must be merged into main before packaging."
+          }
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -58,7 +69,12 @@ jobs:
 
       - name: Build installers (small + AI)
         shell: pwsh
-        run: ./scripts/release-windows.ps1 -SkipAffinity -Version $($env:GITHUB_REF_NAME -replace '^v','')
+        run: |
+          $svReleaseVersion = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $svReleaseVersion = $env:GITHUB_REF_NAME -replace '^v',''
+          }
+          ./scripts/release-windows.ps1 -SkipAffinity -Version $svReleaseVersion
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
