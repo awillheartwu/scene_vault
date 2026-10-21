@@ -189,6 +189,18 @@ $env:Path = "$(Split-Path -Parent $Node);$NpmGlobal;$(Split-Path -Parent $Cargo)
 # Keep the existing build-job budget for compiler memory stability. Cargo jobs
 # are separate from CPU affinity and from the application's image-thread limit.
 $env:CARGO_BUILD_JOBS = "4"
+# Keep machine-specific home paths out of dependency panic locations in the
+# shipped executable. Encoded flags preserve paths containing spaces and any
+# existing compiler flags using Cargo's documented precedence.
+$svRustFlags = @()
+if ($env:CARGO_ENCODED_RUSTFLAGS) {
+    $svRustFlags = @($env:CARGO_ENCODED_RUSTFLAGS -split [char]31)
+} elseif ($env:RUSTFLAGS) {
+    $svRustFlags = @($env:RUSTFLAGS -split '\s+' | Where-Object { $_ })
+}
+$svHomeRemap = "--remap-path-prefix=$($env:USERPROFILE)=build-user"
+if ($svRustFlags -notcontains $svHomeRemap) { $svRustFlags += $svHomeRemap }
+$env:CARGO_ENCODED_RUSTFLAGS = $svRustFlags -join [char]31
 # Pin this PowerShell process (and therefore every child it spawns, which
 # inherit the mask) to the allowed CPUs before any heavy work starts.
 if (-not $SkipAffinity) {

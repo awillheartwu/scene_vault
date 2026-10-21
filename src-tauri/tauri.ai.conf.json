@@ -2,6 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "externalBin": ["binaries/scene-vault-ai"],
-    "resources": ["resources/models", "resources/fonts"]
+    "resources": ["resources/models", "resources/fonts", "resources/renpy_bridge"]
   }
 }
