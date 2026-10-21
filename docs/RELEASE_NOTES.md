@@ -10,9 +10,10 @@ Rust fmt、UTF-8、Vite 生产构建和发布预检通过。浏览器 mock 布�
 2026-10-21 用户确认 1.0.20 的 Windows 人工验收通过，验收对象为 `dev` 候选提交
 `b18028424060e01dab8608f0baf5f119b6568e5b` 的可运行 exe，SHA-256：
 `3d6900a4d6625e8ffc326576bf7b66300db613aef0b5c48a3ded42373cddfbcd`。
-本轮无数据库迁移。正式交付仍待候选合入 `main` 后完成打包，并分别完成仅应用包
-`dist-release/scene-vault-1.0.20-setup.exe` 与内置 AI 包
-`dist-release/scene-vault-1.0.20-ai-setup.exe` 的安装验收；发布尚未完成。
+本轮无数据库迁移。仅应用包 `dist-release/scene-vault-1.0.20-setup.exe` 与内置 AI 包
+`dist-release/scene-vault-1.0.20-ai-setup.exe` 已从 `main` 本地构建，完成版本、哈希和
+解包资源核对；内置 AI 引擎健康检查、YuNet/SFace 模型加载通过，未使用用户图片。
+安装、升级未另做人工验收；远端发布状态以发布记录为准。
 
 - **首页归档统计**：进入首页时读取当前归档目录的实际图片，主图张数包含收藏、排除头像，
   总大小包含头像及目录内保留的旧正式图；排除临时文件、回收站和 NAS 元数据，区分离线、
