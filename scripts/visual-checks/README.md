@@ -13,7 +13,7 @@ CI（需要 dev server 与 Chromium），仅在版本收尾或用户单独授权
   且不低于窗口高度的 70%，同时角色列表必须收起；
 - 每个尺寸下取消框选后列表恢复到至少两行。
 
-准备：先起前端 dev server，并准备 Playwright + Chromium（本机已有的路径如下）。
+准备：先起前端 dev server，并准备 Playwright + Chromium，将示例路径替换为本机安装位置。
 
 ```bash
 cd <repo_root>
