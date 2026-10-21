@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
@@ -83,6 +83,7 @@ export interface ProjectOverviewSummary {
   processingCount: number;
   completedCount: number;
   failedCount: number;
+  /** Recorded source sizes; home uses the separate archive directory scan. */
   totalBytes: number;
   engine: string | null;
   /** Distinct engine versions of this project's installs (e.g. "8.1.3,7");
@@ -96,6 +97,16 @@ export interface ProjectOverviewSummary {
   lastActivityAt: string;
   latestCaptureItemId: string | null;
   coverCaptureItemId: string | null;
+}
+
+export interface ProjectArchiveUsage {
+  projectId: string;
+  state: "ready" | "unconfigured" | "unavailable" | "missing" | "partial" | "error";
+  mainImageCount: number | null;
+  avatarImageCount: number | null;
+  totalBytes: number | null;
+  scannedAt: string;
+  message: string | null;
 }
 
 export interface ProjectDeletionPreview {
@@ -832,6 +843,19 @@ export const captureApi = {
   listProjects: () => invoke<Project[]>("list_projects"),
   listProjectOverviews: () =>
     invoke<ProjectOverviewSummary[]>("list_project_overviews"),
+  listProjectArchiveUsage: (
+    requestId: string,
+    onProgress: (usage: ProjectArchiveUsage) => void,
+  ) => {
+    const channel = new Channel<ProjectArchiveUsage>();
+    channel.onmessage = onProgress;
+    return invoke<ProjectArchiveUsage[]>("list_project_archive_usage", {
+      requestId,
+      onProgress: channel,
+    });
+  },
+  cancelProjectArchiveUsage: (requestId: string) =>
+    invoke<void>("cancel_project_archive_usage", { requestId }),
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { input: { projectId, name } }),
   previewProjectDelete: (projectId: string) =>

@@ -10,14 +10,40 @@ use crate::{
             SetProjectCapturePolicyInput,
         },
         project::{
-            AddProjectSourceDirectoryInput, CreateProjectInput, Project, ProjectDeletionPreview,
-            ProjectOverviewSummary, ProjectSourceDirectory, RemoveProjectSourceDirectoryInput,
-            RenameProjectInput, SetProjectCoverInput, SetProjectDestinationInput,
-            SetProjectSourceDirectoryEnabledInput,
+            AddProjectSourceDirectoryInput, CreateProjectInput, Project, ProjectArchiveUsage,
+            ProjectDeletionPreview, ProjectOverviewSummary, ProjectSourceDirectory,
+            RemoveProjectSourceDirectoryInput, RenameProjectInput, SetProjectCoverInput,
+            SetProjectDestinationInput, SetProjectSourceDirectoryEnabledInput,
         },
     },
-    services::{archive_output_settings_service, log_service, project_service},
+    services::{
+        archive_output_settings_service, log_service, project_archive_usage_service,
+        project_service,
+    },
 };
+
+#[tauri::command]
+pub async fn list_project_archive_usage(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    request_id: String,
+    on_progress: tauri::ipc::Channel<ProjectArchiveUsage>,
+) -> Result<Vec<ProjectArchiveUsage>, AppError> {
+    project_archive_usage_service::list(&state.pool, window.label(), &request_id, |usage| {
+        // A closed page no longer needs progress; the final result remains the
+        // fallback for callers that do not consume individual updates.
+        let _ = on_progress.send(usage);
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn cancel_project_archive_usage(
+    window: tauri::WebviewWindow,
+    request_id: String,
+) -> Result<(), AppError> {
+    project_archive_usage_service::cancel(window.label(), &request_id)
+}
 
 #[tauri::command]
 pub async fn create_project(

@@ -41,9 +41,12 @@ describe("image facts formatting", () => {
 
   it("summarizes the archive policy for the project home", () => {
     expect(archiveSpecSummary("keep", "keep", 90)).toBe("保持原样");
-    expect(archiveSpecSummary("native", "keep", 90)).toBe("按游戏设定尺寸");
-    expect(archiveSpecSummary("1080p", "jpeg", 92)).toBe("1080p · JPEG · q92");
-    expect(archiveSpecSummary("1080p", "webp", 92)).toBe("1080p · WebP（无损）");
+    expect(archiveSpecSummary("native", "keep", 90)).toBe("游戏尺寸 · 原格式");
+    expect(archiveSpecSummary("keep", "jpeg", 92)).toBe("原尺寸 · JPEG Q92");
+    expect(archiveSpecSummary("1080p", "jpeg", 92)).toBe("1080p · JPEG Q92");
+    expect(archiveSpecSummary("1080p", "jpeg", null)).toBe("1080p · JPEG");
+    expect(archiveSpecSummary("1080p", "webp", 92)).toBe("1080p · WebP 无损");
+    expect(archiveSpecSummary("native", "png", 92)).toBe("游戏尺寸 · PNG");
     expect(archiveSpecSummary("keep", "inherit", 90)).toBe("保持原样");
   });
 

@@ -60,20 +60,30 @@ export function archiveFormatLabel(format: string | null | undefined): string {
   }
 }
 
-/** One-line archive summary for the project home, e.g. `1080p · JPEG q90`. */
+/** Compact effective settings for new archives on the project home. */
 export function archiveSpecSummary(
   size: string | null | undefined,
   format: string | null | undefined,
   quality: number | null | undefined,
 ): string {
-  const parts: string[] = [];
-  const sizeLabel = archiveSizeLabel(size);
-  if (sizeLabel !== "保持原样") parts.push(sizeLabel);
-  if (format && format !== "keep" && format !== "inherit") {
-    parts.push(archiveFormatLabel(format));
-    if (format === "jpeg" && quality != null) parts.push(`q${quality}`);
-  }
-  return parts.length ? parts.join(" · ") : "保持原样";
+  const sizeLabel = size === "native" ? "游戏尺寸"
+    : ["1080p", "1440p", "2160p"].includes(size ?? "") ? size : "原尺寸";
+  const formatLabel = format === "webp" ? "WebP 无损"
+    : format === "jpeg" ? `JPEG${quality == null ? "" : ` Q${quality}`}`
+    : format === "png" ? "PNG" : "原格式";
+  return sizeLabel === "原尺寸" && formatLabel === "原格式"
+    ? "保持原样" : `${sizeLabel} · ${formatLabel}`;
+}
+
+/** Full explanation stays available independently of the compact home copy. */
+export function archiveSpecTooltip(
+  size: string | null | undefined,
+  format: string | null | undefined,
+  quality: number | null | undefined,
+): string {
+  const sizeLabel = archiveSizeLabel(size) === "保持原样" ? "保持原尺寸" : archiveSizeLabel(size);
+  const qualityLabel = format === "jpeg" && quality != null ? ` · 质量 ${quality}` : "";
+  return `新归档设置：${sizeLabel} · ${archiveFormatLabel(format)}${qualityLabel}。仅用于后续新归档图片，历史图片规格可能不同。`;
 }
 
 /** Original file line: `3840×2160 · PNG · 8.6 MB`; null when nothing known. */

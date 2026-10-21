@@ -1,52 +1,35 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   ArrowDown,
   ArrowUp,
-  ArrowRight,
   Camera,
-  CheckCircle2,
-  CircleAlert,
   FolderKanban,
   Grid2X2,
   List,
   LoaderCircle,
-  MoreHorizontal,
   Pencil,
-  Play,
   Plus,
   RefreshCw,
   Search,
   Trash2,
   TriangleAlert,
 } from "@lucide/vue";
-import CaptureThumbnail from "@/components/capture/CaptureThumbnail.vue";
-import RenpyBadge from "@/components/capture/RenpyBadge.vue";
 import PaginationControls from "@/components/common/PaginationControls.vue";
 import PageHeader from "@/components/layout/PageHeader.vue";
 import { ContextMenu } from "@/components/ui/context-menu";
 import ProjectDeleteDialog from "@/components/project/ProjectDeleteDialog.vue";
 import ProjectRenameDialog from "@/components/project/ProjectRenameDialog.vue";
+import ProjectHomeCard from "@/components/project/ProjectHomeCard.vue";
+import ProjectHomeList from "@/components/project/ProjectHomeList.vue";
 import { toast } from "@/lib/toast";
 import { useContextMenu } from "@/composables/useContextMenu";
 import {
-  archiveSpecSummary,
-  engineVersionList,
-  formatBytes,
-} from "@/lib/image-facts";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   captureApi,
   engineApi,
-  type CaptureItem,
   type CaptureRuntimeStatus,
+  type ProjectArchiveUsage,
   type ProjectOverviewSummary,
 } from "@/lib/capture-api";
 
@@ -60,6 +43,9 @@ const CURRENT_PROJECT_KEY = "scene-vault.capture.project";
 
 const router = useRouter();
 const projects = ref<ProjectOverviewSummary[]>([]);
+const archiveUsage = ref<Record<string, ProjectArchiveUsage>>({});
+let loadGeneration = 0;
+let activeArchiveRequestId: string | null = null;
 const runtime = ref<CaptureRuntimeStatus | null>(null);
 const loading = ref(true);
 const errorMessage = ref("");
@@ -68,8 +54,8 @@ const SORT_MODES: { value: SortMode; label: string }[] = [
   { value: "recent", label: "最近活跃" },
   { value: "attention", label: "待处理" },
   { value: "name", label: "名称" },
-  { value: "captures", label: "图片数" },
-  { value: "size", label: "图片总大小" },
+  { value: "captures", label: "归档主图数" },
+  { value: "size", label: "归档图片大小" },
   { value: "created", label: "创建时间" },
 ];
 const SORT_DIRECTION_DEFAULTS: Record<SortMode, SortDirection> = {
@@ -148,10 +134,18 @@ const visibleProjects = computed(() => {
     let primary = 0;
     if (sortMode.value === "name") {
       primary = left.name.localeCompare(right.name, "zh-CN", { sensitivity: "base" });
-    } else if (sortMode.value === "captures") {
-      primary = left.captureCount - right.captureCount;
-    } else if (sortMode.value === "size") {
-      primary = left.totalBytes - right.totalBytes;
+    } else if (sortMode.value === "captures" || sortMode.value === "size") {
+      const leftUsage = archiveUsage.value[left.projectId];
+      const rightUsage = archiveUsage.value[right.projectId];
+      const leftReady = leftUsage?.state === "ready";
+      const rightReady = rightUsage?.state === "ready";
+      // Unknown and offline directories always follow complete results, even
+      // when sorting ascending; they do not represent empty archives.
+      if (leftReady !== rightReady) return leftReady ? -1 : 1;
+      if (leftReady && rightReady) {
+        const field = sortMode.value === "captures" ? "mainImageCount" : "totalBytes";
+        primary = (leftUsage[field] ?? 0) - (rightUsage[field] ?? 0);
+      }
     } else if (sortMode.value === "created") {
       primary =
         new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
@@ -179,18 +173,72 @@ onMounted(() => {
   void initialize();
 });
 
+onUnmounted(() => {
+  loadGeneration += 1;
+  cancelArchiveUsage();
+});
+
 async function initialize() {
+  cancelArchiveUsage();
+  const generation = ++loadGeneration;
   loading.value = true;
   errorMessage.value = "";
+  archiveUsage.value = {};
   try {
-    [projects.value, runtime.value] = await Promise.all([
+    const [overviews, status] = await Promise.all([
       captureApi.listProjectOverviews(),
       captureApi.runtimeStatus(),
     ]);
+    if (generation !== loadGeneration) return;
+    projects.value = overviews;
+    runtime.value = status;
+    if (overviews.length) void loadArchiveUsage(generation);
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    if (generation === loadGeneration) {
+      errorMessage.value = error instanceof Error ? error.message : String(error);
+    }
   } finally {
-    loading.value = false;
+    if (generation === loadGeneration) loading.value = false;
+  }
+}
+
+function cancelArchiveUsage() {
+  const requestId = activeArchiveRequestId;
+  activeArchiveRequestId = null;
+  if (requestId) {
+    void captureApi.cancelProjectArchiveUsage(requestId).catch((error) => {
+      console.warn("取消归档目录统计失败", error);
+    });
+  }
+}
+
+async function loadArchiveUsage(generation: number) {
+  const requestId = crypto.randomUUID();
+  activeArchiveRequestId = requestId;
+  const apply = (usage: ProjectArchiveUsage) => {
+    if (generation === loadGeneration) archiveUsage.value[usage.projectId] = usage;
+  };
+  try {
+    const results = await captureApi.listProjectArchiveUsage(requestId, apply);
+    results.forEach(apply);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    const message = error instanceof Error ? error.message : String(error);
+    for (const project of projects.value) {
+      if (!archiveUsage.value[project.projectId]) {
+        apply({
+          projectId: project.projectId,
+          state: "error",
+          mainImageCount: null,
+          avatarImageCount: null,
+          totalBytes: null,
+          scannedAt: new Date().toISOString(),
+          message,
+        });
+      }
+    }
+  } finally {
+    if (activeArchiveRequestId === requestId) activeArchiveRequestId = null;
   }
 }
 
@@ -274,27 +322,6 @@ function createProject() {
   void router.push("/capture");
 }
 
-function thumbnailItem(id: string): CaptureItem {
-  return { id, sourcePath: "capture.jpg" } as CaptureItem;
-}
-
-function formatActivity(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "尚无活动";
-  return date.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function setupLabel(project: ProjectOverviewSummary): string {
-  if (!project.sourceCount && !project.destinationConfigured) return "尚未配置目录";
-  if (!project.sourceCount) return "缺少截图来源";
-  if (!project.destinationConfigured) return "缺少归档目录";
-  return `${project.sourceCount} 个截图来源`;
-}
 </script>
 
 <template>
@@ -400,217 +427,32 @@ function setupLabel(project: ProjectOverviewSummary): string {
       <button type="button" class="secondary-action" @click="search = ''">清空搜索</button>
     </div>
 
-    <div
-      v-else-if="viewMode === 'grid'"
-      class="project-grid"
-      :class="`project-grid-${Math.min(pagedProjects.length, 3)}`"
-      aria-label="项目网格"
-    >
-      <article
+    <div v-else-if="viewMode === 'grid'" class="project-grid" aria-label="项目网格">
+      <ProjectHomeCard
         v-for="project in pagedProjects"
         :key="project.projectId"
-        class="project-card"
+        :project="project"
+        :archive-usage="archiveUsage[project.projectId]"
+        @open="openProject(project.projectId)"
+        @capture="startCapture(project.projectId)"
+        @launch="launchGame(project)"
+        @rename="renameTarget = project"
+        @delete="deleteTarget = project"
         @contextmenu="onProjectContext($event, project)"
-      >
-        <button
-          type="button"
-          class="project-card-main"
-          data-context-allow
-          @click="openProject(project.projectId)"
-        >
-          <div class="project-cover">
-            <CaptureThumbnail
-              v-if="project.coverCaptureItemId || project.latestCaptureItemId"
-              :item="thumbnailItem((project.coverCaptureItemId ?? project.latestCaptureItemId)!)"
-              variant="source"
-              fallback-variant="destination"
-              size="auto"
-              :alt="`${project.name} ${project.coverCaptureItemId ? '项目封面' : '最近截图'}`"
-            />
-            <div v-else class="project-cover-empty">
-              <FolderKanban :size="32" aria-hidden="true" />
-              <span>等待第一张截图</span>
-            </div>
-            <div v-if="project.engine === 'renpy' || project.activeSessionCount" class="project-cover-badges">
-              <RenpyBadge v-if="project.engine === 'renpy'" :versions="engineVersionList(project.engineVersions)" />
-              <span v-if="project.activeSessionCount" class="active-session-badge">
-                <span />正在捕获
-              </span>
-            </div>
-          </div>
-          <div class="project-card-body">
-            <div class="project-title-row">
-              <div>
-                <h2>{{ project.name }}</h2>
-                <p>最近活动 · {{ formatActivity(project.lastActivityAt) }}</p>
-              </div>
-              <ArrowRight :size="18" aria-hidden="true" />
-            </div>
-            <p v-if="project.description" class="project-description">{{ project.description }}</p>
-            <div class="project-statuses">
-              <span v-if="project.awaitingCount" class="status pending">
-                <span />待分类 {{ project.awaitingCount }}
-              </span>
-              <span v-if="project.processingCount" class="status processing">
-                <span />处理中 {{ project.processingCount }}
-              </span>
-              <span v-if="project.failedCount" class="status failed">
-                <span />失败 {{ project.failedCount }}
-              </span>
-              <span
-                v-if="project.captureCount && !project.awaitingCount && !project.processingCount && !project.failedCount"
-                class="status completed"
-              >
-                <CheckCircle2 :size="14" aria-hidden="true" />全部已归档
-              </span>
-              <span v-if="!project.captureCount" class="status muted">尚无截图</span>
-            </div>
-            <p v-if="project.captureCount" class="project-media">
-              图片 {{ project.captureCount }} 张 · 共 {{ formatBytes(project.totalBytes) }}
-            </p>
-            <div class="project-config" :class="{ warning: !project.sourceCount || !project.destinationConfigured }">
-              <CircleAlert v-if="!project.sourceCount || !project.destinationConfigured" :size="14" aria-hidden="true" />
-              <CheckCircle2 v-else :size="14" aria-hidden="true" />
-              {{ setupLabel(project) }}
-            </div>
-            <p class="project-spec">
-              归档规格：{{ archiveSpecSummary(project.archiveOutputSize, project.archiveOutputFormat, project.archiveOutputQuality) }}
-            </p>
-          </div>
-        </button>
-        <footer class="project-card-footer">
-          <button
-            v-if="project.engine === 'renpy'"
-            type="button"
-            class="launch-project-button"
-            :aria-label="`启动游戏 ${project.name}`"
-            title="启动游戏"
-            @click="launchGame(project)"
-          >
-            <Play :size="17" aria-hidden="true" />启动游戏
-          </button>
-          <button
-            type="button"
-            class="capture-project-button"
-            :aria-label="`继续捕获 ${project.name}`"
-            title="继续捕获"
-            @click="startCapture(project.projectId)"
-          >
-            <Camera :size="17" aria-hidden="true" />继续捕获
-          </button>
-          <DropdownMenu>
-            <DropdownMenuTrigger as-child>
-              <button
-                type="button"
-                class="card-action-button"
-                :aria-label="`${project.name} 更多操作`"
-                title="更多操作"
-              >
-                <MoreHorizontal :size="18" aria-hidden="true" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" class="project-action-menu">
-              <DropdownMenuItem @select="renameTarget = project">
-                <Pencil :size="15" aria-hidden="true" />重命名
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem class="project-menu-danger" @select="deleteTarget = project">
-                <Trash2 :size="15" aria-hidden="true" />删除项目
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </footer>
-      </article>
+      />
     </div>
 
-    <div v-else class="project-list" aria-label="项目列表">
-      <div class="project-list-head" aria-hidden="true">
-        <span>项目与状态</span><span>最近活动</span>
-      </div>
-      <article
-        v-for="project in pagedProjects"
-        :key="project.projectId"
-        class="project-row"
-        @contextmenu="onProjectContext($event, project)"
-      >
-        <div class="row-project">
-          <div class="row-cover">
-            <CaptureThumbnail
-              v-if="project.coverCaptureItemId || project.latestCaptureItemId"
-              :item="thumbnailItem((project.coverCaptureItemId ?? project.latestCaptureItemId)!)"
-              variant="source"
-              fallback-variant="destination"
-              :alt="`${project.name} ${project.coverCaptureItemId ? '项目封面' : '最近截图'}`"
-            />
-            <FolderKanban v-else :size="23" aria-hidden="true" />
-          </div>
-          <div class="row-project-copy">
-            <div class="row-project-title">
-              <strong :title="project.name">{{ project.name }}</strong>
-              <RenpyBadge v-if="project.engine === 'renpy'" :versions="engineVersionList(project.engineVersions)" />
-            </div>
-            <span>{{ setupLabel(project) }}</span>
-            <div class="row-counts">
-              <span class="pending"><i />{{ project.awaitingCount }} 待分类</span>
-              <span class="processing"><i />{{ project.processingCount }} 处理中</span>
-              <span v-if="project.failedCount" class="failed"><i />{{ project.failedCount }} 失败</span>
-              <span v-if="project.captureCount" class="row-media">
-                图片 {{ project.captureCount }} 张 · 共 {{ formatBytes(project.totalBytes) }}
-              </span>
-              <span class="row-session" :class="{ active: project.activeSessionCount }">
-                {{ project.activeSessionCount ? "捕获中" : `${project.sessionCount} 个会话` }}
-              </span>
-              <span class="row-spec">
-                归档规格：{{ archiveSpecSummary(project.archiveOutputSize, project.archiveOutputFormat, project.archiveOutputQuality) }}
-              </span>
-            </div>
-          </div>
-          <div class="row-actions">
-            <button
-              v-if="project.engine === 'renpy'"
-              type="button"
-              class="row-action-button"
-              :aria-label="`启动游戏 ${project.name}`"
-              title="启动游戏"
-              @click="launchGame(project)"
-            >
-              <Play :size="17" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              class="row-action-button"
-              :aria-label="`继续捕获 ${project.name}`"
-              title="继续捕获"
-              @click="startCapture(project.projectId)"
-            >
-              <Camera :size="17" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              class="row-action-button"
-              :aria-label="`重命名 ${project.name}`"
-              title="重命名"
-              @click="renameTarget = project"
-            >
-              <Pencil :size="16" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              class="row-action-button row-action-danger"
-              :aria-label="`删除 ${project.name}`"
-              title="删除项目"
-              @click="deleteTarget = project"
-            >
-              <Trash2 :size="16" aria-hidden="true" />
-            </button>
-            <button type="button" class="open-row-button" @click="openProject(project.projectId)">
-              打开<ArrowRight :size="16" aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-        <time :datetime="project.lastActivityAt">{{ formatActivity(project.lastActivityAt) }}</time>
-      </article>
-    </div>
+    <ProjectHomeList
+      v-else
+      :projects="pagedProjects"
+      :archive-usage="archiveUsage"
+      @open="openProject($event.projectId)"
+      @capture="startCapture($event.projectId)"
+      @launch="launchGame"
+      @rename="renameTarget = $event"
+      @delete="deleteTarget = $event"
+      @contextmenu="onProjectContext"
+    />
 
     <PaginationControls
       v-if="visibleProjects.length > 0"
@@ -647,6 +489,15 @@ function setupLabel(project: ProjectOverviewSummary): string {
 
 <style scoped>
 .project-home {
+  --home-foreground: #151816;
+  --home-muted: var(--muted-foreground);
+  --home-count: #7d350e;
+  --home-size: #24547e;
+  --home-spec: #5e456f;
+  --home-warn: #925b08;
+  --home-info: #315fa8;
+  --home-danger: #b02c29;
+  --home-accent: var(--accent);
   display: flex;
   width: 100%;
   max-width: none;
@@ -656,6 +507,16 @@ function setupLabel(project: ProjectOverviewSummary): string {
   flex-direction: column;
   gap: 20px;
   margin: 0;
+}
+
+:global(.dark .project-home) {
+  --home-foreground: #f7fafc;
+  --home-count: #67e0d0;
+  --home-size: #8ed0f5;
+  --home-spec: #d0bae4;
+  --home-warn: #ffd073;
+  --home-info: #8ed0f5;
+  --home-danger: #ff8b8b;
 }
 
 .heading-actions {
@@ -692,9 +553,7 @@ function setupLabel(project: ProjectOverviewSummary): string {
 
 .new-project-button,
 .primary-action,
-.secondary-action,
-.enter-project-button,
-.open-row-button {
+.secondary-action {
   display: inline-flex;
   height: 44px;
   align-items: center;
@@ -709,16 +568,14 @@ function setupLabel(project: ProjectOverviewSummary): string {
 }
 
 .new-project-button,
-.primary-action,
-.enter-project-button {
+.primary-action {
   background: var(--accent);
   color: var(--accent-foreground);
   box-shadow: var(--inner-highlight);
 }
 
 .new-project-button:hover,
-.primary-action:hover,
-.enter-project-button:hover { box-shadow: var(--glow), var(--inner-highlight); }
+.primary-action:hover { box-shadow: var(--glow), var(--inner-highlight); }
 
 .project-toolbar {
   display: grid;
@@ -839,22 +696,6 @@ function setupLabel(project: ProjectOverviewSummary): string {
   box-shadow: var(--inner-highlight);
 }
 
-.capture-project-button,
-.launch-project-button,
-.card-action-button,
-.row-action-button,
-.row-actions > button:first-child {
-  display: grid;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--card) 58%, transparent);
-  color: var(--muted-foreground);
-  transition: border-color .18s ease, background-color .18s ease, color .18s ease, box-shadow .18s ease;
-}
-
 .view-switch button {
   display: grid;
   width: 36px;
@@ -867,20 +708,9 @@ function setupLabel(project: ProjectOverviewSummary): string {
   transition: border-color .18s ease, background-color .18s ease, color .18s ease;
 }
 
-.view-switch button:hover,
-.capture-project-button:hover,
-.launch-project-button:hover,
-.card-action-button:hover,
-.row-action-button:hover,
-.row-actions > button:first-child:hover {
+.view-switch button:hover {
   border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   color: var(--accent);
-}
-
-.card-action-danger:hover,
-.row-action-danger:hover {
-  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
-  color: var(--danger);
 }
 
 .view-switch button.active {
@@ -926,190 +756,10 @@ function setupLabel(project: ProjectOverviewSummary): string {
 .project-grid {
   display: grid;
   width: 100%;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  align-items: stretch;
+  gap: 14px;
 }
-
-.project-grid-1 {
-  grid-template-columns: minmax(0, 880px);
-  justify-content: start;
-}
-.project-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-
-.project-card {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: 14px;
-  background: var(--card);
-  box-shadow: var(--card-shadow), var(--inner-highlight);
-  transition: border-color .2s ease, box-shadow .2s ease;
-}
-
-.project-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
-  box-shadow: var(--card-shadow-hover), var(--inner-highlight);
-}
-
-.project-card-main {
-  display: block;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-}
-
-.project-cover {
-  position: relative;
-  aspect-ratio: 4 / 3;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
-}
-
-.project-grid-1 .project-cover,
-.project-grid-2 .project-cover { aspect-ratio: 16 / 9; }
-
-.project-cover :deep(img) { transition: transform .28s ease, filter .28s ease; }
-.project-card:hover .project-cover :deep(img) { transform: scale(1.025); filter: brightness(1.04); }
-
-.project-cover-empty {
-  display: flex;
-  height: 100%;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--muted-foreground);
-  font-size: 11.5px;
-}
-
-.project-cover-badges {
-  position: absolute;
-  z-index: 1;
-  top: 12px;
-  left: 12px;
-  right: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.active-session-badge {
-  display: inline-flex;
-  height: 26px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 10px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--accent) 92%, black 8%);
-  color: var(--accent-foreground);
-  font-size: 10.5px;
-  font-weight: 700;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, .28);
-}
-
-.active-session-badge span { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-
-.project-card-body { min-height: 136px; padding: 15px 16px 13px; }
-.project-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.project-title-row svg { flex: none; margin-top: 4px; color: var(--muted-foreground); transition: color .18s ease, transform .18s ease; }
-.project-card:hover .project-title-row svg { color: var(--accent); transform: translateX(2px); }
-.project-title-row h2 { margin: 0; font-size: 17px; font-weight: 750; letter-spacing: -.015em; }
-.project-title-row p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 11.5px; }
-.project-description { overflow: hidden; margin: 10px 0 0; color: var(--muted-foreground); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
-.project-spec { margin: 6px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
-
-.project-statuses { display: flex; min-height: 25px; flex-wrap: wrap; align-items: center; gap: 11px; margin-top: 14px; }
-.status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 11.5px; }
-.status > span, .row-counts i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent); }
-.status.pending, .row-counts .pending { color: var(--warn); }
-.status.processing, .row-counts .processing { color: var(--info); }
-.status.failed, .row-counts .failed { color: var(--destructive); }
-.status.completed { color: var(--ok); }
-
-.project-media { margin: 8px 0 0; color: var(--muted-foreground); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-
-.project-config {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 11px;
-  color: var(--muted-foreground);
-  font-size: 10.5px;
-}
-
-.project-config:not(.warning) { color: var(--ok); }
-.project-config.warning { color: var(--warn); }
-
-.project-card-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 12px 16px 15px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-}
-
-.capture-project-button { display: inline-flex; width: auto; padding: 0 14px; gap: 7px; color: var(--foreground); font-weight: 650; }
-.launch-project-button { display: inline-flex; width: auto; padding: 0 14px; gap: 7px; color: var(--accent); font-weight: 650; border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.launch-project-button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.project-action-menu [role="menuitem"] { display: flex; align-items: center; gap: 8px; }
-.project-menu-danger { color: var(--destructive); }
-
-.project-list {
-  width: 100%;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: 13px;
-  background: color-mix(in srgb, var(--card) 72%, transparent);
-}
-
-.project-list-head,
-.project-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px;
-  align-items: center;
-}
-
-.project-list-head {
-  min-height: 42px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--border);
-  color: var(--muted-foreground);
-  font-size: 10.5px;
-  font-weight: 650;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
-.project-row { min-height: 88px; border-bottom: 1px solid color-mix(in srgb, var(--border) 75%, transparent); }
-.project-row:last-child { border-bottom: 0; }
-.project-row:hover { background: color-mix(in srgb, var(--accent) 4%, var(--card)); }
-
-.row-project { display: grid; min-width: 0; grid-template-columns: 90px minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 9px 0 9px 14px; }
-.row-cover { display: grid; width: 90px; height: 62px; flex: none; overflow: hidden; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--muted-foreground); }
-.row-project-copy { min-width: 0; }
-.row-project-title { display: flex; min-width: 0; align-items: center; gap: 8px; }
-.row-project-title > strong, .row-project-copy > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-project-title > strong { min-width: 0; font-size: 13.5px; }
-.row-project-copy > span { margin-top: 5px; color: var(--muted-foreground); font-size: 10.5px; }
-.project-row time { padding-left: 10px; color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
-
-.row-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 13px; margin-top: 7px; }
-.row-counts span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 10.5px; white-space: nowrap; }
-.row-counts i { display: block; }
-
-.row-session { display: inline-flex; width: fit-content; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 11px; }
-.row-session.active { color: var(--accent); font-weight: 650; }
-.row-session.active::before { width: 7px; height: 7px; border-radius: 50%; background: currentColor; content: ""; }
-
-.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.open-row-button { border-color: var(--border); background: transparent; color: var(--accent); }
-.open-row-button:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
 .project-footer {
   display: flex;
@@ -1125,28 +775,14 @@ function setupLabel(project: ProjectOverviewSummary): string {
 
 @media (max-width: 1220px) {
   .runtime-pill { display: none; }
-  .project-list-head,
-  .project-row { grid-template-columns: minmax(0, 1fr) 105px; }
 }
 
 @media (max-width: 1120px) {
-  .project-grid,
-  .project-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .project-grid-1 { grid-template-columns: minmax(0, 880px); }
   .project-toolbar { position: sticky; z-index: 10; top: -1px; grid-template-columns: minmax(0, 1fr); padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--background) 92%, transparent); backdrop-filter: var(--panel-blur); }
   .project-sort { margin-right: auto; }
-  .project-cover { aspect-ratio: 16 / 9; }
-}
-
-@media (max-width: 560px) {
-  .project-grid { grid-template-columns: minmax(0, 1fr); }
-  .project-grid-1 { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .project-card,
-  .project-cover :deep(img),
-  .project-title-row svg,
   .view-switch button,
   .new-project-button { transition: none; }
 }

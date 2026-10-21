@@ -40,6 +40,7 @@ pub struct ProjectOverviewSummary {
     pub failed_count: i64,
     /// Sum of the recorded source sizes of the listed captures. Private
     /// captures stay out of the totals, exactly like the counts above.
+    /// Home displays the independent ProjectArchiveUsage directory snapshot.
     pub total_bytes: i64,
     /// Engine badge for the project home (currently only `renpy`).
     pub engine: Option<String>,
@@ -56,6 +57,31 @@ pub struct ProjectOverviewSummary {
     pub last_activity_at: String,
     pub latest_capture_item_id: Option<String>,
     pub cover_capture_item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectArchiveUsageState {
+    Ready,
+    Unconfigured,
+    Unavailable,
+    Missing,
+    Partial,
+    Error,
+}
+
+/// One read-only scan of the current archive directory, independent of capture
+/// records. Main images include private captures; bytes also include avatars.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectArchiveUsage {
+    pub project_id: String,
+    pub state: ProjectArchiveUsageState,
+    pub main_image_count: Option<u64>,
+    pub avatar_image_count: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub scanned_at: String,
+    pub message: Option<String>,
 }
 
 /// One source directory in a project's authoritative capture list.

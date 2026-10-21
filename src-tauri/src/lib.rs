@@ -377,6 +377,8 @@ pub fn run() {
             commands::project::create_project,
             commands::project::list_projects,
             commands::project::list_project_overviews,
+            commands::project::list_project_archive_usage,
+            commands::project::cancel_project_archive_usage,
             commands::project::rename_project,
             commands::project::preview_project_deletion,
             commands::project::delete_project,

@@ -27,6 +27,7 @@ pub mod perf_log_service;
 pub mod performance_monitor_service;
 pub mod process_resource_service;
 pub mod processing_settings_service;
+pub mod project_archive_usage_service;
 pub mod project_file_reconcile_service;
 pub mod project_service;
 pub mod recognition_service;
