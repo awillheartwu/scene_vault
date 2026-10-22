@@ -1,5 +1,26 @@
 # Scene Vault Release Notes
 
+## 1.0.21 — 2026-10-22
+
+本轮收尾：前端 390 项（35 个测试文件）、Windows Rust 356 项、Python 146 项
+（33 项因缺少指定的模型/图片夹具跳过）通过；Clippy 严格检查、Rust 格式、UTF-8、
+Vite 生产构建和发布预检通过。WSL 的 `pnpm test` 因当前 `node_modules` 缺少
+Linux Rollup 可选依赖无法启动，已在项目约定的 Windows 环境完成同一套前端检查。
+本轮无数据库迁移。
+
+2026-10-22 用户确认 Ren'Py 桥接修复在 Windows 实机测试通过（Strong Desire 和
+Artemis 均已成功）；1.1.12 仅移除调试日志并加固命名，按用户要求不再重复 UI 验收。
+交付版本统一为 1.0.21，标准包包含仅应用和内置 AI 两种 NSIS 安装包。
+
+- **Ren'Py 桥接 1.1.12**：修正 Strong Desire 将 `all` 定义为 Character 导致自动
+  隐藏中止的问题，以及 Artemis 将 `time` 定义为整数导致 overlay 截图路径崩溃的问题；
+  `os`、`json`、`io` 也改用桥接专用别名。新增 overlay 层 `screenshot` 按键路径并
+  支持标准 `renpy.pause`，启动暂停和普通对话不再完全收不到截图键；
+  每次交互前重新挂接 underlay/回调。移除调试用的 `state` 和动作入口日志，保留启动、
+  保存成功、不支持原因和异常日志。
+- **回归保护**：补充游戏变量覆盖 `all/time/os/json/io` 以及 overlay 截图键在标准
+  `pause` 下的回归测试，防止同类命名冲突和暂停场景再次失效。
+
 ## 1.0.20 — 2026-10-21
 
 本轮自动检查：前端 390 项（35 个测试文件）、Windows Rust 356 项通过；Python 144 项

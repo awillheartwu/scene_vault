@@ -45,6 +45,8 @@ def build_stub(tags=None, attributes=None, store=None):
         gamedir="",
         screenshot_callback=None,
         all_character_callbacks=[],
+        interact_callbacks=[],
+        overlay_screens=[],
         screen_width=1920,
         screen_height=1080,
     )
@@ -320,6 +322,32 @@ class AutoHideScreenshotTests(unittest.TestCase):
         self.assertEqual(self.events.count("save"), 1)
         document = json.loads(next(self.metadata.glob("*.scenevault.json")).read_text())
         self.assertTrue(document["uiSuppressionApplied"])
+
+    def test_game_names_cannot_shadow_bridge_modules_or_builtins(self):
+        # Strong Desire defines `all`; Artemis defines `time`, `os`, `json`,
+        # and `io`. None of those store names may break the bridge.
+        for name, value in (
+            ("all", None),
+            ("time", 4),
+            ("os", 4),
+            ("json", 4),
+            ("io", 4),
+        ):
+            self.namespace[name] = value
+        self.install()
+        self.bridge._screenshot_from_screen()
+        self.assertEqual(self.events.count("save"), 1)
+        document = json.loads(next(self.metadata.glob("*.scenevault.json")).read_text())
+        self.assertTrue(document["uiSuppressionApplied"])
+        self.assertIsInstance(self.bridge.screen_action_at, float)
+
+    def test_overlay_screen_handles_standard_pause(self):
+        self.install()
+        self.assertIn("_scenevault_screenshot_key", self.renpy.config.overlay_screens)
+        self.context._current_interact_type = "pause"
+        self.bridge._screenshot_from_screen()
+        self.assertEqual(self.events.count("save"), 1)
+        self.assertEqual(len(list(self.metadata.glob("*.scenevault.json"))), 1)
 
     def test_live_policy_changes_apply_without_reinstalling_keymap(self):
         action = self.install(False)

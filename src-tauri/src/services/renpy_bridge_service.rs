@@ -21,7 +21,7 @@ use crate::{
 pub const BRIDGE_FILE_NAME: &str = "00_scenevault_bridge.rpy";
 pub const BRIDGE_COMPILED_FILE_NAME: &str = "00_scenevault_bridge.rpyc";
 pub const BRIDGE_CONFIG_FILE_NAME: &str = "scenevault_bridge.json";
-pub const BRIDGE_VERSION: &str = "1.1.7";
+pub const BRIDGE_VERSION: &str = "1.1.12";
 
 /// Distinctive string constant inside the compiled bridge; used together with
 /// the verified source hash before the engine-compiled artifact is recorded

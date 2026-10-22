@@ -15,16 +15,16 @@
 
 init -1000 python:
     # SCENEVAULT-BRIDGE-LOGIC-BEGIN
-    import io
-    import json
-    import os
-    import time
+    import io as _sv_io
+    import json as _sv_json
+    import os as _sv_os
+    import time as _sv_time
     try:
         import builtins as _sv_builtins
     except ImportError:
         import __builtin__ as _sv_builtins
 
-    SCENEVAULT_BRIDGE_VERSION = "1.1.7"
+    SCENEVAULT_BRIDGE_VERSION = "1.1.12"
     SCENEVAULT_BRIDGE_SCHEMA = 1
 
     def _sv_text(value):
@@ -41,11 +41,11 @@ init -1000 python:
             return None
 
     def _sv_replace(source, target):
-        replacer = getattr(os, "replace", None)
+        replacer = getattr(_sv_os, "replace", None)
         if replacer is not None:
             replacer(source, target)
         else:
-            os.rename(source, target)
+            _sv_os.rename(source, target)
 
     class _SceneVaultBridge(_sv_builtins.object):
         def __init__(self):
@@ -55,6 +55,7 @@ init -1000 python:
             self.capture_in_progress = False
             self.pending_snapshot = None
             self.policy_error_logged = False
+            self.screen_action_at = 0.0
 
         # -- setup -------------------------------------------------------
 
@@ -74,6 +75,19 @@ init -1000 python:
             except Exception:
                 self.log_exception("register_character_callback")
             try:
+                callbacks = getattr(renpy.config, "interact_callbacks", None)
+                guard = self._maintain_wrapping
+                if callbacks is not None and guard not in callbacks:
+                    callbacks.append(guard)
+            except Exception:
+                self.log_exception("register_interact_guard")
+            try:
+                overlay_screens = getattr(renpy.config, "overlay_screens", None)
+                if overlay_screens is not None and "_scenevault_screenshot_key" not in overlay_screens:
+                    overlay_screens.append("_scenevault_screenshot_key")
+            except Exception:
+                self.log_exception("register_screenshot_screen")
+            try:
                 # Wrap even while disabled: inherited settings can change in
                 # the app without restarting or rewriting the game files.
                 wrapped = self._wrap_screenshot_actions()
@@ -87,12 +101,12 @@ init -1000 python:
         def _load_config(self):
             try:
                 gamedir = renpy.config.gamedir
-                path = os.path.join(gamedir, "scenevault_bridge.json")
-                if not os.path.isfile(path):
+                path = _sv_os.path.join(gamedir, "scenevault_bridge.json")
+                if not _sv_os.path.isfile(path):
                     return None
-                handle = io.open(path, "r", encoding="utf-8")
+                handle = _sv_io.open(path, "r", encoding="utf-8")
                 try:
-                    return json.loads(handle.read())
+                    return _sv_json.loads(handle.read())
                 finally:
                     handle.close()
             except Exception:
@@ -143,7 +157,7 @@ init -1000 python:
             payload = {
                 "schemaVersion": SCENEVAULT_BRIDGE_SCHEMA,
                 "bridgeVersion": SCENEVAULT_BRIDGE_VERSION,
-                "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "createdAt": _sv_time.strftime("%Y-%m-%dT%H:%M:%SZ", _sv_time.gmtime()),
             }
             errors = []
             engine_version = self._engine_version()
@@ -170,11 +184,11 @@ init -1000 python:
             return payload
 
         def on_screenshot(self, screenshot_path):
-            started = time.time()
+            started = _sv_time.time()
             if not self.config.get("metadataDirectory"):
                 return
             snapshot = self.pending_snapshot
-            if snapshot and os.path.abspath(screenshot_path) == snapshot[0]:
+            if snapshot and _sv_os.path.abspath(screenshot_path) == snapshot[0]:
                 payload = _sv_builtins.dict(snapshot[1])
             else:
                 payload = self._capture_context()
@@ -182,9 +196,9 @@ init -1000 python:
                     getattr(renpy.store, "_windows_hidden", False) else "native")
                 payload["uiSuppressionApplied"] = False
                 if self._auto_hide_enabled() and payload["captureMode"] == "native":
-                    self.log("screenshot bypassed automatic UI hiding: " + os.path.basename(screenshot_path))
-            payload["screenshot"] = {"file": os.path.basename(screenshot_path)}
-            payload["timing"] = {"callbackMs": int((time.time() - started) * 1000)}
+                    self.log("screenshot bypassed automatic UI hiding: " + _sv_os.path.basename(screenshot_path))
+            payload["screenshot"] = {"file": _sv_os.path.basename(screenshot_path)}
+            payload["timing"] = {"callbackMs": int((_sv_time.time() - started) * 1000)}
             self.write_sidecar(screenshot_path, payload)
 
         # -- optional standard-UI screenshot action ----------------------
@@ -214,15 +228,38 @@ init -1000 python:
                 wrapped += 1
             return wrapped
 
+        def _maintain_wrapping(self):
+            # Games may rebuild the underlay keymap or reset the callback
+            # after init. Reapply the wrappers before each interaction so the
+            # screenshot key cannot silently bypass auto-hide.
+            try:
+                self._wrap_screenshot_callback()
+                self._wrap_screenshot_actions()
+            except Exception:
+                self.log_exception("maintain wrapping")
+
+        def _screenshot_from_screen(self):
+            # This key is shown on the overlay layer, so it also works when a
+            # modal phone/menu screen or a standard renpy.pause owns the
+            # interaction and the underlay keymap cannot see S.
+            if self.capture_in_progress:
+                return
+            previous = getattr(renpy.store, "_screenshot", None)
+            if previous is None:
+                self.log("screen screenshot action: native action missing")
+                return
+            self.screen_action_at = _sv_time.time()
+            return self._screenshot_action(previous, from_screen=True)
+
         def _auto_hide_enabled(self):
             # Rust owns policy persistence. Python reads only this small local
             # cache file and never opens the application's SQLite database.
             path = self.config.get("screenshotPolicyFile")
             if path:
                 try:
-                    handle = io.open(path, "r", encoding="utf-8")
+                    handle = _sv_io.open(path, "r", encoding="utf-8")
                     try:
-                        policy = json.loads(handle.read())
+                        policy = _sv_json.loads(handle.read())
                     finally:
                         handle.close()
                     if policy.get("schemaVersion") != 1:
@@ -247,7 +284,7 @@ init -1000 python:
                 return "menu"
             # renpy.context() already returns Context.info in Ren'Py 7/8.
             interaction = getattr(context, "_current_interact_type", None)
-            if interaction not in ("say", "nvl", "menu"):
+            if interaction not in ("say", "nvl", "menu", "pause"):
                 return "non-story interaction"
             interface = getattr(getattr(renpy, "game", None), "interface", None)
             if interface is None:
@@ -282,35 +319,35 @@ init -1000 python:
                 return "custom hide_windows"
             layers = getattr(renpy.config, "context_clear_layers", [])
             interface_layer = getattr(renpy.config, "interface_layer", "screens")
-            if interface_layer not in layers or any(layer not in ("screens", "top", "bottom", "x52Overlay") for layer in layers):
+            if interface_layer not in layers or _sv_builtins.any(layer not in ("screens", "top", "bottom", "x52Overlay") for layer in layers):
                 return "custom context layers"
             for name, allowed in (
                 ("layers", ("master", "transient", "screens", "overlay", "x52Overlay")),
                 ("top_layers", ("top",)), ("bottom_layers", ("bottom",)),
             ):
-                if any(layer not in allowed for layer in getattr(renpy.config, name, [])):
+                if _sv_builtins.any(layer not in allowed for layer in getattr(renpy.config, name, [])):
                     return "custom display layers"
-            if "x52Overlay" in getattr(renpy.config, "layers", []) and not callable(getattr(renpy, "scene", None)):
+            if "x52Overlay" in getattr(renpy.config, "layers", []) and not _sv_builtins.callable(getattr(renpy, "scene", None)):
                 return "missing overlay API"
             if getattr(renpy.config, "always_shown_screens", []):
                 return "always-shown screens"
             ui = getattr(renpy, "ui", None)
-            if not all(callable(getattr(ui, name, None)) for name in ("timer", "keymap", "interact")):
+            if not _sv_builtins.all(_sv_builtins.callable(getattr(ui, name, None)) for name in ("timer", "keymap", "interact")):
                 return "missing UI API"
-            if not callable(getattr(renpy, "invoke_in_new_context", None)) or not callable(getattr(renpy, "screenshot", None)):
+            if not _sv_builtins.callable(getattr(renpy, "invoke_in_new_context", None)) or not _sv_builtins.callable(getattr(renpy, "screenshot", None)):
                 return "missing capture API"
             return None
 
         def _screenshot_filename(self):
             destination = renpy.config.renpy_base
             if getattr(renpy, "macapp", False):
-                destination = os.path.expanduser(u"~/Desktop")
+                destination = _sv_os.path.expanduser(u"~/Desktop")
             pattern = getattr(renpy.store, "_screenshot_pattern", None) or renpy.config.screenshot_pattern
             number = 1
             while True:
-                filename = os.path.abspath(os.path.join(destination, pattern % number))
-                if not os.path.exists(filename):
-                    self._ensure_directory(os.path.dirname(filename))
+                filename = _sv_os.path.abspath(_sv_os.path.join(destination, pattern % number))
+                if not _sv_os.path.exists(filename):
+                    self._ensure_directory(_sv_os.path.dirname(filename))
                     return filename
                 number += 1
 
@@ -356,12 +393,16 @@ init -1000 python:
             except Exception:
                 self.log_exception("notify")
 
-        def _screenshot_action(self, previous):
+        def _screenshot_action(self, previous, from_screen=False):
             if self.capture_in_progress:
+                return
+            if not from_screen and _sv_time.time() - getattr(self, "screen_action_at", 0.0) < 0.5:
                 return
             # H then S remains the game's own screenshot path. This is also
             # the explicit manual retry after an unsupported auto-hide.
-            if not self._auto_hide_enabled() or getattr(renpy.store, "_windows_hidden", False):
+            auto_hide = self._auto_hide_enabled()
+            hidden = getattr(renpy.store, "_windows_hidden", False)
+            if not auto_hide or hidden:
                 return renpy.run(previous)
             self.capture_in_progress = True
             self.save_attempted = False
@@ -381,13 +422,13 @@ init -1000 python:
                 # invoke_in_new_context restores the original display even
                 # on exceptions. Notify the game only after that restoration.
                 if result == "saved":
-                    self.log("auto-hide screenshot saved: " + os.path.basename(filename))
+                    self.log("auto-hide screenshot saved: " + _sv_os.path.basename(filename))
                     self._wrap_screenshot_callback()
                     renpy.config.screenshot_callback(filename)
                 elif result == "cancelled":
                     self._notify("Screenshot cancelled. UI restored.")
                 else:
-                    self.log("auto-hide screenshot save failed: " + os.path.basename(filename))
+                    self.log("auto-hide screenshot save failed: " + _sv_os.path.basename(filename))
                     self._notify("Screenshot save failed. Check the screenshot folder and retry. UI restored.")
             except Exception as error:
                 if self._engine_control_flow(error):
@@ -618,8 +659,8 @@ init -1000 python:
 
         def _ensure_directory(self, path):
             try:
-                if not os.path.isdir(path):
-                    os.makedirs(path)
+                if not _sv_os.path.isdir(path):
+                    _sv_os.makedirs(path)
             except Exception:
                 pass
 
@@ -629,17 +670,17 @@ init -1000 python:
             metadata_directory = self.config.get("metadataDirectory")
             if not metadata_directory:
                 return None
-            stem = os.path.splitext(os.path.basename(screenshot_path))[0]
-            return os.path.join(metadata_directory, stem + ".scenevault.json")
+            stem = _sv_os.path.splitext(_sv_os.path.basename(screenshot_path))[0]
+            return _sv_os.path.join(metadata_directory, stem + ".scenevault.json")
 
         def write_sidecar(self, screenshot_path, payload):
             target = self.sidecar_path(screenshot_path)
             if target is None:
                 return
-            self._ensure_directory(os.path.dirname(target))
+            self._ensure_directory(_sv_os.path.dirname(target))
             temporary = target + ".tmp"
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
-            handle = io.open(temporary, "w", encoding="utf-8")
+            text = _sv_json.dumps(payload, ensure_ascii=False, indent=2)
+            handle = _sv_io.open(temporary, "w", encoding="utf-8")
             try:
                 handle.write(text)
             finally:
@@ -660,12 +701,12 @@ init -1000 python:
             if not path:
                 return
             try:
-                if os.path.isfile(path) and os.path.getsize(path) > 524288:
-                    os.remove(path)
-                handle = io.open(path, "a", encoding="utf-8")
+                if _sv_os.path.isfile(path) and _sv_os.path.getsize(path) > 524288:
+                    _sv_os.remove(path)
+                handle = _sv_io.open(path, "a", encoding="utf-8")
                 try:
                     handle.write(
-                        u"[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message)
+                        u"[%s] %s\n" % (_sv_time.strftime("%Y-%m-%d %H:%M:%S"), message)
                     )
                 finally:
                     handle.close()
@@ -678,6 +719,11 @@ init -1000 python:
             bridge = _SceneVaultBridge()
             renpy.config.scenevault_bridge = bridge
         bridge.install()
+
+    def _scenevault_screen_screenshot():
+        bridge = getattr(renpy.config, "scenevault_bridge", None)
+        if bridge is not None:
+            return bridge._screenshot_from_screen()
     # SCENEVAULT-BRIDGE-LOGIC-END
 
 
@@ -686,3 +732,7 @@ init 999 python:
         _scenevault_bridge_install()
     except Exception:
         pass
+
+
+screen _scenevault_screenshot_key():
+    key "screenshot" action Function(_scenevault_screen_screenshot)
