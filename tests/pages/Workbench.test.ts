@@ -443,15 +443,13 @@ describe("Workbench", () => {
     await flushPromises();
   });
 
-  it("loads the saved character payload in parallel with project summaries", async () => {
+  it("keeps a saved character that still belongs to the project", async () => {
     localStorage.setItem("scene-vault.capture.project", "project-1");
-    localStorage.setItem("scene-vault.workbench.character.project-1", "character-1");
-    let resolveSummaries!: (value: typeof summaries) => void;
-    api.listProjectCharacterSummaries.mockReturnValue(
-      new Promise((resolve) => {
-        resolveSummaries = resolve;
-      }),
+    localStorage.setItem("scene-vault.workbench.character.project-1", "character-2");
+    api.listCharacterCaptureItemsPage.mockResolvedValue(
+      paged([{ ...item, characterId: "character-2" }]),
     );
+    api.listCharacterFaceSamples.mockResolvedValue([]);
 
     const wrapper = mount(Workbench);
     await flushPromises();
@@ -460,15 +458,31 @@ describe("Workbench", () => {
     expect(api.listProjectCharacterSummaries).toHaveBeenCalledTimes(1);
     expect(api.listCharacterCaptureItemsPage).toHaveBeenCalledWith({
       projectId: "project-1",
-      characterId: "character-1",
+      characterId: "character-2",
       page: 1,
       pageSize: 100,
     });
-    expect(api.listCharacterFaceSamples).toHaveBeenCalledWith("character-1");
+    expect(api.listCharacterFaceSamples).toHaveBeenCalledWith("character-2");
+    expect(localStorage.getItem("scene-vault.workbench.character.project-1")).toBe("character-2");
+    wrapper.unmount();
+  });
 
-    resolveSummaries(summaries);
+  it("falls back from a saved character that no longer exists", async () => {
+    localStorage.setItem("scene-vault.capture.project", "project-1");
+    localStorage.setItem("scene-vault.workbench.character.project-1", "deleted-character");
+
+    const wrapper = mount(Workbench);
     await flushPromises();
+
+    expect(api.listCharacterCaptureItemsPage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ characterId: "deleted-character" }),
+    );
+    expect(api.listCharacterCaptureItemsPage).toHaveBeenCalledWith(
+      expect.objectContaining({ characterId: "character-1" }),
+    );
+    expect(localStorage.getItem("scene-vault.workbench.character.project-1")).toBe("character-1");
     expect(wrapper.text()).toContain("Ava");
+    wrapper.unmount();
   });
 
   it("renders the previous workbench snapshot immediately while refreshing", async () => {

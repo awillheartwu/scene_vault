@@ -789,34 +789,26 @@ async function loadCharacterData(options: { manageLoading?: boolean } = {}) {
   if (manageLoading) loading.value = true;
   try {
     void refreshFaceBankModelStatus(projectIdValue);
-    const [nextSummaries, nextCharacters, requestedItems] = await Promise.all([
+    const [nextSummaries, nextCharacters] = await Promise.all([
       captureApi.listProjectCharacterSummaries(projectIdValue),
       captureApi.listCharacters(projectIdValue),
-      fetchWorkbenchItems(
-        projectIdValue,
-        viewValue,
-        requestedCharacterId,
-        itemPage.value,
-        itemPageSize.value,
-      ),
     ]);
     if (projectId.value !== projectIdValue || view.value !== viewValue) return;
     const resolvedCharacterId =
       requestedCharacterId && nextSummaries.some((summary) => summary.id === requestedCharacterId)
         ? requestedCharacterId
         : nextSummaries[0]?.id ?? null;
-    let loadedItems = requestedItems;
+    // Validate the stored selection before asking for its captures. A character
+    // deleted or merged since the last visit must fall back to a live one
+    // instead of producing "character in project" not-found errors on startup.
     if (viewValue === "characters" && resolvedCharacterId !== requestedCharacterId) {
       itemPage.value = 1;
-      loadedItems = await fetchAndApplyItems(projectIdValue, viewValue, resolvedCharacterId);
-    } else {
-      loadedItems = await applyClampedPage(
-        requestedItems,
-        projectIdValue,
-        viewValue,
-        resolvedCharacterId,
-      );
     }
+    const loadedItems = await fetchAndApplyItems(
+      projectIdValue,
+      viewValue,
+      resolvedCharacterId,
+    );
     if (projectId.value !== projectIdValue || view.value !== viewValue) return;
 
     summaries.value = nextSummaries;

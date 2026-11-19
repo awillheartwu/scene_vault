@@ -49,4 +49,8 @@ describe("describeError", () => {
     expect(describeError("conflict: original source content identity is invalid")).toContain("可能已被替换");
     expect(describeError("conflict: reset cleanup did not remove the file")).toContain("可能被其他程序占用");
   });
+
+  it("explains that a saved character no longer exists", () => {
+    expect(describeError("not found: character in project")).toContain("不存在或已被删除");
+  });
 });

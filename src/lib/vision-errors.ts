@@ -39,6 +39,7 @@ const VISION_MESSAGE_PREFIXES: [string, string][] = [
  * read it), so the wording shown to the user is mapped here instead.
  */
 const HOST_MESSAGE_PREFIXES: [string, string][] = [
+  ["not found: character in project", "所选角色不存在或已被删除，请重新选择角色"],
   ["capture changed since reset preview", "图片在预览之后发生了变化，请关闭窗口重新发起撤销"],
   ["reset file changed since preview", "目标文件在预览之后被改动，请关闭窗口重新发起撤销"],
   ["reset target changed before deletion", "目标文件在删除前被改动，已停止以避免误删"],
